@@ -214,7 +214,7 @@ def compute_section_a(df: pd.DataFrame) -> dict:
             min_idx_rel = int(np.argmin(seg_low))
             bar_start = start + min_idx_rel
             bullish_ob.append({"value": float(seg_low[min_idx_rel]), "bar_start": bar_start,
-                                "broken": False, "touch_alerted": False})
+                                "broken": False, "touch_alerted": False, "atr": float(atr[i])})
             if len(bullish_ob) > 20:
                 bullish_ob.pop(0)
 
@@ -226,7 +226,7 @@ def compute_section_a(df: pd.DataFrame) -> dict:
             max_idx_rel = int(np.argmax(seg_high))
             bar_start = start + max_idx_rel
             bearish_ob.append({"value": float(seg_high[max_idx_rel]), "bar_start": bar_start,
-                                "broken": False, "touch_alerted": False})
+                                "broken": False, "touch_alerted": False, "atr": float(atr[i])})
             if len(bearish_ob) > 20:
                 bearish_ob.pop(0)
 
@@ -267,6 +267,16 @@ def compute_section_a(df: pd.DataFrame) -> dict:
     # "OB Zone Watch" when there's a live zone nearby but nothing fired.
     def _has_live_zone(obs):
         return any(not ob["broken"] for ob in obs[-NUMBER_OB_SHOW:])
+
+    def _nearest_live_zone(obs):
+        """Newest still-live (unbroken) OB within the visible window, or None.
+        Added for the MTF dashboard (Khagen's request, 2026-10-04) - the
+        original scanner only reported zone WATCH status, not the zone's
+        actual price bounds."""
+        for ob in reversed(obs[-NUMBER_OB_SHOW:]):
+            if not ob["broken"]:
+                return ob
+        return None
 
     # --- Liquidity sweep engine (lines 266-336) ---
     ph = _pivot_high(high, LIQUIDITY_LEN, LIQUIDITY_LEN)
@@ -377,10 +387,17 @@ def compute_section_a(df: pd.DataFrame) -> dict:
             ):
                 ob_watch = "OB_ZONE_WATCH_SELL"
 
+    nearest_bull = _nearest_live_zone(bullish_ob)
+    nearest_bear = _nearest_live_zone(bearish_ob)
+    support_zone = {"low": round(nearest_bull["value"], 2), "high": round(nearest_bull["value"] + nearest_bull["atr"], 2)} if nearest_bull else None
+    resistance_zone = {"low": round(nearest_bear["value"] - nearest_bear["atr"], 2), "high": round(nearest_bear["value"], 2)} if nearest_bear else None
+
     return {
         "timestamp": str(df.index[i]),
         "close": round(float(close[i]), 2),
         "signal": signal,
         "levels": levels,
         "ob_watch": ob_watch,
+        "support_zone": support_zone,
+        "resistance_zone": resistance_zone,
     }
