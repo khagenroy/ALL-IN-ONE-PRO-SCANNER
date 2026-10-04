@@ -89,12 +89,18 @@ INTRADAY_60MIN_INTERVAL = 60
 INTRADAY_60MIN_HISTORY_DAYS = 85
 
 # --- Daily pull (builds D, and W/M by resampling) - cached, see below ---
-# liquidity_len=30 confirmed both sides needs 60+ bars on EVERY timeframe
-# including Monthly, i.e. 60+ months = 5+ years, so this reaches back ~7
-# years to give Monthly OB zones a real chance to form. UNVERIFIED whether
-# Dhan's /charts/historical accepts a single request this wide - if it
-# errors or silently truncates, paginate it.
-DAILY_HISTORY_DAYS = 2555  # ~7 years
+# compute_section_a's REAL minimum is max(ZIGZAG_LEN, LIQUIDITY_LEN)*2 +
+# VOL_MA_LEN + 10 = max(9,30)*2+20+10 = 90 bars on whatever timeframe it's
+# given - including Monthly, i.e. 90 MONTHLY bars needed, not 60 (confirmed
+# empirically 2026-10-04: a 2555-day/~7-year pull produced only 84 monthly
+# bars after resampling and compute_section_a returned None for every
+# symbol on 1M - 6 bars short of the real 90-bar floor). 3650 days (~10
+# years, ~120 monthly bars) gives real margin above that. Confirmed Dhan's
+# /charts/historical does NOT silently truncate a ~7-year request (returned
+# the full requested range), so a 10-year request is expected to behave the
+# same way - but re-verify with the same cache-file-length check if this
+# ever gets bumped further.
+DAILY_HISTORY_DAYS = 3650  # ~10 years
 DAILY_CACHE_DIR = os.path.join(os.path.dirname(__file__), "cache", "daily")
 
 TEST_SYMBOL_LIMIT = int(os.environ.get("TEST_SYMBOL_LIMIT", "0") or "0")
