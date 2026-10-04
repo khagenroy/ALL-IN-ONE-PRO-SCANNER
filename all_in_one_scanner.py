@@ -387,10 +387,29 @@ def compute_section_a(df: pd.DataFrame) -> dict:
             ):
                 ob_watch = "OB_ZONE_WATCH_SELL"
 
+    # Only report a zone when price is actually within reach of it (same
+    # 0.5x-ATR "touch" proximity the original scanner used to flag
+    # OB_ZONE_WATCH_BUY/SELL) - NOT whenever one merely exists somewhere in
+    # history. Fixed 2026-10-04: the first cut of this reported the nearest
+    # LIVE zone unconditionally, which meant a zone formed months ago that
+    # price has long since moved away from still showed up as "current" -
+    # nearly every symbol lit up on nearly every timeframe, which isn't
+    # what "OB zone" means in the original indicator (Khagen caught this:
+    # "every symbol has 6 TF OB zone how it can be").
     nearest_bull = _nearest_live_zone(bullish_ob)
     nearest_bear = _nearest_live_zone(bearish_ob)
-    support_zone = {"low": round(nearest_bull["value"], 2), "high": round(nearest_bull["value"] + nearest_bull["atr"], 2)} if nearest_bull else None
-    resistance_zone = {"low": round(nearest_bear["value"] - nearest_bear["atr"], 2), "high": round(nearest_bear["value"], 2)} if nearest_bear else None
+
+    support_zone = None
+    if nearest_bull:
+        zl, zh = nearest_bull["value"], nearest_bull["value"] + nearest_bull["atr"]
+        if close[i] <= zh + atr[i] * OB_TOUCH_ZONE_ATR_MULT:
+            support_zone = {"low": round(zl, 2), "high": round(zh, 2)}
+
+    resistance_zone = None
+    if nearest_bear:
+        zl, zh = nearest_bear["value"] - nearest_bear["atr"], nearest_bear["value"]
+        if close[i] >= zl - atr[i] * OB_TOUCH_ZONE_ATR_MULT:
+            resistance_zone = {"low": round(zl, 2), "high": round(zh, 2)}
 
     return {
         "timestamp": str(df.index[i]),
