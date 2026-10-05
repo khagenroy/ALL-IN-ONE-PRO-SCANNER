@@ -60,7 +60,7 @@ Each page links to the other. Run times on the page are shown in IST.
 - `LIVE_SCANNER_AUTORUN` - default `true` (intraday loop).
 - `SWING_SCANNER_AUTORUN` - default `true` (swing loop).
 - `LIVE_SCANNER_INTERVAL_SECONDS` - default `600` (intraday cycle length).
-- `MAX_REQUESTS_PER_SECOND` - default `4`. One limiter covers every Dhan call in the process. Dhan's Data API limit is believed to be ~5/s (unverified); lower this if you see "Rate-limited" warnings in the logs.
+- `MAX_REQUESTS_PER_SECOND` - default `4`, the STARTING rate. One self-tuning limiter covers every Dhan call in the process: each 429 from Dhan slows it down (floor 1.5/s, widened once per burst), and a long run of successes speeds it back up toward this value. Seeing a few "Dhan rate limit hit - slowing request rate" lines in the logs is normal; if it stays at the floor, lower this value.
 - `SCAN_WORKERS` - default `4` (threads overlapping network waits; the limiter still caps the rate).
 - `MAX_SYMBOLS` - default `1000`.
 - `TEST_SYMBOL_LIMIT` - default `0` (off); set for a dry run. **Don't leave it set on the service.**
@@ -79,7 +79,7 @@ two would add up against Dhan's request limit.
 
 ## Timing
 
-- Intraday cycle: ~2 calls/symbol x 1000 symbols at 4 req/s = ~8.5 min, so it fits a 10-minute cycle. The first cycle after a fresh deploy (or every ~3 days) also refetches the older 60-minute chunk (~3 calls/symbol, ~12.5 min) and simply starts the next cycle right after.
+- Intraday cycle: ~2 calls/symbol x 1000 symbols at 4 req/s = ~8.5 min, so it fits a 10-minute cycle - IF Dhan allows 4 req/s. The limiter slows itself down when Dhan returns 429s (2026-10-05: the daily endpoint did at a fixed 4/s), and then a cycle takes longer (at 2.5 req/s: ~13 min); the next cycle just starts as soon as one ends. The first cycle after a fresh deploy (or every ~3 days) also refetches the older 60-minute chunk (~3 calls/symbol, ~12.5 min) and simply starts the next cycle right after.
 - Swing scan: ~1000 daily calls = ~4-5 min once a day.
 - Compute (both sections) is only ~1 minute per 1000 symbols - the request rate is the limit.
 
@@ -91,5 +91,6 @@ Each page has two tables (Section A, Section B) with a **TF** column. A signal m
 
 - `compute_section_a` needs 90 bars on whatever timeframe it is given. That is why the daily pull is ~10 years (Monthly) and the 60-minute history is ~165 days (4H). Confirmed against live Dhan.
 - **2026-10-05:** Dhan's `/charts/historical` started returning `400 DH-905` ("Missing required fields, bad values for parameters") for ~17% of symbols (167 of 999 - e.g. RELIANCE, INFY, SUNPHARMA, LICI) on a request identical to ones that succeed for other symbols, and that worked for these same symbols the day before. Cause unknown, on Dhan's side. The swing scan uses that symbol's older cached daily history if it has one, otherwise skips it (shown as "skipped (Dhan returned no daily data)" on `/swing`). The intraday scan never calls the daily endpoint, so it is unaffected. If it persists, raise it with Dhan support.
+- **429 (rate limited):** retried up to 6 times with growing waits and does not count as a failed attempt; a symbol is only skipped if Dhan keeps returning 429 through all of them (the log says "rate-limited (429)", not a data problem). 400 errors are never retried; other HTTP errors are retried 3 times.
 - The intraday/swing split (this version) was tested against mocked Dhan responses only; the first live run is the real test.
 - Dhan's per-request date range cap on `/charts/intraday` is assumed ~90 days (unverified), which is why each 60-minute chunk is <=85 days.
