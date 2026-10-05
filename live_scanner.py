@@ -1,55 +1,63 @@
 """
-Orchestration for the ALL IN ONE PRO live scanner - MULTI-TIMEFRAME version
-(Khagen's request, 2026-10-04 night): runs BOTH Section A and Section B
-across SIX timeframes (10m / 1H / 4H / Daily / Weekly / Monthly) for every
-symbol in the universe, same general shape as dhan-bridge/eod_scanner.py but
-intraday-aware and run on a schedule during market hours.
+Orchestration for the ALL IN ONE PRO live scanner - TWO SCANS, one codebase
+(Khagen's request, 2026-10-05): runs BOTH Section A and Section B, split by
+how often their data actually changes.
 
-VERIFIED AGAINST THE LIVE DHAN API 2026-10-04 (999/1000 symbols, 1 unrelated
-symbol-resolution error, full 6-timeframe run completed in ~22 min) -
-earlier revisions of this module were untested; this one has a real run
-behind it. Two things that run surfaced and this revision fixes:
-  - Monthly needed a 10-year daily pull, not 7 (90-bar minimum needs ~90
-    months; 7 years only gave ~84).
-  - 4H needed the 60-min pull paginated out to ~170 days, not a single
-    85-day request (85 days gave ~85-90 four-hour bars after merging -
-    right on the 90-bar floor, so ~23% of symbols fell just short).
-Dhan's per-request date-range cap on /charts/intraday is still UNVERIFIED
-(assumed ~90 days, which is why the widened 60-min window is paginated
-into two chunks rather than requested in one call) - if a single chunk
-request ever errors or truncates, the real cap is tighter than assumed.
+  INTRADAY scan  (10m / 1H / 4H)   - re-run every 10 minutes during market
+                                     hours. Page: /scanner
+  SWING scan     (1D / 1W / 1M)    - run ONCE A DAY after the close (and once
+                                     to seed on a fresh deploy). Page: /swing
+
+Why split: daily/weekly/monthly signals only change when a daily candle
+closes, so re-scanning them every 10 minutes wasted Dhan calls and stretched
+a full scan to ~27 min (2026-10-05 live run: 999 symbols, 1614s). The
+intraday scan now needs ~2 Dhan calls per symbol per cycle, throttled by one
+shared request-rate limiter, so a cycle fits inside 10 minutes.
+
+VERIFIED AGAINST THE LIVE DHAN API: 2026-10-04 (999/1000 symbols, all six
+timeframes) and 2026-10-05 (full run after the split of failure handling).
+The intraday/swing split itself (this revision) was tested against mocked
+Dhan responses only - first live run is the real test. Known live findings:
+  - compute_section_a needs 90 bars on WHATEVER timeframe it is given
+    (max(9,30)*2 + 20 + 10), so Monthly needs a ~10-year daily pull and 4H
+    needs ~165 days of 60-min history.
+  - 2026-10-05: Dhan's /charts/historical started returning 400 DH-905
+    ("Missing required fields, bad values for parameters") for ~17% of
+    symbols (167/999, e.g. RELIANCE, INFY, SUNPHARMA, LICI) on the IDENTICAL
+    request that works for others (TCS, HDFCBANK, SBIN) and worked for these
+    same symbols the day before. Cause unknown / on Dhan's side. Handling:
+    use that symbol's older cached daily history if any, otherwise skip it in
+    the swing scan (counted as "no daily data", not an error). Intraday is
+    unaffected - it never calls the daily endpoint.
 
 USAGE
 -----
-    python live_scanner.py                       # full scan, writes results/
-    TEST_SYMBOL_LIMIT=5 python live_scanner.py    # quick dry run
+    python live_scanner.py                  # intraday scan (default)
+    python live_scanner.py swing            # swing scan
+    python live_scanner.py both             # intraday, then swing
+    TEST_SYMBOL_LIMIT=10 python live_scanner.py swing     # quick dry run
 
 Needs DHAN_CLIENT_ID / DHAN_ACCESS_TOKEN env vars (same Dhan Data API
 credentials dhan-bridge already uses - read-only scope is enough).
 
-TIMEFRAME ARCHITECTURE
------------------------
-  10m  - built from a 5-minute intraday pull (merged pairs), ~20 days window.
-  1H   - fetched NATIVELY from Dhan (interval=60 IS one of Dhan's supported
-         intraday intervals, unlike 10-min), ~85 days window.
-  4H   - built by merging groups of 4 of that same 1H pull (no extra call).
-  1D   - fetched from /charts/historical, CACHED TO DISK AND REUSED FOR THE
-         REST OF THE CALENDAR DAY (see fetch_daily_history_cached). Pulling
-         ~7 years of daily history for 1000 symbols on every 10-minute cycle
-         would multiply Dhan API load for data that's 99.9% unchanged
-         between cycles - the daily candle only moves intraday, and only
-         its own last bar. One real daily fetch per symbol per day is enough;
-         each 10-min cycle just re-reads the cached CSV (near-instant).
-  1W/1M - resampled from that same cached daily history, no extra calls.
+DON'T run a manual full scan from the Shell during market hours while the
+service autorun is going: it is a separate process with its own rate
+limiter, so the two would add up against Dhan's request limit.
 
-  Net result: the SAME number of live Dhan calls per 10-minute cycle as the
-  original 10-min-only scanner used to make per symbol (one 5-min pull), PLUS
-  one 60-min pull (new) - the heavy daily pull only happens once a day.
+DATA ARCHITECTURE
+-----------------
+  10m  - 5-minute pull (20 days, 1 call), merged in pairs.
+  1H   - 60-minute pull: RECENT chunk (last 85 days, 1 call per cycle) plus an
+         OLDER chunk (165..80 days back, cached to disk, re-fetched only when
+         the cache is >3 days old - it is historical and does not change).
+  4H   - groups of 4 of that same 60-minute data (no extra calls).
+  1D   - /charts/historical, ~10 years, cached to disk once per calendar day.
+  1W/1M- resampled from that same cached daily history.
 
-Each of the 6 timeframes is independently long enough to let
-all_in_one_scanner/section_b's own min-bar checks decide whether that
-timeframe has enough history yet for THIS symbol (a recent listing may
-simply show nothing on Weekly/Monthly for a while - not a bug).
+REQUEST RATE: one process-wide limiter (MAX_REQUESTS_PER_SECOND, default 4 -
+Dhan's Data API limit is believed to be ~5/s, UNVERIFIED) is applied before
+every Dhan call, so SCAN_WORKERS threads can overlap network latency without
+ever exceeding it.
 """
 
 import os
@@ -57,7 +65,10 @@ import sys
 import time
 import json
 import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import requests
 import pandas as pd
@@ -70,14 +81,16 @@ import section_b as sec_b  # noqa: E402
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("live_scanner")
 
+IST = ZoneInfo("Asia/Kolkata")
+
 DHAN_CLIENT_ID = os.environ.get("DHAN_CLIENT_ID", "")
 DHAN_ACCESS_TOKEN = os.environ.get("DHAN_ACCESS_TOKEN", "")
 DHAN_BASE_URL = "https://api.dhan.co/v2"
 DHAN_PROXY_URL = os.environ.get("DHAN_PROXY_URL", "").strip()
 DHAN_PROXIES = {"https": DHAN_PROXY_URL, "http": DHAN_PROXY_URL} if DHAN_PROXY_URL else None
 
-REQUESTS_PER_SECOND = 4
-SECONDS_BETWEEN_REQUESTS = 1.0 / REQUESTS_PER_SECOND
+MAX_REQUESTS_PER_SECOND = float(os.environ.get("MAX_REQUESTS_PER_SECOND", "4") or "4")
+SCAN_WORKERS = int(os.environ.get("SCAN_WORKERS", "4") or "4")
 HTTP_TIMEOUT = 20
 MAX_RETRIES = 3
 
@@ -86,29 +99,22 @@ INTRADAY_5MIN_INTERVAL = 5
 INTRADAY_5MIN_HISTORY_DAYS = 20   # plenty for 10-min's warmup needs
 
 # --- 60-min pull (builds 1H natively, 4H by merging groups of 4) ---
+# compute_section_a's REAL minimum is 90 bars on whatever timeframe it is
+# given (see module docstring), 4H included. One 85-day request gave only
+# ~85-90 four-hour bars (right on the floor, ~23% of symbols fell short on
+# 2026-10-04), so the window is two chunks: RECENT (fetched every cycle) and
+# OLDER (cached - see fetch_60min_history). The two overlap by ~5 days; the
+# duplicates are dropped, keeping the recent copy. Each chunk is <=85 days
+# (Dhan's per-request cap on /charts/intraday is assumed ~90 days, UNVERIFIED).
 INTRADAY_60MIN_INTERVAL = 60
-# compute_section_a's REAL minimum is 90 bars (see DAILY_HISTORY_DAYS
-# comment below for the formula) on WHATEVER timeframe it's given,
-# including 4H. A single 85-day pull gave only ~85-90 four-hour bars after
-# merging groups of 4 hourly bars - right on the threshold, so ~23% of
-# symbols fell just short of it on the full 1000-symbol run (2026-10-04).
-# Fetched via fetch_intraday_history_paginated (two 85-day chunks) instead
-# of one request, since Dhan's per-request cap on /charts/intraday is
-# assumed to be ~90 days (UNVERIFIED - see module docstring).
-INTRADAY_60MIN_HISTORY_DAYS = 170
+H60_RECENT_DAYS = 85
+H60_OLD_FROM_DAYS = 165
+H60_OLD_TO_DAYS = 80
+H60_OLD_REFRESH_DAYS = 3          # re-fetch the older chunk only when cache is older than this
+H60_OLD_CACHE_DIR = os.path.join(os.path.dirname(__file__), "cache", "h60_old")
 
-# --- Daily pull (builds D, and W/M by resampling) - cached, see below ---
-# compute_section_a's REAL minimum is max(ZIGZAG_LEN, LIQUIDITY_LEN)*2 +
-# VOL_MA_LEN + 10 = max(9,30)*2+20+10 = 90 bars on whatever timeframe it's
-# given - including Monthly, i.e. 90 MONTHLY bars needed, not 60 (confirmed
-# empirically 2026-10-04: a 2555-day/~7-year pull produced only 84 monthly
-# bars after resampling and compute_section_a returned None for every
-# symbol on 1M - 6 bars short of the real 90-bar floor). 3650 days (~10
-# years, ~120 monthly bars) gives real margin above that. Confirmed Dhan's
-# /charts/historical does NOT silently truncate a ~7-year request (returned
-# the full requested range), so a 10-year request is expected to behave the
-# same way - but re-verify with the same cache-file-length check if this
-# ever gets bumped further.
+# --- Daily pull (builds D, and W/M by resampling) - cached once per day ---
+# 90 MONTHLY bars needed => ~10 years (confirmed 2026-10-04: 7 years gave 84).
 DAILY_HISTORY_DAYS = 3650  # ~10 years
 DAILY_CACHE_DIR = os.path.join(os.path.dirname(__file__), "cache", "daily")
 
@@ -118,13 +124,67 @@ MAX_SYMBOLS = int(os.environ.get("MAX_SYMBOLS", "1000") or "1000")
 RESULTS_DIR = os.path.join(os.path.dirname(__file__), "results")
 MARKET_CAP_CSV = os.path.join(os.path.dirname(__file__), "market_cap_universe.csv")
 
-# Ordered (label, min-dataframe-needed) - drives both the fetch/build step
-# and the iteration order used everywhere results are collected/rendered.
-TIMEFRAMES = ["10m", "1H", "4H", "1D", "1W", "1M"]
+INTRADAY_TFS = ["10m", "1H", "4H"]
+SWING_TFS = ["1D", "1W", "1M"]
+
+MODES = {
+    "intraday": {
+        "timeframes": INTRADAY_TFS,
+        "prefix": "latest",
+        "title": "Intraday (10m / 1H / 4H)",
+        "page": "/scanner",
+        "note": "Re-scanned every 10 minutes during market hours (9:15-15:30 IST)",
+        "other_page": "/swing",
+        "other_title": "Swing / Positional (1D / 1W / 1M)",
+        "csv_a": "/scanner/signals.csv",
+        "csv_b": "/scanner/signals_b.csv",
+    },
+    "swing": {
+        "timeframes": SWING_TFS,
+        "prefix": "latest_swing",
+        "title": "Swing / Positional (1D / 1W / 1M)",
+        "page": "/swing",
+        "note": "Scanned once a day after the close (around 16:00 IST)",
+        "other_page": "/scanner",
+        "other_title": "Intraday (10m / 1H / 4H)",
+        "csv_a": "/swing/signals.csv",
+        "csv_b": "/swing/signals_b.csv",
+    },
+}
+
+
+class DailyDataUnavailable(Exception):
+    """Dhan's daily history could not be fetched and no cached copy exists."""
 
 
 def dhan_headers():
     return {"access-token": DHAN_ACCESS_TOKEN, "client-id": DHAN_CLIENT_ID, "Content-Type": "application/json"}
+
+
+# ============================================================================
+# REQUEST-RATE LIMITER (shared by every Dhan call in this process)
+# ============================================================================
+
+class _RateLimiter:
+    """Spaces request START times at least 1/rps seconds apart across all
+    threads. Threads reserve a slot under the lock, then sleep outside it."""
+
+    def __init__(self, rps: float):
+        self.interval = 1.0 / max(rps, 0.1)
+        self._lock = threading.Lock()
+        self._next = 0.0
+
+    def wait(self):
+        with self._lock:
+            now = time.monotonic()
+            start = max(now, self._next)
+            self._next = start + self.interval
+        delay = start - now
+        if delay > 0:
+            time.sleep(delay)
+
+
+_limiter = _RateLimiter(MAX_REQUESTS_PER_SECOND)
 
 
 # ============================================================================
@@ -134,8 +194,7 @@ def dhan_headers():
 def _parse_intraday(resp_json: dict) -> pd.DataFrame:
     """Same defensive key-matching approach as eod_scanner.py's
     _parse_historical() - Dhan's SDK uses slightly different field spellings
-    across versions, and this is the one piece unverified against a live
-    response from this sandbox."""
+    across versions."""
     key_map = {
         "open": ["open"], "high": ["high"], "low": ["low"], "close": ["close"],
         "volume": ["volume"], "timestamp": ["timestamp", "start_Time", "startTime"],
@@ -169,6 +228,7 @@ def _fetch_intraday_chunk(security_id: str, exchange_segment: str, interval: int
     last_err = None
     for attempt in range(1, MAX_RETRIES + 1):
         try:
+            _limiter.wait()
             resp = requests.post(
                 f"{DHAN_BASE_URL}/charts/intraday",
                 headers=dhan_headers(), json=payload, timeout=HTTP_TIMEOUT, proxies=DHAN_PROXIES,
@@ -186,48 +246,75 @@ def _fetch_intraday_chunk(security_id: str, exchange_segment: str, interval: int
     raise RuntimeError(f"Failed to fetch intraday(interval={interval}) chunk {from_date}..{to_date} for security_id={security_id}: {last_err}")
 
 
-def fetch_intraday_history(security_id: str, exchange_segment: str, interval: int, history_days: int,
-                            chunk_days: int = 85) -> pd.DataFrame:
-    """Single-chunk fetch when history_days <= chunk_days (the 5-min/10m
-    case - 20 days, well under any plausible per-request cap). For a wider
-    window (the 60-min/4H case), use fetch_intraday_history_paginated
-    instead - Dhan's /charts/intraday per-request date-range cap is
-    UNVERIFIED but assumed to be around 90 days, so a single request for
-    anything wider risks silent truncation or an error."""
+def fetch_intraday_history(security_id: str, exchange_segment: str, interval: int, history_days: int) -> pd.DataFrame:
+    """Single-request fetch (used for the 5-min/10m pull - 20 days, well
+    under any plausible per-request cap)."""
     to_date = datetime.now().strftime("%Y-%m-%d")
     from_date = (datetime.now() - timedelta(days=history_days)).strftime("%Y-%m-%d")
     return _fetch_intraday_chunk(security_id, exchange_segment, interval, from_date, to_date)
 
 
-def fetch_intraday_history_paginated(security_id: str, exchange_segment: str, interval: int,
-                                      total_days: int, chunk_days: int = 85) -> pd.DataFrame:
-    """Stitches together consecutive <=chunk_days windows to cover
-    total_days of history without exceeding Dhan's (assumed, unverified)
-    per-request cap on /charts/intraday. Used for the 60-min pull: 85 days
-    alone gave ~85-90 four-hour bars after merging - right on top of
-    compute_section_a's 90-bar minimum, so ~23% of symbols fell just short
-    of it (confirmed empirically 2026-10-04 on the full 1000-symbol run).
-    Two 85-day chunks (170 days total) gives comfortable margin above that
-    floor instead."""
-    now = datetime.now()
-    chunks = []
-    days_covered = 0
-    chunk_end = now
-    while days_covered < total_days:
-        this_chunk_days = min(chunk_days, total_days - days_covered)
-        chunk_start = chunk_end - timedelta(days=this_chunk_days)
-        df_chunk = _fetch_intraday_chunk(
-            security_id, exchange_segment, interval,
-            chunk_start.strftime("%Y-%m-%d"), chunk_end.strftime("%Y-%m-%d"),
+def _empty_frame() -> pd.DataFrame:
+    return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+
+
+def _load_h60_old(symbol: str, security_id: str, exchange_segment: str, now: datetime):
+    """The OLDER 60-min chunk (H60_OLD_FROM_DAYS..H60_OLD_TO_DAYS days back).
+    It is historical data that does not change, so it is cached to disk and
+    re-fetched only when the cache is older than H60_OLD_REFRESH_DAYS (the
+    ~5-day overlap with the recent chunk keeps the seam gap-free until then).
+    Returns None if nothing is available (4H then has fewer bars)."""
+    os.makedirs(H60_OLD_CACHE_DIR, exist_ok=True)
+    path = os.path.join(H60_OLD_CACHE_DIR, f"{symbol}.csv")
+    if os.path.exists(path):
+        age_days = (time.time() - os.path.getmtime(path)) / 86400.0
+        if age_days < H60_OLD_REFRESH_DAYS:
+            try:
+                cached = pd.read_csv(path, index_col=0, parse_dates=True)
+                if not cached.empty:
+                    return cached
+            except Exception as e:
+                log.warning(f"{symbol}: 60-min cache unreadable ({e}), refetching")
+    fmt = "%Y-%m-%d"
+    try:
+        old = _fetch_intraday_chunk(
+            security_id, exchange_segment, INTRADAY_60MIN_INTERVAL,
+            (now - timedelta(days=H60_OLD_FROM_DAYS)).strftime(fmt),
+            (now - timedelta(days=H60_OLD_TO_DAYS)).strftime(fmt),
         )
-        if not df_chunk.empty:
-            chunks.append(df_chunk)
-        chunk_end = chunk_start
-        days_covered += this_chunk_days
-    if not chunks:
-        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
-    out = pd.concat(chunks).sort_index()
-    return out[~out.index.duplicated(keep="first")]
+        if not old.empty:
+            try:
+                old.to_csv(path)
+            except Exception as e:
+                log.warning(f"{symbol}: could not write 60-min cache: {e}")
+            return old
+    except Exception as e:
+        log.warning(f"{symbol}: older 60-min chunk fetch failed ({e})")
+    if os.path.exists(path):  # stale is better than nothing
+        try:
+            stale = pd.read_csv(path, index_col=0, parse_dates=True)
+            if not stale.empty:
+                return stale
+        except Exception:
+            pass
+    return None
+
+
+def fetch_60min_history(symbol: str, security_id: str, exchange_segment: str) -> pd.DataFrame:
+    """RECENT chunk (live, every cycle: 1 call) + OLDER chunk (cached), stitched
+    and de-duplicated keeping the recent copy of any overlapping bar."""
+    now = datetime.now()
+    fmt = "%Y-%m-%d"
+    recent = _fetch_intraday_chunk(
+        security_id, exchange_segment, INTRADAY_60MIN_INTERVAL,
+        (now - timedelta(days=H60_RECENT_DAYS)).strftime(fmt), now.strftime(fmt),
+    )
+    old = _load_h60_old(symbol, security_id, exchange_segment, now)
+    parts = [d for d in (old, recent) if d is not None and not d.empty]
+    if not parts:
+        return _empty_frame()
+    out = pd.concat(parts).sort_index(kind="stable")
+    return out[~out.index.duplicated(keep="last")]
 
 
 # ============================================================================
@@ -270,6 +357,7 @@ def fetch_daily_history(security_id: str, exchange_segment: str) -> pd.DataFrame
     last_err = None
     for attempt in range(1, MAX_RETRIES + 1):
         try:
+            _limiter.wait()
             resp = requests.post(
                 f"{DHAN_BASE_URL}/charts/historical",
                 headers=dhan_headers(), json=payload, timeout=HTTP_TIMEOUT, proxies=DHAN_PROXIES,
@@ -280,17 +368,16 @@ def fetch_daily_history(security_id: str, exchange_segment: str) -> pd.DataFrame
                 time.sleep(wait)
                 continue
             if resp.status_code == 400:
-                # Deterministic rejection (found 2026-10-05: Dhan returns DH-905
-                # "Missing required fields, bad values for parameters" for some
-                # symbols - RELIANCE, INFY - on every attempt while others like
-                # TCS work with the identical request). Retrying only wastes ~10s
-                # per symbol, so fail immediately and let the caller degrade.
-                raise RuntimeError(f"400 from Dhan: {resp.text[:150]}")
+                # Deterministic rejection (2026-10-05: DH-905 for ~17% of symbols
+                # on a request identical to ones that succeed). Retrying only
+                # wastes time, so fail immediately and let the caller degrade.
+                raise RuntimeError(f"Failed to fetch daily history for security_id={security_id}: "
+                                   f"400 from Dhan: {resp.text[:150]}")
             resp.raise_for_status()
             return _parse_historical(resp.json())
         except RuntimeError as e:
-            if str(e).startswith("400 from Dhan"):
-                raise RuntimeError(f"Failed to fetch daily history for security_id={security_id}: {e}")
+            if "400 from Dhan" in str(e):
+                raise
             last_err = e
             time.sleep(1.5 * attempt)
         except Exception as e:
@@ -300,9 +387,9 @@ def fetch_daily_history(security_id: str, exchange_segment: str) -> pd.DataFrame
 
 
 def fetch_daily_history_cached(symbol: str, security_id: str, exchange_segment: str) -> pd.DataFrame:
-    """Re-fetches the ~7-year daily history at most once per calendar day
-    per symbol, keyed off the cache file's own mtime - everything else
-    (every 10-min cycle during the same trading day) reads the cached CSV."""
+    """Re-fetches the ~10-year daily history at most once per calendar day
+    per symbol, keyed off the cache file's own mtime. If Dhan refuses the
+    refresh, falls back to ANY older cached copy; raises if there is none."""
     os.makedirs(DAILY_CACHE_DIR, exist_ok=True)
     cache_path = os.path.join(DAILY_CACHE_DIR, f"{symbol}.csv")
     today_str = datetime.now().strftime("%Y-%m-%d")
@@ -318,8 +405,6 @@ def fetch_daily_history_cached(symbol: str, security_id: str, exchange_segment: 
     try:
         df = fetch_daily_history(security_id, exchange_segment)
     except Exception as e:
-        # Dhan refused today's refresh - fall back to ANY older cached copy
-        # (daily bars barely change, a day-old history is far better than none).
         if os.path.exists(cache_path):
             try:
                 stale = pd.read_csv(cache_path, index_col=0, parse_dates=True)
@@ -389,27 +474,22 @@ def build_monthly_bars(df_daily: pd.DataFrame) -> pd.DataFrame:
     return out.sort_index()
 
 
-def build_all_timeframes(security_id: str, exchange_segment: str, symbol: str) -> dict:
-    """Returns {timeframe_label: dataframe} for all 6 timeframes, using the
-    minimum number of Dhan calls described in the module docstring."""
+def build_intraday_timeframes(security_id: str, exchange_segment: str, symbol: str) -> dict:
+    """{'10m','1H','4H'} - ~2 Dhan calls per symbol per cycle (5-min pull +
+    recent 60-min chunk; the older 60-min chunk comes from the disk cache)."""
     df5 = fetch_intraday_history(security_id, exchange_segment, INTRADAY_5MIN_INTERVAL, INTRADAY_5MIN_HISTORY_DAYS)
-    df10 = build_merged_bars(df5, 2)
+    df60 = fetch_60min_history(symbol, security_id, exchange_segment)
+    return {"10m": build_merged_bars(df5, 2), "1H": df60, "4H": build_merged_bars(df60, 4)}
 
-    df60 = fetch_intraday_history_paginated(security_id, exchange_segment, INTRADAY_60MIN_INTERVAL, INTRADAY_60MIN_HISTORY_DAYS)
-    df4h = build_merged_bars(df60, 4)
 
+def build_swing_timeframes(security_id: str, exchange_segment: str, symbol: str) -> dict:
+    """{'1D','1W','1M'} from the cached daily history. Raises
+    DailyDataUnavailable if Dhan refuses it and there is no cached copy."""
     try:
         dfd = fetch_daily_history_cached(symbol, security_id, exchange_segment)
-        dfw = build_weekly_bars(dfd)
-        dfm = build_monthly_bars(dfd)
     except Exception as e:
-        # Daily data unavailable (and no stale cache) - still scan the three
-        # intraday timeframes instead of dropping the whole symbol.
-        log.warning(f"{symbol}: no daily data ({e}); scanning 10m/1H/4H only")
-        empty = pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
-        dfd = dfw = dfm = empty
-
-    return {"10m": df10, "1H": df60, "4H": df4h, "1D": dfd, "1W": dfw, "1M": dfm}
+        raise DailyDataUnavailable(str(e))
+    return {"1D": dfd, "1W": build_weekly_bars(dfd), "1M": build_monthly_bars(dfd)}
 
 
 # ============================================================================
@@ -437,99 +517,145 @@ def _load_universe_symbols():
 # ORCHESTRATION
 # ============================================================================
 
-def run_scan():
+def _scan_one_symbol(sym: str, security_id: str, segment: str, mode: str) -> dict:
+    """Runs in a worker thread. Always returns a dict - never raises."""
+    try:
+        build = build_intraday_timeframes if mode == "intraday" else build_swing_timeframes
+        frames = build(security_id, segment, sym)
+    except DailyDataUnavailable as e:
+        return {"no_data": str(e)}
+    except Exception as e:
+        return {"error": str(e)}
+
+    out_a, out_b = [], []
+    try:
+        for tf in MODES[mode]["timeframes"]:
+            df = frames.get(tf)
+            if df is None or df.empty:
+                continue
+            result = sec_a.compute_section_a(df)
+            result_b = sec_b.compute_section_b(df)
+            if result and result["signal"]:
+                result["symbol"] = sym
+                result["timeframe"] = tf
+                out_a.append(result)
+            if result_b and result_b["signal"]:
+                result_b["symbol"] = sym
+                result_b["timeframe"] = tf
+                out_b.append(result_b)
+    except Exception as e:
+        return {"error": str(e)}
+    return {"signals": out_a, "signals_b": out_b}
+
+
+def run_scan(mode: str = "intraday"):
+    if mode not in MODES:
+        raise ValueError(f"unknown scan mode {mode!r} - expected one of {list(MODES)}")
     if not DHAN_CLIENT_ID or not DHAN_ACCESS_TOKEN:
-        log.error("DHAN_CLIENT_ID / DHAN_ACCESS_TOKEN not set - cannot call Dhan's Data API. Aborting.")
-        sys.exit(1)
+        raise RuntimeError("DHAN_CLIENT_ID / DHAN_ACCESS_TOKEN not set - cannot call Dhan's Data API.")
 
+    cfg = MODES[mode]
     symbols = _load_universe_symbols()
-    log.info(f"Live-scanning {len(symbols)} NSE equity symbols across {TIMEFRAMES} (Section A + Section B)...")
+    log.info(f"[{mode}] scanning {len(symbols)} NSE equity symbols across {cfg['timeframes']} "
+             f"(Section A + Section B), {SCAN_WORKERS} workers, <= {MAX_REQUESTS_PER_SECOND:g} req/s...")
 
-    signals, signals_b, errors = [], [], []
-    scanned = 0
-    t_start = time.time()
-
+    # Resolve security ids up front, single-threaded (the scrip master loads
+    # lazily and is not safe to initialise from several threads at once).
+    jobs, errors = [], []
     for sym in symbols:
         security_id, segment = get_security_id_and_segment(sym)
         if not security_id or segment != "NSE_EQ":
             errors.append({"symbol": sym, "error": "no NSE_EQ security_id found"})
             continue
-        try:
-            tf_frames = build_all_timeframes(security_id, segment, sym)
-            scanned += 1
+        jobs.append((sym, security_id, segment))
 
-            for tf in TIMEFRAMES:
-                df = tf_frames.get(tf)
-                if df is None or df.empty:
-                    continue
+    signals, signals_b, no_data = [], [], []
+    scanned = 0
+    t_start = time.time()
 
-                result = sec_a.compute_section_a(df)
-                result_b = sec_b.compute_section_b(df)
-
-                if result:
-                    result["symbol"] = sym
-                    result["timeframe"] = tf
-                    if result["signal"]:
-                        signals.append(result)
-
-                if result_b and result_b["signal"]:
-                    result_b["symbol"] = sym
-                    result_b["timeframe"] = tf
-                    signals_b.append(result_b)
-        except Exception as e:
-            errors.append({"symbol": sym, "error": str(e)})
-            log.warning(f"{sym}: {e}")
-
-        time.sleep(SECONDS_BETWEEN_REQUESTS)
-        if scanned % 100 == 0 and scanned > 0:
-            elapsed = time.time() - t_start
-            log.info(f"...{scanned}/{len(symbols)} scanned, {len(signals)} Section A signals, "
-                     f"{len(signals_b)} Section B signals so far, {elapsed:.0f}s elapsed")
+    with ThreadPoolExecutor(max_workers=max(1, SCAN_WORKERS)) as ex:
+        futures = [(sym, ex.submit(_scan_one_symbol, sym, sid, seg, mode)) for sym, sid, seg in jobs]
+        for n, (sym, fut) in enumerate(futures, 1):
+            try:
+                res = fut.result()
+            except Exception as e:  # defensive - _scan_one_symbol should not raise
+                res = {"error": str(e)}
+            if "error" in res:
+                errors.append({"symbol": sym, "error": res["error"]})
+                log.warning(f"{sym}: {res['error']}")
+            elif "no_data" in res:
+                no_data.append(sym)
+                log.warning(f"{sym}: no daily data ({res['no_data']}); skipped in the swing scan")
+            else:
+                scanned += 1
+                signals.extend(res["signals"])
+                signals_b.extend(res["signals_b"])
+            if n % 100 == 0:
+                log.info(f"[{mode}] ...{n}/{len(futures)} done, {len(signals)} Section A, "
+                         f"{len(signals_b)} Section B signals so far, {time.time() - t_start:.0f}s elapsed")
 
     elapsed = time.time() - t_start
-    log.info(f"Done: {scanned} scanned, {len(signals)} Section A signals, {len(signals_b)} Section B signals, "
-             f"{len(errors)} errors, {elapsed:.0f}s total")
+    log.info(f"[{mode}] Done: {scanned} scanned, {len(signals)} Section A signals, {len(signals_b)} Section B signals, "
+             f"{len(no_data)} no daily data, {len(errors)} errors, {elapsed:.0f}s total")
 
-    write_results(signals, signals_b, errors, scanned, len(symbols))
+    write_results(mode, signals, signals_b, errors, no_data, scanned, len(symbols), elapsed)
     return signals, signals_b
 
 
-def write_results(signals, signals_b, errors, scanned, universe_size):
+def _atomic_write(path: str, text: str):
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
+def _atomic_csv(df: pd.DataFrame, path: str):
+    tmp = path + ".tmp"
+    df.to_csv(tmp, index=False)
+    os.replace(tmp, path)
+
+
+def write_results(mode, signals, signals_b, errors, no_data, scanned, universe_size, elapsed=0.0):
+    cfg = MODES[mode]
+    prefix = cfg["prefix"]
     os.makedirs(RESULTS_DIR, exist_ok=True)
-    run_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    run_ts = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S") + " IST"
     payload = {
+        "mode": mode,
         "run_timestamp": run_ts,
         "universe_size": universe_size,
         "scanned": scanned,
-        "timeframes": TIMEFRAMES,
+        "timeframes": cfg["timeframes"],
         "signal_count": len(signals),
         "signal_b_count": len(signals_b),
+        "no_data_count": len(no_data),
         "error_count": len(errors),
+        "duration_sec": round(elapsed),
         "signals": signals,
         "signals_b": signals_b,
+        "no_data": no_data,
         "errors": errors,
     }
-    with open(os.path.join(RESULTS_DIR, "latest.json"), "w") as f:
-        json.dump(payload, f, indent=2)
+    _atomic_write(os.path.join(RESULTS_DIR, f"{prefix}.json"), json.dumps(payload, indent=2, default=str))
 
     sig_rows = [{"symbol": r["symbol"], "timeframe": r["timeframe"], "signal": r["signal"], "close": r["close"],
                  "timestamp": r["timestamp"], **(r["levels"] or {})} for r in signals]
-    pd.DataFrame(sig_rows).to_csv(os.path.join(RESULTS_DIR, "latest_signals.csv"), index=False)
+    _atomic_csv(pd.DataFrame(sig_rows), os.path.join(RESULTS_DIR, f"{prefix}_signals.csv"))
 
     sig_b_rows = [{"symbol": r["symbol"], "timeframe": r["timeframe"], "signal": r["signal"], "source": r["source"],
                    "close": r["close"], "rsi": r.get("rsi"), "timestamp": r["timestamp"], **(r["levels"] or {})}
                   for r in signals_b]
-    pd.DataFrame(sig_b_rows).to_csv(os.path.join(RESULTS_DIR, "latest_signals_b.csv"), index=False)
+    _atomic_csv(pd.DataFrame(sig_b_rows), os.path.join(RESULTS_DIR, f"{prefix}_signals_b.csv"))
 
-    html = render_html(payload)
-    with open(os.path.join(RESULTS_DIR, "latest.html"), "w") as f:
-        f.write(html)
+    _atomic_write(os.path.join(RESULTS_DIR, f"{prefix}.html"), render_html(payload))
 
-    log.info(f"Results written to {RESULTS_DIR}/ (latest.html, latest.json, latest_signals.csv, "
-             f"latest_signals_b.csv)")
+    log.info(f"[{mode}] Results written to {RESULTS_DIR}/ ({prefix}.html, {prefix}.json, "
+             f"{prefix}_signals.csv, {prefix}_signals_b.csv)")
 
 
 def render_html(payload: dict) -> str:
+    cfg = MODES[payload.get("mode", "intraday")]
+
     sig_rows_html = ""
     for r in payload["signals"]:
         cls = "buy" if "BUY" in r["signal"] else "sell"
@@ -571,17 +697,24 @@ def render_html(payload: dict) -> str:
     if not payload.get("signals_b"):
         sig_b_rows_html = '<tr><td colspan="11" class="empty">No Section B signals this run.</td></tr>'
 
+    no_data_txt = ""
+    if payload.get("no_data_count"):
+        no_data_txt = f" &middot; {payload['no_data_count']} symbols skipped (Dhan returned no daily data)"
+
     return f"""<!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="refresh" content="60">
-<title>ALL IN ONE PRO Live Scanner - MTF</title>
+<title>ALL IN ONE PRO - {cfg['title']}</title>
 <style>
   body {{ font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif; background: #0e1117; color: #e6e6e6; margin: 0; padding: 24px; }}
   h1 {{ font-size: 20px; margin: 24px 0 4px; }}
   h1:first-of-type {{ margin-top: 0; }}
+  .nav {{ margin-bottom: 16px; font-size: 14px; }}
+  .nav a {{ color: #58a6ff; text-decoration: none; margin-right: 18px; }}
+  .nav .here {{ color: #e6e6e6; font-weight: 700; margin-right: 18px; }}
   .meta {{ color: #9aa0a6; font-size: 13px; margin-bottom: 20px; }}
   table {{ border-collapse: collapse; width: 100%; font-size: 13px; margin-bottom: 32px; }}
   th, td {{ padding: 8px 10px; text-align: left; border-bottom: 1px solid #262b36; }}
@@ -596,21 +729,27 @@ def render_html(payload: dict) -> str:
 </style>
 </head>
 <body>
-  <h1>ALL IN ONE PRO - Live Signals (Section A: Sweep + Order Block) - All Timeframes</h1>
+  <div class="nav">
+    <span class="here">{cfg['title']}</span>
+    <a href="{cfg['other_page']}">{cfg['other_title']}</a>
+    <a href="{cfg['csv_a']}">Section A CSV</a>
+    <a href="{cfg['csv_b']}">Section B CSV</a>
+  </div>
+  <h1>ALL IN ONE PRO - Section A (Sweep + Order Block) - {cfg['title']}</h1>
   <div class="meta">
-    Run: {payload['run_timestamp']} &middot;
+    Run: {payload['run_timestamp']} (took {payload.get('duration_sec', 0)}s) &middot;
     Scanned {payload['scanned']}/{payload['universe_size']} symbols &middot;
     Timeframes: {', '.join(payload['timeframes'])} &middot;
     {payload['signal_count']} signals &middot;
-    {payload['error_count']} errors &middot;
-    10m/1H refresh every cycle, Daily/Weekly/Monthly cached once per day
+    {payload['error_count']} errors{no_data_txt}<br>
+    {cfg['note']}
   </div>
   <table>
     <thead><tr><th>Symbol</th><th>TF</th><th>Signal</th><th>Close</th><th>Entry</th><th>SL</th><th>T1</th><th>T2</th><th>T3</th><th>Bar Time</th></tr></thead>
     <tbody>{sig_rows_html}</tbody>
   </table>
 
-  <h1>ALL IN ONE PRO - Live Signals (Section B: Keltner/SMC + RSI Pattern) - All Timeframes</h1>
+  <h1>ALL IN ONE PRO - Section B (Keltner/SMC + RSI Pattern) - {cfg['title']}</h1>
   <div class="meta">
     {payload.get('signal_b_count', 0)} signals &middot; "source" is SSL_SWEEP / BSL_SWEEP (liquidity reclaim)
     or RSI_CHECKLIST (RSI + candlestick pattern).
@@ -624,4 +763,13 @@ def render_html(payload: dict) -> str:
 
 
 if __name__ == "__main__":
-    run_scan()
+    arg = (sys.argv[1] if len(sys.argv) > 1 else "intraday").strip().lower()
+    if arg not in ("intraday", "swing", "both"):
+        print("usage: python live_scanner.py [intraday|swing|both]")
+        sys.exit(2)
+    try:
+        for m in (["intraday", "swing"] if arg == "both" else [arg]):
+            run_scan(m)
+    except RuntimeError as e:
+        log.error(str(e))
+        sys.exit(1)
