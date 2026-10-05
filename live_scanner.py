@@ -5,14 +5,19 @@ across SIX timeframes (10m / 1H / 4H / Daily / Weekly / Monthly) for every
 symbol in the universe, same general shape as dhan-bridge/eod_scanner.py but
 intraday-aware and run on a schedule during market hours.
 
-THIS HAS NOT BEEN RUN AGAINST THE LIVE DHAN API - same disclosure as the
-other two scanners in this project: this sandbox cannot reach api.dhan.co,
-so /charts/intraday's and /charts/historical's exact response shapes and
-per-request date-range caps are unverified here. Dry-run with
-TEST_SYMBOL_LIMIT set to a small number first, and if the 60-minute fetch
-below (85 calendar days per request) errors or silently truncates, Dhan's
-real per-request cap is tighter than assumed - split it into multiple
-requests and concatenate.
+VERIFIED AGAINST THE LIVE DHAN API 2026-10-04 (999/1000 symbols, 1 unrelated
+symbol-resolution error, full 6-timeframe run completed in ~22 min) -
+earlier revisions of this module were untested; this one has a real run
+behind it. Two things that run surfaced and this revision fixes:
+  - Monthly needed a 10-year daily pull, not 7 (90-bar minimum needs ~90
+    months; 7 years only gave ~84).
+  - 4H needed the 60-min pull paginated out to ~170 days, not a single
+    85-day request (85 days gave ~85-90 four-hour bars after merging -
+    right on the 90-bar floor, so ~23% of symbols fell just short).
+Dhan's per-request date-range cap on /charts/intraday is still UNVERIFIED
+(assumed ~90 days, which is why the widened 60-min window is paginated
+into two chunks rather than requested in one call) - if a single chunk
+request ever errors or truncates, the real cap is tighter than assumed.
 
 USAGE
 -----
@@ -82,11 +87,15 @@ INTRADAY_5MIN_HISTORY_DAYS = 20   # plenty for 10-min's warmup needs
 
 # --- 60-min pull (builds 1H natively, 4H by merging groups of 4) ---
 INTRADAY_60MIN_INTERVAL = 60
-# 4H needs ~240 confirmed 1H bars both sides of liquidity_len=30 -> roughly
-# 38 trading days of 1H bars; 85 calendar days gives comfortable margin
-# while staying (assumed) under Dhan's per-request intraday cap - UNVERIFIED,
-# see module docstring.
-INTRADAY_60MIN_HISTORY_DAYS = 85
+# compute_section_a's REAL minimum is 90 bars (see DAILY_HISTORY_DAYS
+# comment below for the formula) on WHATEVER timeframe it's given,
+# including 4H. A single 85-day pull gave only ~85-90 four-hour bars after
+# merging groups of 4 hourly bars - right on the threshold, so ~23% of
+# symbols fell just short of it on the full 1000-symbol run (2026-10-04).
+# Fetched via fetch_intraday_history_paginated (two 85-day chunks) instead
+# of one request, since Dhan's per-request cap on /charts/intraday is
+# assumed to be ~90 days (UNVERIFIED - see module docstring).
+INTRADAY_60MIN_HISTORY_DAYS = 170
 
 # --- Daily pull (builds D, and W/M by resampling) - cached, see below ---
 # compute_section_a's REAL minimum is max(ZIGZAG_LEN, LIQUIDITY_LEN)*2 +
@@ -152,9 +161,7 @@ def _parse_intraday(resp_json: dict) -> pd.DataFrame:
     return df[["open", "high", "low", "close", "volume"]].astype(float)
 
 
-def fetch_intraday_history(security_id: str, exchange_segment: str, interval: int, history_days: int) -> pd.DataFrame:
-    to_date = datetime.now().strftime("%Y-%m-%d")
-    from_date = (datetime.now() - timedelta(days=history_days)).strftime("%Y-%m-%d")
+def _fetch_intraday_chunk(security_id: str, exchange_segment: str, interval: int, from_date: str, to_date: str) -> pd.DataFrame:
     payload = {
         "securityId": security_id, "exchangeSegment": exchange_segment, "instrument": "EQUITY",
         "interval": interval, "fromDate": from_date, "toDate": to_date,
@@ -176,7 +183,51 @@ def fetch_intraday_history(security_id: str, exchange_segment: str, interval: in
         except Exception as e:
             last_err = e
             time.sleep(1.5 * attempt)
-    raise RuntimeError(f"Failed to fetch intraday(interval={interval}) history for security_id={security_id}: {last_err}")
+    raise RuntimeError(f"Failed to fetch intraday(interval={interval}) chunk {from_date}..{to_date} for security_id={security_id}: {last_err}")
+
+
+def fetch_intraday_history(security_id: str, exchange_segment: str, interval: int, history_days: int,
+                            chunk_days: int = 85) -> pd.DataFrame:
+    """Single-chunk fetch when history_days <= chunk_days (the 5-min/10m
+    case - 20 days, well under any plausible per-request cap). For a wider
+    window (the 60-min/4H case), use fetch_intraday_history_paginated
+    instead - Dhan's /charts/intraday per-request date-range cap is
+    UNVERIFIED but assumed to be around 90 days, so a single request for
+    anything wider risks silent truncation or an error."""
+    to_date = datetime.now().strftime("%Y-%m-%d")
+    from_date = (datetime.now() - timedelta(days=history_days)).strftime("%Y-%m-%d")
+    return _fetch_intraday_chunk(security_id, exchange_segment, interval, from_date, to_date)
+
+
+def fetch_intraday_history_paginated(security_id: str, exchange_segment: str, interval: int,
+                                      total_days: int, chunk_days: int = 85) -> pd.DataFrame:
+    """Stitches together consecutive <=chunk_days windows to cover
+    total_days of history without exceeding Dhan's (assumed, unverified)
+    per-request cap on /charts/intraday. Used for the 60-min pull: 85 days
+    alone gave ~85-90 four-hour bars after merging - right on top of
+    compute_section_a's 90-bar minimum, so ~23% of symbols fell just short
+    of it (confirmed empirically 2026-10-04 on the full 1000-symbol run).
+    Two 85-day chunks (170 days total) gives comfortable margin above that
+    floor instead."""
+    now = datetime.now()
+    chunks = []
+    days_covered = 0
+    chunk_end = now
+    while days_covered < total_days:
+        this_chunk_days = min(chunk_days, total_days - days_covered)
+        chunk_start = chunk_end - timedelta(days=this_chunk_days)
+        df_chunk = _fetch_intraday_chunk(
+            security_id, exchange_segment, interval,
+            chunk_start.strftime("%Y-%m-%d"), chunk_end.strftime("%Y-%m-%d"),
+        )
+        if not df_chunk.empty:
+            chunks.append(df_chunk)
+        chunk_end = chunk_start
+        days_covered += this_chunk_days
+    if not chunks:
+        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+    out = pd.concat(chunks).sort_index()
+    return out[~out.index.duplicated(keep="first")]
 
 
 # ============================================================================
@@ -319,7 +370,7 @@ def build_all_timeframes(security_id: str, exchange_segment: str, symbol: str) -
     df5 = fetch_intraday_history(security_id, exchange_segment, INTRADAY_5MIN_INTERVAL, INTRADAY_5MIN_HISTORY_DAYS)
     df10 = build_merged_bars(df5, 2)
 
-    df60 = fetch_intraday_history(security_id, exchange_segment, INTRADAY_60MIN_INTERVAL, INTRADAY_60MIN_HISTORY_DAYS)
+    df60 = fetch_intraday_history_paginated(security_id, exchange_segment, INTRADAY_60MIN_INTERVAL, INTRADAY_60MIN_HISTORY_DAYS)
     df4h = build_merged_bars(df60, 4)
 
     dfd = fetch_daily_history_cached(symbol, security_id, exchange_segment)
@@ -362,7 +413,7 @@ def run_scan():
     symbols = _load_universe_symbols()
     log.info(f"Live-scanning {len(symbols)} NSE equity symbols across {TIMEFRAMES} (Section A + Section B)...")
 
-    signals, signals_b, watch, errors = [], [], [], []
+    signals, signals_b, errors = [], [], []
     scanned = 0
     t_start = time.time()
 
@@ -388,8 +439,6 @@ def run_scan():
                     result["timeframe"] = tf
                     if result["signal"]:
                         signals.append(result)
-                    elif result["ob_watch"] or result["support_zone"] or result["resistance_zone"]:
-                        watch.append(result)
 
                 if result_b and result_b["signal"]:
                     result_b["symbol"] = sym
@@ -403,17 +452,17 @@ def run_scan():
         if scanned % 100 == 0 and scanned > 0:
             elapsed = time.time() - t_start
             log.info(f"...{scanned}/{len(symbols)} scanned, {len(signals)} Section A signals, "
-                     f"{len(signals_b)} Section B signals, {len(watch)} ob-watch so far, {elapsed:.0f}s elapsed")
+                     f"{len(signals_b)} Section B signals so far, {elapsed:.0f}s elapsed")
 
     elapsed = time.time() - t_start
     log.info(f"Done: {scanned} scanned, {len(signals)} Section A signals, {len(signals_b)} Section B signals, "
-             f"{len(watch)} ob-watch, {len(errors)} errors, {elapsed:.0f}s total")
+             f"{len(errors)} errors, {elapsed:.0f}s total")
 
-    write_results(signals, signals_b, watch, errors, scanned, len(symbols))
-    return signals, signals_b, watch
+    write_results(signals, signals_b, errors, scanned, len(symbols))
+    return signals, signals_b
 
 
-def write_results(signals, signals_b, watch, errors, scanned, universe_size):
+def write_results(signals, signals_b, errors, scanned, universe_size):
     os.makedirs(RESULTS_DIR, exist_ok=True)
     run_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     payload = {
@@ -423,23 +472,16 @@ def write_results(signals, signals_b, watch, errors, scanned, universe_size):
         "timeframes": TIMEFRAMES,
         "signal_count": len(signals),
         "signal_b_count": len(signals_b),
-        "watch_count": len(watch),
         "error_count": len(errors),
         "signals": signals,
         "signals_b": signals_b,
-        "watch": watch,
         "errors": errors,
     }
     with open(os.path.join(RESULTS_DIR, "latest.json"), "w") as f:
         json.dump(payload, f, indent=2)
 
-    def _zone_cols(r, prefix):
-        z = r.get(prefix)
-        return {f"{prefix}_low": z["low"], f"{prefix}_high": z["high"]} if z else {f"{prefix}_low": None, f"{prefix}_high": None}
-
     sig_rows = [{"symbol": r["symbol"], "timeframe": r["timeframe"], "signal": r["signal"], "close": r["close"],
-                 "timestamp": r["timestamp"], **(r["levels"] or {}),
-                 **_zone_cols(r, "support_zone"), **_zone_cols(r, "resistance_zone")} for r in signals]
+                 "timestamp": r["timestamp"], **(r["levels"] or {})} for r in signals]
     pd.DataFrame(sig_rows).to_csv(os.path.join(RESULTS_DIR, "latest_signals.csv"), index=False)
 
     sig_b_rows = [{"symbol": r["symbol"], "timeframe": r["timeframe"], "signal": r["signal"], "source": r["source"],
@@ -447,21 +489,12 @@ def write_results(signals, signals_b, watch, errors, scanned, universe_size):
                   for r in signals_b]
     pd.DataFrame(sig_b_rows).to_csv(os.path.join(RESULTS_DIR, "latest_signals_b.csv"), index=False)
 
-    watch_rows = [{"symbol": r["symbol"], "timeframe": r["timeframe"], "ob_watch": r["ob_watch"], "close": r["close"],
-                   "timestamp": r["timestamp"], **_zone_cols(r, "support_zone"), **_zone_cols(r, "resistance_zone")}
-                  for r in watch]
-    pd.DataFrame(watch_rows).to_csv(os.path.join(RESULTS_DIR, "latest_watch.csv"), index=False)
-
     html = render_html(payload)
     with open(os.path.join(RESULTS_DIR, "latest.html"), "w") as f:
         f.write(html)
 
     log.info(f"Results written to {RESULTS_DIR}/ (latest.html, latest.json, latest_signals.csv, "
-             f"latest_signals_b.csv, latest_watch.csv)")
-
-
-def _zone_txt(z):
-    return f"{z['low']} - {z['high']}" if z else "-"
+             f"latest_signals_b.csv)")
 
 
 def render_html(payload: dict) -> str:
@@ -480,29 +513,10 @@ def render_html(payload: dict) -> str:
           <td>{lv.get('T1','-')}</td>
           <td>{lv.get('T2','-')}</td>
           <td>{lv.get('T3','-')}</td>
-          <td>{_zone_txt(r.get('support_zone'))}</td>
-          <td>{_zone_txt(r.get('resistance_zone'))}</td>
           <td>{r['timestamp']}</td>
         </tr>"""
     if not payload["signals"]:
-        sig_rows_html = '<tr><td colspan="12" class="empty">No Section A signals this run.</td></tr>'
-
-    watch_rows_html = ""
-    for r in payload["watch"]:
-        status = r["ob_watch"] or "OB_ZONE_LIVE"
-        cls = "buy" if "BUY" in status else "sell" if "SELL" in status else ""
-        watch_rows_html += f"""
-        <tr>
-          <td class="sym">{r['symbol']}</td>
-          <td class="tf">{r['timeframe']}</td>
-          <td class="{cls} verdict">{status}</td>
-          <td>{r['close']}</td>
-          <td>{_zone_txt(r.get('support_zone'))}</td>
-          <td>{_zone_txt(r.get('resistance_zone'))}</td>
-          <td>{r['timestamp']}</td>
-        </tr>"""
-    if not payload["watch"]:
-        watch_rows_html = '<tr><td colspan="7" class="empty">No live OB zones this run.</td></tr>'
+        sig_rows_html = '<tr><td colspan="10" class="empty">No Section A signals this run.</td></tr>'
 
     sig_b_rows_html = ""
     for r in payload.get("signals_b", []):
@@ -556,20 +570,12 @@ def render_html(payload: dict) -> str:
     Scanned {payload['scanned']}/{payload['universe_size']} symbols &middot;
     Timeframes: {', '.join(payload['timeframes'])} &middot;
     {payload['signal_count']} signals &middot;
-    {payload['watch_count']} OB zones live &middot;
     {payload['error_count']} errors &middot;
     10m/1H refresh every cycle, Daily/Weekly/Monthly cached once per day
   </div>
   <table>
-    <thead><tr><th>Symbol</th><th>TF</th><th>Signal</th><th>Close</th><th>Entry</th><th>SL</th><th>T1</th><th>T2</th><th>T3</th><th>Support Zone</th><th>Resistance Zone</th><th>Bar Time</th></tr></thead>
+    <thead><tr><th>Symbol</th><th>TF</th><th>Signal</th><th>Close</th><th>Entry</th><th>SL</th><th>T1</th><th>T2</th><th>T3</th><th>Bar Time</th></tr></thead>
     <tbody>{sig_rows_html}</tbody>
-  </table>
-
-  <h1>OB Zone Watch (live zones, any timeframe)</h1>
-  <div class="meta">The nearest still-unbroken order block zone on each side, per symbol/timeframe - a reference level, not a signal.</div>
-  <table>
-    <thead><tr><th>Symbol</th><th>TF</th><th>Status</th><th>Close</th><th>Support Zone</th><th>Resistance Zone</th><th>Bar Time</th></tr></thead>
-    <tbody>{watch_rows_html}</tbody>
   </table>
 
   <h1>ALL IN ONE PRO - Live Signals (Section B: Keltner/SMC + RSI Pattern) - All Timeframes</h1>
