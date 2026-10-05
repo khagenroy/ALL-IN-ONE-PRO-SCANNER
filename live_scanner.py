@@ -54,10 +54,11 @@ DATA ARCHITECTURE
   1D   - /charts/historical, ~10 years, cached to disk once per calendar day.
   1W/1M- resampled from that same cached daily history.
 
-REQUEST RATE: one process-wide limiter (MAX_REQUESTS_PER_SECOND, default 4 -
-Dhan's Data API limit is believed to be ~5/s, UNVERIFIED) is applied before
-every Dhan call, so SCAN_WORKERS threads can overlap network latency without
-ever exceeding it.
+REQUEST RATE: one process-wide, SELF-TUNING limiter is applied before every
+Dhan call. MAX_REQUESTS_PER_SECOND (default 4) is only the starting rate: each
+429 from Dhan slows it down (floor 1.5/s) and a long run of successes speeds it
+back up, so it finds Dhan's real limit by itself (a fixed 4/s drew 429s on the
+daily endpoint on 2026-10-05). SCAN_WORKERS threads overlap network latency.
 """
 
 import os
@@ -166,13 +167,28 @@ def dhan_headers():
 # ============================================================================
 
 class _RateLimiter:
-    """Spaces request START times at least 1/rps seconds apart across all
-    threads. Threads reserve a slot under the lock, then sleep outside it."""
+    """Spaces request START times at least `interval` seconds apart across all
+    threads. SELF-TUNING: every 429 from Dhan widens the interval (x1.5, down
+    to a floor of MIN_REQUESTS_PER_SECOND) and pauses all threads briefly;
+    a long run of successes narrows it back toward the configured rate. So
+    MAX_REQUESTS_PER_SECOND is only the starting point - the limiter finds
+    Dhan's real limit itself (2026-10-05: a fixed 4/s drew 429s on the daily
+    endpoint, so the true limit is lower than that, or shared with other
+    traffic on the same Dhan account)."""
 
-    def __init__(self, rps: float):
-        self.interval = 1.0 / max(rps, 0.1)
+    RECOVER_AFTER_OK = 60      # consecutive successes before speeding back up
+    SLOW_FACTOR = 1.5
+    FAST_FACTOR = 1.15
+    BURST_WINDOW = 2.0         # seconds: 429s closer together than this count as one burst
+
+    def __init__(self, rps: float, min_rps: float = 1.5):
+        self.base_interval = 1.0 / max(rps, 0.1)
+        self.max_interval = 1.0 / max(min(min_rps, rps), 0.1)
+        self.interval = self.base_interval
         self._lock = threading.Lock()
         self._next = 0.0
+        self._ok_streak = 0
+        self._last_throttle = -1e9
 
     def wait(self):
         with self._lock:
@@ -183,8 +199,78 @@ class _RateLimiter:
         if delay > 0:
             time.sleep(delay)
 
+    def throttle(self):
+        """Called on every 429. Widens the interval ONCE per burst: several
+        requests in flight at the same moment all get their 429 together, and
+        counting each one separately would crash the rate straight to the floor."""
+        with self._lock:
+            now = time.monotonic()
+            self._ok_streak = 0
+            if now - self._last_throttle >= self.BURST_WINDOW:
+                new = min(self.interval * self.SLOW_FACTOR, self.max_interval)
+                if new > self.interval:
+                    log.warning(f"Dhan rate limit hit - slowing request rate to {1.0 / new:.1f}/s")
+                self.interval = new
+                self._last_throttle = now
+            # brief global pause so in-flight threads don't keep hammering
+            self._next = max(self._next, now + self.interval * 2)
+
+    def success(self):
+        with self._lock:
+            self._ok_streak += 1
+            if self._ok_streak >= self.RECOVER_AFTER_OK and self.interval > self.base_interval:
+                self.interval = max(self.base_interval, self.interval / self.FAST_FACTOR)
+                self._ok_streak = 0
+
 
 _limiter = _RateLimiter(MAX_REQUESTS_PER_SECOND)
+
+
+# ============================================================================
+# SHARED DHAN POST (rate limiting + 429 backoff + retries)
+# ============================================================================
+
+MAX_429_RETRIES = 6   # 429s don't use up normal retry attempts; waits 2,4,6,... s
+
+
+def _dhan_post(path: str, payload: dict, label: str):
+    """POST to Dhan through the shared limiter. Returns the 2xx Response.
+    Raises RuntimeError: "400 from Dhan: ..." for a 400 (deterministic -
+    never retried), "rate-limited (429) ..." if Dhan keeps returning 429,
+    otherwise the last error after MAX_RETRIES attempts."""
+    last_err = None
+    rl_hits = 0
+    attempt = 0
+    while attempt < MAX_RETRIES:
+        attempt += 1
+        try:
+            _limiter.wait()
+            resp = requests.post(
+                f"{DHAN_BASE_URL}/{path}",
+                headers=dhan_headers(), json=payload, timeout=HTTP_TIMEOUT, proxies=DHAN_PROXIES,
+            )
+        except Exception as e:
+            last_err = e
+            time.sleep(1.5 * attempt)
+            continue
+        if resp.status_code == 429:
+            rl_hits += 1
+            _limiter.throttle()
+            if rl_hits <= MAX_429_RETRIES:
+                log.warning(f"Rate-limited on {label}, waiting {2 * rl_hits}s (429 #{rl_hits}/{MAX_429_RETRIES})")
+                time.sleep(2 * rl_hits)
+                attempt -= 1          # a 429 is not a failed attempt
+                continue
+            raise RuntimeError(f"rate-limited (429) {rl_hits} times on {label}")
+        if resp.status_code == 400:
+            raise RuntimeError(f"400 from Dhan: {resp.text[:150]}")
+        if resp.status_code >= 400:
+            last_err = f"HTTP {resp.status_code}"
+            time.sleep(1.5 * attempt)
+            continue
+        _limiter.success()
+        return resp
+    raise RuntimeError(f"{last_err}")
 
 
 # ============================================================================
@@ -225,25 +311,12 @@ def _fetch_intraday_chunk(security_id: str, exchange_segment: str, interval: int
         "securityId": security_id, "exchangeSegment": exchange_segment, "instrument": "EQUITY",
         "interval": interval, "fromDate": from_date, "toDate": to_date,
     }
-    last_err = None
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            _limiter.wait()
-            resp = requests.post(
-                f"{DHAN_BASE_URL}/charts/intraday",
-                headers=dhan_headers(), json=payload, timeout=HTTP_TIMEOUT, proxies=DHAN_PROXIES,
-            )
-            if resp.status_code == 429:
-                wait = 2 * attempt
-                log.warning(f"Rate-limited on {security_id} (interval={interval}), waiting {wait}s (attempt {attempt}/{MAX_RETRIES})")
-                time.sleep(wait)
-                continue
-            resp.raise_for_status()
-            return _parse_intraday(resp.json())
-        except Exception as e:
-            last_err = e
-            time.sleep(1.5 * attempt)
-    raise RuntimeError(f"Failed to fetch intraday(interval={interval}) chunk {from_date}..{to_date} for security_id={security_id}: {last_err}")
+    try:
+        resp = _dhan_post("charts/intraday", payload, f"{security_id} (interval={interval})")
+        return _parse_intraday(resp.json())
+    except RuntimeError as e:
+        raise RuntimeError(f"Failed to fetch intraday(interval={interval}) chunk {from_date}..{to_date} "
+                           f"for security_id={security_id}: {e}")
 
 
 def fetch_intraday_history(security_id: str, exchange_segment: str, interval: int, history_days: int) -> pd.DataFrame:
@@ -354,36 +427,13 @@ def fetch_daily_history(security_id: str, exchange_segment: str) -> pd.DataFrame
         "securityId": security_id, "exchangeSegment": exchange_segment, "instrument": "EQUITY",
         "expiryCode": 0, "oi": False, "fromDate": from_date, "toDate": to_date,
     }
-    last_err = None
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            _limiter.wait()
-            resp = requests.post(
-                f"{DHAN_BASE_URL}/charts/historical",
-                headers=dhan_headers(), json=payload, timeout=HTTP_TIMEOUT, proxies=DHAN_PROXIES,
-            )
-            if resp.status_code == 429:
-                wait = 2 * attempt
-                log.warning(f"Rate-limited on {security_id} (daily), waiting {wait}s (attempt {attempt}/{MAX_RETRIES})")
-                time.sleep(wait)
-                continue
-            if resp.status_code == 400:
-                # Deterministic rejection (2026-10-05: DH-905 for ~17% of symbols
-                # on a request identical to ones that succeed). Retrying only
-                # wastes time, so fail immediately and let the caller degrade.
-                raise RuntimeError(f"Failed to fetch daily history for security_id={security_id}: "
-                                   f"400 from Dhan: {resp.text[:150]}")
-            resp.raise_for_status()
-            return _parse_historical(resp.json())
-        except RuntimeError as e:
-            if "400 from Dhan" in str(e):
-                raise
-            last_err = e
-            time.sleep(1.5 * attempt)
-        except Exception as e:
-            last_err = e
-            time.sleep(1.5 * attempt)
-    raise RuntimeError(f"Failed to fetch daily history for security_id={security_id}: {last_err}")
+    try:
+        # A 400 here is deterministic (2026-10-05: DH-905 for ~17% of symbols on
+        # a request identical to ones that succeed) - _dhan_post never retries it.
+        resp = _dhan_post("charts/historical", payload, f"{security_id} (daily)")
+        return _parse_historical(resp.json())
+    except RuntimeError as e:
+        raise RuntimeError(f"Failed to fetch daily history for security_id={security_id}: {e}")
 
 
 def fetch_daily_history_cached(symbol: str, security_id: str, exchange_segment: str) -> pd.DataFrame:
@@ -557,7 +607,7 @@ def run_scan(mode: str = "intraday"):
     cfg = MODES[mode]
     symbols = _load_universe_symbols()
     log.info(f"[{mode}] scanning {len(symbols)} NSE equity symbols across {cfg['timeframes']} "
-             f"(Section A + Section B), {SCAN_WORKERS} workers, <= {MAX_REQUESTS_PER_SECOND:g} req/s...")
+             f"(Section A + Section B), {SCAN_WORKERS} workers, starting at {MAX_REQUESTS_PER_SECOND:g} req/s (self-tuning)...")
 
     # Resolve security ids up front, single-threaded (the scrip master loads
     # lazily and is not safe to initialise from several threads at once).
