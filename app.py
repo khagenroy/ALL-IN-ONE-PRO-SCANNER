@@ -100,14 +100,6 @@ def scanner_signals_b_csv():
     return send_file(path, mimetype="text/csv", as_attachment=True, download_name="all_in_one_pro_signals_section_b.csv")
 
 
-@app.route("/scanner/watch.csv", methods=["GET"])
-def scanner_watch_csv():
-    path = os.path.join(os.path.dirname(__file__), "results", "latest_watch.csv")
-    if not os.path.exists(path):
-        return "No scan has run yet.", 404
-    return send_file(path, mimetype="text/csv", as_attachment=True, download_name="all_in_one_pro_ob_watch.csv")
-
-
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
