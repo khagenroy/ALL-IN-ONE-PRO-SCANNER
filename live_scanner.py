@@ -279,8 +279,20 @@ def fetch_daily_history(security_id: str, exchange_segment: str) -> pd.DataFrame
                 log.warning(f"Rate-limited on {security_id} (daily), waiting {wait}s (attempt {attempt}/{MAX_RETRIES})")
                 time.sleep(wait)
                 continue
+            if resp.status_code == 400:
+                # Deterministic rejection (found 2026-10-05: Dhan returns DH-905
+                # "Missing required fields, bad values for parameters" for some
+                # symbols - RELIANCE, INFY - on every attempt while others like
+                # TCS work with the identical request). Retrying only wastes ~10s
+                # per symbol, so fail immediately and let the caller degrade.
+                raise RuntimeError(f"400 from Dhan: {resp.text[:150]}")
             resp.raise_for_status()
             return _parse_historical(resp.json())
+        except RuntimeError as e:
+            if str(e).startswith("400 from Dhan"):
+                raise RuntimeError(f"Failed to fetch daily history for security_id={security_id}: {e}")
+            last_err = e
+            time.sleep(1.5 * attempt)
         except Exception as e:
             last_err = e
             time.sleep(1.5 * attempt)
@@ -303,7 +315,20 @@ def fetch_daily_history_cached(symbol: str, security_id: str, exchange_segment: 
                     return cached
             except Exception as e:
                 log.warning(f"{symbol}: daily cache unreadable ({e}), refetching")
-    df = fetch_daily_history(security_id, exchange_segment)
+    try:
+        df = fetch_daily_history(security_id, exchange_segment)
+    except Exception as e:
+        # Dhan refused today's refresh - fall back to ANY older cached copy
+        # (daily bars barely change, a day-old history is far better than none).
+        if os.path.exists(cache_path):
+            try:
+                stale = pd.read_csv(cache_path, index_col=0, parse_dates=True)
+                if not stale.empty:
+                    log.warning(f"{symbol}: daily refresh failed ({e}); using stale cached history")
+                    return stale
+            except Exception:
+                pass
+        raise
     try:
         df.to_csv(cache_path)
     except Exception as e:
@@ -373,9 +398,16 @@ def build_all_timeframes(security_id: str, exchange_segment: str, symbol: str) -
     df60 = fetch_intraday_history_paginated(security_id, exchange_segment, INTRADAY_60MIN_INTERVAL, INTRADAY_60MIN_HISTORY_DAYS)
     df4h = build_merged_bars(df60, 4)
 
-    dfd = fetch_daily_history_cached(symbol, security_id, exchange_segment)
-    dfw = build_weekly_bars(dfd)
-    dfm = build_monthly_bars(dfd)
+    try:
+        dfd = fetch_daily_history_cached(symbol, security_id, exchange_segment)
+        dfw = build_weekly_bars(dfd)
+        dfm = build_monthly_bars(dfd)
+    except Exception as e:
+        # Daily data unavailable (and no stale cache) - still scan the three
+        # intraday timeframes instead of dropping the whole symbol.
+        log.warning(f"{symbol}: no daily data ({e}); scanning 10m/1H/4H only")
+        empty = pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+        dfd = dfw = dfm = empty
 
     return {"10m": df10, "1H": df60, "4H": df4h, "1D": dfd, "1W": dfw, "1M": dfm}
 
