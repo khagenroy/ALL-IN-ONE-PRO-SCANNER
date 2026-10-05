@@ -23,6 +23,17 @@ It runs as **two scans** in one service, split by how often their data changes:
 
 Each page links to the other. Run times on the page are shown in IST.
 
+## Morning-gainers strength study (`/gainers`)
+
+A third, separate job (`gainers_study.py`): read-only research, no signals, no orders. It answers "which stocks in the morning top-gainers list keep their strength all day, and how does volume relate to that?".
+
+- Pulls ~30 calendar days of 5-minute candles per stock (1 Dhan call per stock), then for **every** trading day takes the top 20 by % change vs previous close at **09:30 and 10:00 IST** (price >= 20, >= Rs 0.5 cr traded by then) and follows each through the day.
+- Each pick gets a verdict: **STRONG** (closed at/above its pick price, above VWAP, >=70% of later bars above VWAP), **HELD** (above VWAP, kept >= half its gain), **FADED** (green but gave most back), **REVERSED** (closed at/below previous close).
+- Also reports RVOL (morning volume vs the stock's own 10-day average for the same window), % at 11:00/12:00/13:00/14:00/close, further high and worst dip after the pick, volume after vs before the pick.
+- Page: `/gainers` (CSV links on it: all picks, latest day, per-stock summary). Runs once a day after 16:30 IST, plus a seed run on a fresh deploy (only outside market hours). Manual run: `python gainers_study.py`.
+- It rebuilds everything from Dhan's history each run, so nothing depends on files surviving a redeploy.
+- Env (all optional): `GAINERS_STUDY_AUTORUN` (default true), `GAINER_TOP_N` (20), `GAINER_PICK_TIMES` ("09:30,10:00"), `GAINER_HISTORY_DAYS` (30), `GAINER_MIN_PRICE` (20), `GAINER_MIN_TURNOVER_CR` (0.5).
+
 ## What this does NOT do
 
 - Does not place orders, does not touch dhan-bridge in any way.
@@ -83,6 +94,10 @@ two would add up against Dhan's request limit.
 - Swing scan: ~1000 daily calls = ~4-5 min once a day.
 - Compute (both sections) is only ~1 minute per 1000 symbols - the request rate is the limit.
 
+## Closed bars only
+
+The intraday scan only evaluates **closed** candles, matching the Pine script (alerts fire on `barstate.isconfirmed`). The candle still forming is dropped, so a signal appears one bar later than a live chart might flicker it, but it will not disappear when the bar closes. A 10m signal shows up in the first scan after that candle closes; 1H and 4H likewise. The Bar Time column is the candle's START time in UTC (03:45 = 09:15 IST).
+
 ## Reading the output
 
 Each page has two tables (Section A, Section B) with a **TF** column. A signal means the entry condition fired on the most recent bar of that timeframe. Section B's "source" column shows which mechanism fired: `SSL_SWEEP`/`BSL_SWEEP` (liquidity sweep-and-reclaim) or `RSI_CHECKLIST` (RSI + reversal candle + local extreme), plus that bar's RSI.
@@ -94,3 +109,27 @@ Each page has two tables (Section A, Section B) with a **TF** column. A signal m
 - **429 (rate limited):** retried up to 6 times with growing waits and does not count as a failed attempt; a symbol is only skipped if Dhan keeps returning 429 through all of them (the log says "rate-limited (429)", not a data problem). 400 errors are never retried; other HTTP errors are retried 3 times.
 - The intraday/swing split (this version) was tested against mocked Dhan responses only; the first live run is the real test.
 - Dhan's per-request date range cap on `/charts/intraday` is assumed ~90 days (unverified), which is why each 60-minute chunk is <=85 days.
+
+## Volume-spurt backtest (`/volspurt`)
+
+Research only - places no orders and does not touch the Section A / B signal logic.
+
+A "spurt" is a 5-minute candle (starting 09:30-14:25 IST) whose volume is far above that stock's
+average for the **same time of day over the previous 10 days**, on a candle that actually moved.
+The study replays every spurt in the last ~60 calendar days for the whole stock list and reports which
+rules would have made money after stop-loss, targets and costs.
+
+- Rules tested: FOLLOW (trade the candle's direction) and FADE (trade against it) x volume 3/4/5/6/8/10x x candle move 0.3/0.6/1.0% x target 1R/2R/3R.
+- Entry next candle's open; SL at the signal candle's far end; exit at target, SL or 15:25; stop wins ties; 0.05% round-trip cost; one trade per stock per day per rule.
+- For each rule: trades, win rate, average net R, profit factor, total R, and average R in the first vs second half of the period. "Positive in both halves" is the quick luck filter.
+- The page also splits the three best rules by time of day, VWAP side and up/down candle.
+
+Runs once a day after 17:30 IST (Mon-Fri), and once as a seed when there are no results yet (outside market hours, after the gainers study has produced its file). Results live in `results/` and are wiped on every Render redeploy, so the seed run repeats after a redeploy.
+
+Pages / downloads: `/volspurt`, `/volspurt/grid.csv` (every rule), `/volspurt/signals.csv` (every spurt with the R each rule would have made).
+
+Environment variables (all optional): `VOLSPURT_STUDY_AUTORUN` (true), `VOLSPURT_HISTORY_DAYS` (60), `VOLSPURT_COST_PCT` (0.05), `VOLSPURT_MIN_PRICE` (20), `VOLSPURT_MIN_BAR_TURNOVER_CR` (0.02), `VOLSPURT_MIN_TRADES` (150, minimum trades for a rule to be ranked).
+
+Run by hand: `python volume_spurt_study.py` (or `TEST_SYMBOL_LIMIT=20 python volume_spurt_study.py` for a quick dry run).
+
+Treat ~40 trading days as one market regime: the best rules are candidates to watch live, not proof.
