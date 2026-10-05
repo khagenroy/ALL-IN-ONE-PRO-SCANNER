@@ -1,10 +1,14 @@
 """
 ALL IN ONE PRO Live Scanner - standalone Flask app, separate repo/service
 from dhan-bridge entirely (shares no code or imports with it - see
-scrip_master.py's header for why). Runs live_scanner.run_scan() every 10
-minutes during NSE market hours in a background thread (same in-process
-pattern as dhan-bridge's own SL watchdog / EOD scanner autorun), and serves
-the latest result as a webpage.
+scrip_master.py's header for why). Two background scans run in this process:
+
+  INTRADAY (10m/1H/4H) - every 10 minutes during NSE market hours, on a FIXED
+      schedule (the next scan is due 10 minutes after the previous one STARTED,
+      not after it finished; if a scan overruns, the next one starts right
+      away - scans never overlap). Page: /scanner
+  SWING (1D/1W/1M)     - once a day after the close (16:00 IST), plus one seed
+      scan if no swing results exist yet (fresh deploy). Page: /swing
 
 This process does NOT place orders, does NOT touch dhan-bridge, and does
 NOT execute trades of any kind - it only reads market data and reports
@@ -16,7 +20,7 @@ import os
 import time
 import logging
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from flask import Flask, send_file
@@ -26,11 +30,15 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("all-in-one-pro-live")
 
 IST = ZoneInfo("Asia/Kolkata")
+RESULTS_DIR = os.path.join(os.path.dirname(__file__), "results")
 
 AUTORUN = os.environ.get("LIVE_SCANNER_AUTORUN", "true").strip().lower() == "true"
 POLL_INTERVAL_SECONDS = int(os.environ.get("LIVE_SCANNER_INTERVAL_SECONDS", "600") or "600")  # 10 min
+SWING_AUTORUN = os.environ.get("SWING_SCANNER_AUTORUN", "true").strip().lower() == "true"
 MARKET_OPEN = (9, 15)
 MARKET_CLOSE = (15, 30)
+SWING_RUN_AFTER = (16, 0)          # IST - after the daily candle is final
+SWING_RETRY_COOLDOWN_SECONDS = 1800  # don't hammer Dhan if a swing run fails
 
 
 def _within_market_hours(now_ist: datetime) -> bool:
@@ -41,33 +49,73 @@ def _within_market_hours(now_ist: datetime) -> bool:
     return open_t <= now_ist <= close_t
 
 
-def _live_scanner_loop():
-    log.info(f"Live scanner autorun started - every {POLL_INTERVAL_SECONDS}s during "
+def _intraday_loop():
+    log.info(f"Intraday scanner autorun started - every {POLL_INTERVAL_SECONDS}s (fixed schedule) during "
              f"{MARKET_OPEN[0]:02d}:{MARKET_OPEN[1]:02d}-{MARKET_CLOSE[0]:02d}:{MARKET_CLOSE[1]:02d} IST, Mon-Fri.")
     while True:
         try:
-            now = datetime.now(IST)
-            if _within_market_hours(now):
+            if _within_market_hours(datetime.now(IST)):
+                t0 = time.monotonic()
                 try:
                     import live_scanner
-                    log.info("Running live scan...")
-                    live_scanner.run_scan()
-                    log.info("Live scan complete.")
+                    log.info("Running intraday scan...")
+                    live_scanner.run_scan("intraday")
+                    log.info("Intraday scan complete.")
                 except Exception as e:
-                    log.error(f"Error during live scan: {e}")
-                time.sleep(POLL_INTERVAL_SECONDS)
+                    log.error(f"Error during intraday scan: {e}")
+                # fixed-rate: next scan is due POLL_INTERVAL after this one STARTED
+                time.sleep(max(5.0, POLL_INTERVAL_SECONDS - (time.monotonic() - t0)))
             else:
-                # outside market hours - sleep until the next likely useful
-                # check rather than busy-polling every 10 min all night
-                next_check = now + timedelta(minutes=30)
-                time.sleep(max((next_check - now).total_seconds(), 60))
+                time.sleep(60)  # outside hours: check the clock every minute so 9:15 starts on time
         except Exception as e:
-            log.error(f"Error in live scanner loop: {e}")
+            log.error(f"Error in intraday scanner loop: {e}")
             time.sleep(60)
 
 
+def _swing_results_path() -> str:
+    return os.path.join(RESULTS_DIR, "latest_swing.json")
+
+
+def _swing_due(now_ist: datetime) -> bool:
+    """True if there are no swing results yet (seed), or it's a weekday past
+    16:00 IST and the last swing results were written before today."""
+    path = _swing_results_path()
+    if not os.path.exists(path):
+        return True
+    if now_ist.weekday() >= 5:
+        return False
+    after_t = now_ist.replace(hour=SWING_RUN_AFTER[0], minute=SWING_RUN_AFTER[1], second=0, microsecond=0)
+    if now_ist < after_t:
+        return False
+    last_run_date = datetime.fromtimestamp(os.path.getmtime(path), IST).date()
+    return last_run_date < now_ist.date()
+
+
+def _swing_loop():
+    log.info(f"Swing scanner autorun started - once a day after {SWING_RUN_AFTER[0]:02d}:{SWING_RUN_AFTER[1]:02d} IST "
+             f"(Mon-Fri), plus one seed run if no swing results exist yet.")
+    last_attempt = 0.0
+    while True:
+        try:
+            if _swing_due(datetime.now(IST)) and (time.monotonic() - last_attempt) >= SWING_RETRY_COOLDOWN_SECONDS:
+                last_attempt = time.monotonic()
+                try:
+                    import live_scanner
+                    log.info("Running swing scan...")
+                    live_scanner.run_scan("swing")
+                    log.info("Swing scan complete.")
+                except Exception as e:
+                    log.error(f"Error during swing scan: {e}")
+            time.sleep(300)
+        except Exception as e:
+            log.error(f"Error in swing scanner loop: {e}")
+            time.sleep(300)
+
+
 if AUTORUN:
-    threading.Thread(target=_live_scanner_loop, daemon=True, name="live-scanner-autorun").start()
+    threading.Thread(target=_intraday_loop, daemon=True, name="intraday-autorun").start()
+if SWING_AUTORUN:
+    threading.Thread(target=_swing_loop, daemon=True, name="swing-autorun").start()
 
 
 @app.route("/health", methods=["GET"])
@@ -75,29 +123,49 @@ def health():
     return {"status": "ok"}, 200
 
 
-@app.route("/scanner", methods=["GET"])
-def scanner_results():
-    path = os.path.join(os.path.dirname(__file__), "results", "latest.html")
+def _serve_html(filename: str):
+    path = os.path.join(RESULTS_DIR, filename)
     if not os.path.exists(path):
         return "No scan has run yet.", 404
     with open(path) as f:
         return f.read()
 
 
-@app.route("/scanner/signals.csv", methods=["GET"])
-def scanner_signals_csv():
-    path = os.path.join(os.path.dirname(__file__), "results", "latest_signals.csv")
+def _serve_csv(filename: str, download_name: str):
+    path = os.path.join(RESULTS_DIR, filename)
     if not os.path.exists(path):
         return "No scan has run yet.", 404
-    return send_file(path, mimetype="text/csv", as_attachment=True, download_name="all_in_one_pro_signals.csv")
+    return send_file(path, mimetype="text/csv", as_attachment=True, download_name=download_name)
+
+
+@app.route("/scanner", methods=["GET"])
+def scanner_results():
+    return _serve_html("latest.html")
+
+
+@app.route("/scanner/signals.csv", methods=["GET"])
+def scanner_signals_csv():
+    return _serve_csv("latest_signals.csv", "all_in_one_pro_intraday_signals.csv")
 
 
 @app.route("/scanner/signals_b.csv", methods=["GET"])
 def scanner_signals_b_csv():
-    path = os.path.join(os.path.dirname(__file__), "results", "latest_signals_b.csv")
-    if not os.path.exists(path):
-        return "No scan has run yet.", 404
-    return send_file(path, mimetype="text/csv", as_attachment=True, download_name="all_in_one_pro_signals_section_b.csv")
+    return _serve_csv("latest_signals_b.csv", "all_in_one_pro_intraday_signals_section_b.csv")
+
+
+@app.route("/swing", methods=["GET"])
+def swing_results():
+    return _serve_html("latest_swing.html")
+
+
+@app.route("/swing/signals.csv", methods=["GET"])
+def swing_signals_csv():
+    return _serve_csv("latest_swing_signals.csv", "all_in_one_pro_swing_signals.csv")
+
+
+@app.route("/swing/signals_b.csv", methods=["GET"])
+def swing_signals_b_csv():
+    return _serve_csv("latest_swing_signals_b.csv", "all_in_one_pro_swing_signals_section_b.csv")
 
 
 if __name__ == "__main__":
