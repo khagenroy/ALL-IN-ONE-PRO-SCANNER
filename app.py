@@ -112,10 +112,104 @@ def _swing_loop():
             time.sleep(300)
 
 
+GAINERS_AUTORUN = os.environ.get("GAINERS_STUDY_AUTORUN", "true").strip().lower() == "true"
+GAINERS_RUN_AFTER = (16, 30)       # IST - after the intraday/swing scans have had their turn
+GAINERS_RETRY_COOLDOWN_SECONDS = 1800
+
+
+def _gainers_results_path() -> str:
+    return os.path.join(RESULTS_DIR, "gainers.json")
+
+
+def _gainers_due(now_ist: datetime) -> bool:
+    """Seed run when there are no results (fresh deploy) - but never during
+    market hours, so it cannot steal request budget from the 10-minute
+    intraday cycle - and once a day on weekdays after 16:30 IST."""
+    path = _gainers_results_path()
+    if not os.path.exists(path):
+        return not _within_market_hours(now_ist)
+    if now_ist.weekday() >= 5:
+        return False
+    after_t = now_ist.replace(hour=GAINERS_RUN_AFTER[0], minute=GAINERS_RUN_AFTER[1], second=0, microsecond=0)
+    if now_ist < after_t:
+        return False
+    return datetime.fromtimestamp(os.path.getmtime(path), IST).date() < now_ist.date()
+
+
+def _gainers_loop():
+    log.info(f"Gainers study autorun started - once a day after {GAINERS_RUN_AFTER[0]:02d}:{GAINERS_RUN_AFTER[1]:02d} IST "
+             f"(Mon-Fri), plus one seed run if no results exist yet (outside market hours).")
+    last_attempt = 0.0
+    while True:
+        try:
+            if _gainers_due(datetime.now(IST)) and (time.monotonic() - last_attempt) >= GAINERS_RETRY_COOLDOWN_SECONDS:
+                last_attempt = time.monotonic()
+                try:
+                    import gainers_study
+                    log.info("Running gainers study...")
+                    gainers_study.run_study()
+                    log.info("Gainers study complete.")
+                except Exception as e:
+                    log.error(f"Error during gainers study: {e}")
+            time.sleep(300)
+        except Exception as e:
+            log.error(f"Error in gainers loop: {e}")
+            time.sleep(300)
+
+
+VOLSPURT_AUTORUN = os.environ.get("VOLSPURT_STUDY_AUTORUN", "true").strip().lower() == "true"
+VOLSPURT_RUN_AFTER = (17, 30)      # IST - after the gainers study (16:30) has finished
+VOLSPURT_RETRY_COOLDOWN_SECONDS = 1800
+
+
+def _volspurt_results_path() -> str:
+    return os.path.join(RESULTS_DIR, "volspurt.json")
+
+
+def _volspurt_due(now_ist: datetime) -> bool:
+    """Seed run when there are no results, outside market hours, and only once
+    the gainers study has produced its file (so the two never run together).
+    Afterwards once a day on weekdays after 17:30 IST."""
+    path = _volspurt_results_path()
+    if not os.path.exists(path):
+        return (not _within_market_hours(now_ist)) and os.path.exists(_gainers_results_path())
+    if now_ist.weekday() >= 5:
+        return False
+    after_t = now_ist.replace(hour=VOLSPURT_RUN_AFTER[0], minute=VOLSPURT_RUN_AFTER[1], second=0, microsecond=0)
+    if now_ist < after_t:
+        return False
+    return datetime.fromtimestamp(os.path.getmtime(path), IST).date() < now_ist.date()
+
+
+def _volspurt_loop():
+    log.info(f"Volume-spurt backtest autorun started - once a day after {VOLSPURT_RUN_AFTER[0]:02d}:{VOLSPURT_RUN_AFTER[1]:02d} IST "
+             f"(Mon-Fri), plus one seed run if no results exist yet (outside market hours, after the gainers study).")
+    last_attempt = 0.0
+    while True:
+        try:
+            if _volspurt_due(datetime.now(IST)) and (time.monotonic() - last_attempt) >= VOLSPURT_RETRY_COOLDOWN_SECONDS:
+                last_attempt = time.monotonic()
+                try:
+                    import volume_spurt_study
+                    log.info("Running volume-spurt backtest...")
+                    volume_spurt_study.run_study()
+                    log.info("Volume-spurt backtest complete.")
+                except Exception as e:
+                    log.error(f"Error during volume-spurt backtest: {e}")
+            time.sleep(300)
+        except Exception as e:
+            log.error(f"Error in volume-spurt loop: {e}")
+            time.sleep(300)
+
+
 if AUTORUN:
     threading.Thread(target=_intraday_loop, daemon=True, name="intraday-autorun").start()
 if SWING_AUTORUN:
     threading.Thread(target=_swing_loop, daemon=True, name="swing-autorun").start()
+if GAINERS_AUTORUN:
+    threading.Thread(target=_gainers_loop, daemon=True, name="gainers-autorun").start()
+if VOLSPURT_AUTORUN:
+    threading.Thread(target=_volspurt_loop, daemon=True, name="volspurt-autorun").start()
 
 
 @app.route("/health", methods=["GET"])
@@ -166,6 +260,41 @@ def swing_signals_csv():
 @app.route("/swing/signals_b.csv", methods=["GET"])
 def swing_signals_b_csv():
     return _serve_csv("latest_swing_signals_b.csv", "all_in_one_pro_swing_signals_section_b.csv")
+
+
+@app.route("/gainers", methods=["GET"])
+def gainers_results():
+    return _serve_html("gainers.html")
+
+
+@app.route("/gainers/picks.csv", methods=["GET"])
+def gainers_picks_csv():
+    return _serve_csv("gainers_picks.csv", "morning_gainers_all_picks.csv")
+
+
+@app.route("/gainers/latest.csv", methods=["GET"])
+def gainers_latest_csv():
+    return _serve_csv("gainers_latest.csv", "morning_gainers_latest_day.csv")
+
+
+@app.route("/gainers/summary.csv", methods=["GET"])
+def gainers_summary_csv():
+    return _serve_csv("gainers_summary.csv", "morning_gainers_per_stock.csv")
+
+
+@app.route("/volspurt", methods=["GET"])
+def volspurt_results():
+    return _serve_html("volspurt.html")
+
+
+@app.route("/volspurt/grid.csv", methods=["GET"])
+def volspurt_grid_csv():
+    return _serve_csv("volspurt_grid.csv", "volume_spurt_rules.csv")
+
+
+@app.route("/volspurt/signals.csv", methods=["GET"])
+def volspurt_signals_csv():
+    return _serve_csv("volspurt_signals.csv", "volume_spurt_all_signals.csv")
 
 
 if __name__ == "__main__":
