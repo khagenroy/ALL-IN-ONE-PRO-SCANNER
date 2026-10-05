@@ -262,22 +262,6 @@ def compute_section_a(df: pd.DataFrame) -> dict:
             counter += 1
         bearish_ob = [ob for ob in bearish_ob if not (ob["broken"] and close[i] > ob["value"])]
 
-    # live_ob_zone_present on the LAST bar: any unbroken OB (within the
-    # numberObShow visible window) still active, used below to report
-    # "OB Zone Watch" when there's a live zone nearby but nothing fired.
-    def _has_live_zone(obs):
-        return any(not ob["broken"] for ob in obs[-NUMBER_OB_SHOW:])
-
-    def _nearest_live_zone(obs):
-        """Newest still-live (unbroken) OB within the visible window, or None.
-        Added for the MTF dashboard (Khagen's request, 2026-10-04) - the
-        original scanner only reported zone WATCH status, not the zone's
-        actual price bounds."""
-        for ob in reversed(obs[-NUMBER_OB_SHOW:]):
-            if not ob["broken"]:
-                return ob
-        return None
-
     # --- Liquidity sweep engine (lines 266-336) ---
     ph = _pivot_high(high, LIQUIDITY_LEN, LIQUIDITY_LEN)
     pl = _pivot_low(low, LIQUIDITY_LEN, LIQUIDITY_LEN)
@@ -374,49 +358,14 @@ def compute_section_a(df: pd.DataFrame) -> dict:
         signal = "OB_SELL"
         levels = _entry_sl_targets("sell", low[i], high[i] + sl_buffer)
 
-    ob_watch = None
-    if signal is None:
-        if ob_zone_touched_buy[i] or _has_live_zone(bullish_ob):
-            ob_watch = "OB_ZONE_WATCH_BUY" if (ob_zone_touched_buy[i] or any(
-                not ob["broken"] and low[i] <= ob["value"] + atr[i] * OB_TOUCH_ZONE_ATR_MULT
-                for ob in bullish_ob[-NUMBER_OB_SHOW:])) else None
-        if ob_watch is None and (ob_zone_touched_sell[i] or _has_live_zone(bearish_ob)):
-            if ob_zone_touched_sell[i] or any(
-                not ob["broken"] and high[i] >= ob["value"] - atr[i] * OB_TOUCH_ZONE_ATR_MULT
-                for ob in bearish_ob[-NUMBER_OB_SHOW:]
-            ):
-                ob_watch = "OB_ZONE_WATCH_SELL"
-
-    # Only report a zone when price is actually within reach of it (same
-    # 0.5x-ATR "touch" proximity the original scanner used to flag
-    # OB_ZONE_WATCH_BUY/SELL) - NOT whenever one merely exists somewhere in
-    # history. Fixed 2026-10-04: the first cut of this reported the nearest
-    # LIVE zone unconditionally, which meant a zone formed months ago that
-    # price has long since moved away from still showed up as "current" -
-    # nearly every symbol lit up on nearly every timeframe, which isn't
-    # what "OB zone" means in the original indicator (Khagen caught this:
-    # "every symbol has 6 TF OB zone how it can be").
-    nearest_bull = _nearest_live_zone(bullish_ob)
-    nearest_bear = _nearest_live_zone(bearish_ob)
-
-    support_zone = None
-    if nearest_bull:
-        zl, zh = nearest_bull["value"], nearest_bull["value"] + nearest_bull["atr"]
-        if close[i] <= zh + atr[i] * OB_TOUCH_ZONE_ATR_MULT:
-            support_zone = {"low": round(zl, 2), "high": round(zh, 2)}
-
-    resistance_zone = None
-    if nearest_bear:
-        zl, zh = nearest_bear["value"] - nearest_bear["atr"], nearest_bear["value"]
-        if close[i] >= zl - atr[i] * OB_TOUCH_ZONE_ATR_MULT:
-            resistance_zone = {"low": round(zl, 2), "high": round(zh, 2)}
-
+    # OB Zone Watch / support-resistance zone reporting REMOVED 2026-10-05 at
+    # Khagen's request - the scanner now reports only confirmed signals
+    # (SWEEP_BUY/SELL, OB_BUY/SELL = a completed OB mitigation, not a mere
+    # "price is near a zone" watch). The OB tracking/mitigation logic above is
+    # unchanged; it still drives the OB_BUY/OB_SELL signals.
     return {
         "timestamp": str(df.index[i]),
         "close": round(float(close[i]), 2),
         "signal": signal,
         "levels": levels,
-        "ob_watch": ob_watch,
-        "support_zone": support_zone,
-        "resistance_zone": resistance_zone,
     }
