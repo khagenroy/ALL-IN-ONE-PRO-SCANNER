@@ -68,10 +68,11 @@ import json
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import requests
+import numpy as np
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -524,12 +525,39 @@ def build_monthly_bars(df_daily: pd.DataFrame) -> pd.DataFrame:
     return out.sort_index()
 
 
+SESSION_END_UTC_HOUR = 10          # NSE closes 15:30 IST = 10:00 UTC (Dhan timestamps are UTC)
+BAR_CLOSE_GRACE_SECONDS = 5        # let Dhan finalise a bar a few seconds after it closes
+
+
+def drop_forming_bars(df: pd.DataFrame, bar_minutes: int, as_of: pd.Timestamp) -> pd.DataFrame:
+    """Keeps only CLOSED bars. The Pine script only fires on a confirmed bar
+    (barstate.isconfirmed), so the scanner must not evaluate a candle that is
+    still forming - its close/high/low keep changing and a signal on it can
+    vanish by the time the bar closes. A bar is closed once its end time has
+    passed; the last bar of a session ends at 15:30 IST even if shorter than
+    the timeframe (e.g. the 15:15 hourly bar)."""
+    if df.empty:
+        return df
+    idx = df.index
+    ends = (idx + pd.Timedelta(minutes=bar_minutes)).to_numpy()
+    session_end = (idx.normalize() + pd.Timedelta(hours=SESSION_END_UTC_HOUR)).to_numpy()
+    ends = pd.DatetimeIndex(np.minimum(ends, session_end))
+    closed = (ends + pd.Timedelta(seconds=BAR_CLOSE_GRACE_SECONDS)) <= as_of
+    return df[closed]
+
+
 def build_intraday_timeframes(security_id: str, exchange_segment: str, symbol: str) -> dict:
     """{'10m','1H','4H'} - ~2 Dhan calls per symbol per cycle (5-min pull +
-    recent 60-min chunk; the older 60-min chunk comes from the disk cache)."""
+    recent 60-min chunk; the older 60-min chunk comes from the disk cache).
+    Only CLOSED bars are returned (see drop_forming_bars)."""
+    as_of = pd.Timestamp(datetime.now(timezone.utc).replace(tzinfo=None))  # taken BEFORE the fetch
     df5 = fetch_intraday_history(security_id, exchange_segment, INTRADAY_5MIN_INTERVAL, INTRADAY_5MIN_HISTORY_DAYS)
     df60 = fetch_60min_history(symbol, security_id, exchange_segment)
-    return {"10m": build_merged_bars(df5, 2), "1H": df60, "4H": build_merged_bars(df60, 4)}
+    return {
+        "10m": drop_forming_bars(build_merged_bars(df5, 2), 10, as_of),
+        "1H": drop_forming_bars(df60, 60, as_of),
+        "4H": drop_forming_bars(build_merged_bars(df60, 4), 240, as_of),
+    }
 
 
 def build_swing_timeframes(security_id: str, exchange_segment: str, symbol: str) -> dict:
