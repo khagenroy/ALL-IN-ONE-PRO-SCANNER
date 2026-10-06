@@ -150,6 +150,8 @@ def analyse(df: pd.DataFrame, tf: str, sym: str, backtest: bool, recent: int = 1
         if intraday:
             ts = ts + pd.Timedelta(minutes=330)        # Dhan intraday stamps are UTC -> show IST
             return ts.strftime("%Y-%m-%d %H:%M")
+        if ts.hour == 18 and ts.minute == 30:          # Dhan daily stamp = IST midnight shown as UTC -> real trading date is +5:30
+            ts = ts + pd.Timedelta(minutes=330)
         return ts.strftime("%Y-%m-%d")
 
     trades, live = [], []

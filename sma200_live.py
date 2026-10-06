@@ -15,7 +15,7 @@ The rule is UNTESTED live - the backtest at /sma200 shows how it has done histor
 import os
 import json
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta, timezone, time as dtime
 
 import pandas as pd
 
@@ -27,11 +27,31 @@ TF_ORDER = {"10m": 0, "1H": 1, "4H": 2, "1D": 3, "1W": 4}
 _LOCK = threading.Lock()
 
 
+def _closed_only(df: pd.DataFrame, tf: str) -> pd.DataFrame:
+    """Daily / weekly: never look at a candle that has not finished (the Pine rule fires on closed bars only).
+    A weekly candle is labelled with its Friday and is closed after Friday 15:35 IST; a daily candle after 15:35 IST of its day.
+    Dhan daily stamps sit at 18:30 UTC of the PREVIOUS day (= IST midnight), so +5:30 gives the real trading date."""
+    if df is None or df.empty or tf not in ("1D", "1W"):
+        return df
+    now = datetime.now(timezone(timedelta(hours=5, minutes=30))).replace(tzinfo=None)
+    after_close = now.time() >= dtime(15, 35)
+    last = df.index[-1]
+    if tf == "1W":
+        day = last.date()
+    else:
+        day = (last + pd.Timedelta(minutes=330)).date() if (last.hour == 18 and last.minute == 30) else last.date()
+    done = now.date() > day or (now.date() == day and after_close)
+    return df if done else df.iloc[:-1]
+
+
 def live_setups(df: pd.DataFrame, tf: str, sym: str) -> list:
     """SMA200 setups on the last few closed bars of one symbol / timeframe. Never raises."""
     try:
         import sma200_study as st
         if tf not in st.TF_CFG:
+            return []
+        df = _closed_only(df, tf)
+        if df is None or df.empty:
             return []
         _, live = st.analyse(df, tf, sym, False, RECENT_BARS.get(tf, 1))
         return live
