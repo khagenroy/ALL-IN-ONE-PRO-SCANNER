@@ -19,6 +19,8 @@ from datetime import datetime, timedelta, timezone, time as dtime
 
 import pandas as pd
 
+import confluence as cf
+
 RECENT_BARS = {"10m": 3, "1H": 2, "4H": 2, "1D": 1, "1W": 1}   # last N closed bars checked each cycle
 STRONG_VOL_X = 1.5          # "strong" = volume >= 1.5x its 20-bar average AND SMA slope >= 1x the timeframe's normal
 STRONG_SLOPE_X = 1.0
@@ -101,6 +103,7 @@ def update(results_dir: str, mode: str, rows: list, ist_now: datetime, cycle_sec
             k = _key(r)
             if k in keep:
                 keep[k].update({x: r[x] for x in ("close", "sma200", "dist_pct", "slope_pct", "slope_x", "slope_deg", "vol_x", "stop", "risk_pct", "bars_ago")})
+                keep[k].update({x: r[x] for x in ("vol_build", "squeeze", "htf_ok", "confl", "score", "score_tags", "rule", "rule_avg_R", "rule_trades") if x in r})
             else:
                 r = dict(r)
                 r["first_seen"] = now_s
@@ -144,9 +147,10 @@ def _render(df: pd.DataFrame, meta: dict, now_s: str) -> str:
             trs += (f"<tr class='{'strong' if strong else ''}'><td class='sym'>{r['symbol']}{' &#9733;' if strong else ''}</td><td>{r['tf']}</td>"
                     f"<td class='{'pos' if r['side'] == 'LONG' else 'neg'}'>{r['side']}</td><td>{r['bar_time']}</td><td>{_f(r['close'])}</td>"
                     f"<td>{_f(r['sma200'])}</td><td>{_f(r['dist_pct'], 2, '%')}</td><td>{_f(r['slope_pct'], 2, '%')} ({_f(r['slope_x'], 1)}x, {_f(r.get('slope_deg'), 0, '&deg;')})</td>"
-                    f"<td>{_f(r['vol_x'], 1, 'x')}</td><td>{_f(r['stop'])}</td><td>{_f(r['risk_pct'], 2, '%')}</td><td>{str(r['first_seen'])[11:16]}</td></tr>")
+                    f"<td>{_f(r['vol_x'], 1, 'x')}</td><td>{_f(r['stop'])}</td><td>{_f(r['risk_pct'], 2, '%')}</td>"
+                    f"<td>{cf.score_cell(r)}</td><td>{cf.rule_cell(r)}</td><td>{str(r['first_seen'])[11:16]}</td></tr>")
         return ("<table><thead><tr><th>Symbol</th><th>TF</th><th>Side</th><th>Signal candle (IST)</th><th>Close</th><th>SMA200</th><th>Distance</th>"
-                "<th>SMA slope</th><th>Volume vs 20-bar avg</th><th>Stop</th><th>Risk</th><th>Seen at</th></tr></thead><tbody>" + trs + "</tbody></table>")
+                "<th>SMA slope</th><th>Volume vs 20-bar avg</th><th>Stop</th><th>Risk</th><th>Clues (score)</th><th>Tested rule</th><th>Seen at</th></tr></thead><tbody>" + trs + "</tbody></table>")
 
     if df.empty:
         body = "<div class='empty'>No SMA200 setups found yet.</div>"
@@ -175,7 +179,7 @@ def _render(df: pd.DataFrame, meta: dict, now_s: str) -> str:
   tr:hover {{ background: #161b22; }} tr.strong {{ background: #1b2a1f; }}
 </style></head>
 <body>
-  <div class="nav"><a href="/scanner">Intraday scan</a><a href="/swing">Swing scan</a><a href="/sma200">SMA200 backtest</a><a href="/sma200now.csv">Download CSV</a></div>
+  <div class="nav"><a href="/scanner">Intraday scan</a><a href="/swing">Swing scan</a><a href="/bestnow">Best setups</a><a href="/trendnow">Trendline setups</a><a href="/sma200">SMA200 backtest</a><a href="/sma200now.csv">Download CSV</a></div>
   <h1>SMA200 support / rejection - setups</h1>
   <div class="meta">
     Page time {now_s} IST (auto-refreshes every minute) &middot; {mt or 'no scan has finished yet'}<br>

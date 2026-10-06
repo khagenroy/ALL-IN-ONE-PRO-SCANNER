@@ -646,6 +646,13 @@ def _scan_one_symbol(sym: str, security_id: str, segment: str, mode: str) -> dic
                 out_trend.extend(trendline_live.live_setups(df, tf, sym))
     except Exception:
         out_trend = []
+
+    # Clue checklist (volume build-up, squeeze, higher timeframe, SMA200 + trendline together) and tested-rule tags - isolated too.
+    try:
+        import confluence
+        confluence.enrich_live(sym, out_sma, out_trend, RESULTS_DIR)
+    except Exception:
+        pass
     return {"signals": out_a, "signals_b": out_b, "sma200": out_sma, "trend": out_trend}
 
 
@@ -716,6 +723,11 @@ def run_scan(mode: str = "intraday"):
         log.info(f"[{mode}] Trendline setups: {len(trend_rows)} found this cycle (page /trendnow)")
     except Exception as e:
         log.warning(f"[{mode}] Trendline setup list not updated: {e}")
+    try:
+        import confluence
+        confluence.update_best(RESULTS_DIR, datetime.now(IST))
+    except Exception as e:
+        log.warning(f"[{mode}] Best-setups page not updated: {e}")
     return signals, signals_b
 
 

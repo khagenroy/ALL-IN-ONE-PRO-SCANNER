@@ -55,6 +55,7 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import live_scanner as ls  # noqa: E402
 import volume_spurt_study as vs  # noqa: E402  (page helpers + _stats)
+import confluence as cf  # noqa: E402  (volume build-up / squeeze features shared with the trendline scanner)
 
 log = logging.getLogger("sma200_study")
 
@@ -132,6 +133,7 @@ def analyse(df: pd.DataFrame, tf: str, sym: str, backtest: bool, recent: int = 1
         vol_x = np.where(vma > 0, v / vma, np.nan)
         sma_lb = np.concatenate((np.full(lb, np.nan), sma[:-lb]))
         slope_pct = (sma - sma_lb) / sma_lb * 100.0
+    _vx, vol_build, squeeze = cf.series_features(o, h, l, c, v)
     above = (c > sma).astype(float); below = (c < sma).astype(float)
     prior_above = pd.Series(above).shift(1).rolling(PRIOR_BARS).sum().to_numpy() == PRIOR_BARS
     prior_below = pd.Series(below).shift(1).rolling(PRIOR_BARS).sum().to_numpy() == PRIOR_BARS
@@ -171,6 +173,8 @@ def analyse(df: pd.DataFrame, tf: str, sym: str, backtest: bool, recent: int = 1
                 # same slope as an angle: 1x "normal" slope = 45 degrees, 2x = 63, 3x = 72, flat = 0 (chart-zoom independent)
                 "slope_deg": round(float(np.degrees(np.arctan(float(slope_pct[t]) * sign / cfg["slope_base"]))), 1),
                 "vol_x": None if not np.isfinite(vol_x[t]) else round(float(vol_x[t]), 2),
+                "vol_build": None if not np.isfinite(vol_build[t]) else round(float(vol_build[t]), 2),
+                "squeeze": None if not np.isfinite(squeeze[t]) else round(float(squeeze[t]), 2),
                 "atr_pct": round(float(atr[t]) / float(c[t]) * 100, 2),
             }
             stop = (l[t] - STOP_BUFFER_ATR * atr[t]) if is_long else (h[t] + STOP_BUFFER_ATR * atr[t])
@@ -192,6 +196,7 @@ def analyse(df: pd.DataFrame, tf: str, sym: str, backtest: bool, recent: int = 1
             last_close = float(c[e - 1])
             costR = (entry * cost) / risk
             row["entry"] = round(entry, 2)
+            row["_t"] = int(t)
             row["risk_pct"] = round(risk / entry * 100, 2)
             for k in TARGET_K:
                 g = _sim(is_long, entry, float(stop), H, L, last_close, k)

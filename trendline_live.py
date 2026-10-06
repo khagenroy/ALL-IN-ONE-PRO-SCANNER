@@ -32,6 +32,8 @@ import numpy as np
 import pandas as pd
 from numpy.lib.stride_tricks import sliding_window_view
 
+import confluence as cf
+
 TREND_LEN = 20              # PA Toolkit "Trend Line Detection Sensitivity" (default 20)
 ATR_LEN = 14
 TOUCH_ATR = 0.25
@@ -105,17 +107,19 @@ def _stamp(ts: pd.Timestamp, intraday: bool) -> str:
     return ts.strftime("%Y-%m-%d")
 
 
-def find_setups(df: pd.DataFrame, tf: str, sym: str, recent: int = 1) -> list:
-    """Trendline setups on the last `recent` bars of df (df must hold CLOSED bars only)."""
+def find_setups(df: pd.DataFrame, tf: str, sym: str, recent: int = 1, window: int = WINDOW, keep_t: bool = False) -> list:
+    """Trendline setups on the last `recent` bars of df (df must hold CLOSED bars only).
+    window = how many of the latest bars are used; keep_t = also return each signal bar's position ("_t") - used by the backtest."""
     L = TREND_LEN
     if df is None or len(df) < 2 * L + 30:
         return []
-    d = df.iloc[-WINDOW:]
+    d = df.iloc[-window:]
     o = d["open"].to_numpy(float); h = d["high"].to_numpy(float); l = d["low"].to_numpy(float)
     c = d["close"].to_numpy(float); v = d["volume"].to_numpy(float)
     n = len(d)
     atr = _atr(h, l, c, ATR_LEN)
     vma = pd.Series(v).rolling(VOL_LEN, min_periods=VOL_LEN).mean().shift(1).to_numpy()
+    _vx, vol_build, squeeze = cf.series_features(o, h, l, c, v)
     ph = _pivots(h, L, True)
     pl = _pivots(l, L, False)
     intraday = tf in INTRADAY
@@ -175,11 +179,15 @@ def find_setups(df: pd.DataFrame, tf: str, sym: str, recent: int = 1) -> list:
                     "p2_time": _stamp(times[p2], intraday), "p2_price": round(v2, 2),
                     "line_age_bars": int(t - p2),
                     "vol_x": None if not (np.isfinite(vma[t]) and vma[t] > 0) else round(float(v[t] / vma[t]), 2),
+                    "vol_build": None if not np.isfinite(vol_build[t]) else round(float(vol_build[t]), 2),
+                    "squeeze": None if not np.isfinite(squeeze[t]) else round(float(squeeze[t]), 2),
                     "atr_pct": round(float(atr[t] / c[t] * 100.0), 2),
                     "stop": round(float(stop), 2),
                     "risk_pct": round(float(risk / c[t] * 100.0), 2) if risk > 0 else None,
                     "bars_ago": int(n - 1 - t),
                 })
+                if keep_t:
+                    out[-1]["_t"] = int(t)
     return out
 
 
@@ -242,6 +250,7 @@ def update(results_dir: str, mode: str, rows: list, ist_now: datetime, cycle_sec
             k = _key(r)
             if k in keep:
                 keep[k].update({x: r[x] for x in ("close", "line_value", "dist_pct", "vol_x", "stop", "risk_pct", "bars_ago")})
+                keep[k].update({x: r[x] for x in ("vol_build", "squeeze", "htf_ok", "confl", "score", "score_tags", "rule", "rule_avg_R", "rule_trades") if x in r})
             else:
                 r = dict(r)
                 r["first_seen"] = now_s
@@ -286,10 +295,11 @@ def _render(df: pd.DataFrame, meta: dict, now_s: str) -> str:
                     f"<td class='{'pos' if r['side'] == 'LONG' else 'neg'}'>{r['side']}</td><td>{r['event']}</td><td>{r['bar_time']}</td>"
                     f"<td>{_f(r['close'])}</td><td>{_f(r['line_value'])}</td><td>{_f(r['dist_pct'], 2, '%')}</td>"
                     f"<td>{_f(r['p1_price'])} ({str(r['p1_time'])[5:]}) &rarr; {_f(r['p2_price'])} ({str(r['p2_time'])[5:]})</td>"
-                    f"<td>{_f(r['vol_x'], 1, 'x')}</td><td>{_f(r['stop'])}</td><td>{_f(r['risk_pct'], 2, '%')}</td><td>{str(r['first_seen'])[11:16]}</td></tr>")
+                    f"<td>{_f(r['vol_x'], 1, 'x')}</td><td>{_f(r['stop'])}</td><td>{_f(r['risk_pct'], 2, '%')}</td>"
+                    f"<td>{cf.score_cell(r)}</td><td>{cf.rule_cell(r)}</td><td>{str(r['first_seen'])[11:16]}</td></tr>")
         return ("<table><thead><tr><th>Symbol</th><th>TF</th><th>Side</th><th>What happened</th><th>Signal candle (IST)</th><th>Close</th>"
                 "<th>Line now</th><th>Distance</th><th>Line through pivots (price, date)</th><th>Volume vs 20-bar avg</th><th>Stop</th><th>Risk</th>"
-                "<th>Seen at</th></tr></thead><tbody>" + trs + "</tbody></table>")
+                "<th>Clues (score)</th><th>Tested rule</th><th>Seen at</th></tr></thead><tbody>" + trs + "</tbody></table>")
 
     if df.empty:
         body = "<div class='empty'>No trendline setups found yet.</div>"
@@ -320,7 +330,7 @@ def _render(df: pd.DataFrame, meta: dict, now_s: str) -> str:
   tr:hover {{ background: #161b22; }} tr.strong {{ background: #1b2a1f; }}
 </style></head>
 <body>
-  <div class="nav"><a href="/scanner">Intraday scan</a><a href="/swing">Swing scan</a><a href="/sma200now">SMA200 setups</a><a href="/trendnow.csv">Download CSV</a></div>
+  <div class="nav"><a href="/scanner">Intraday scan</a><a href="/swing">Swing scan</a><a href="/bestnow">Best setups</a><a href="/sma200now">SMA200 setups</a><a href="/trendnow.csv">Download CSV</a></div>
   <h1>Trendline setups (same trendlines as PA Toolkit Lite)</h1>
   <div class="meta">
     Page time {now_s} IST (auto-refreshes every minute) &middot; {mt or 'no scan has finished yet'}<br>

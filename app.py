@@ -292,6 +292,50 @@ def _sma200_loop():
             time.sleep(300)
 
 
+CONFLUENCE_AUTORUN = os.environ.get("CONFLUENCE_STUDY_AUTORUN", "true").strip().lower() == "true"
+CONFLUENCE_RUN_AFTER = (20, 30)    # IST - after the SMA200 study (19:30)
+CONFLUENCE_RETRY_COOLDOWN_SECONDS = 1800
+
+
+def _confluence_results_path() -> str:
+    return os.path.join(RESULTS_DIR, "confluence.json")
+
+
+def _confluence_due(now_ist: datetime) -> bool:
+    """Seed run when there are no results, outside market hours, and only once the SMA200 study has produced its file.
+    Afterwards once a day on weekdays after 20:30 IST."""
+    path = _confluence_results_path()
+    if not os.path.exists(path):
+        return (not _within_market_hours(now_ist)) and os.path.exists(_sma200_results_path())
+    if now_ist.weekday() >= 5:
+        return False
+    after_t = now_ist.replace(hour=CONFLUENCE_RUN_AFTER[0], minute=CONFLUENCE_RUN_AFTER[1], second=0, microsecond=0)
+    if now_ist < after_t:
+        return False
+    return datetime.fromtimestamp(os.path.getmtime(path), IST).date() < now_ist.date()
+
+
+def _confluence_loop():
+    log.info(f"Confluence study autorun started - once a day after {CONFLUENCE_RUN_AFTER[0]:02d}:{CONFLUENCE_RUN_AFTER[1]:02d} IST "
+             f"(Mon-Fri), plus one seed run if no results exist yet (outside market hours, after the SMA200 study).")
+    last_attempt = 0.0
+    while True:
+        try:
+            if _confluence_due(datetime.now(IST)) and (time.monotonic() - last_attempt) >= CONFLUENCE_RETRY_COOLDOWN_SECONDS:
+                last_attempt = time.monotonic()
+                try:
+                    import confluence_study
+                    log.info("Running confluence study...")
+                    confluence_study.run_study()
+                    log.info("Confluence study complete.")
+                except Exception as e:
+                    log.error(f"Error during confluence study: {e}")
+            time.sleep(300)
+        except Exception as e:
+            log.error(f"Error in confluence loop: {e}")
+            time.sleep(300)
+
+
 if AUTORUN:
     threading.Thread(target=_intraday_loop, daemon=True, name="intraday-autorun").start()
 if SWING_AUTORUN:
@@ -304,6 +348,8 @@ if SPURTPB_AUTORUN:
     threading.Thread(target=_spurtpb_loop, daemon=True, name="spurtpb-autorun").start()
 if SMA200_AUTORUN:
     threading.Thread(target=_sma200_loop, daemon=True, name="sma200-autorun").start()
+if CONFLUENCE_AUTORUN:
+    threading.Thread(target=_confluence_loop, daemon=True, name="confluence-autorun").start()
 
 
 @app.route("/health", methods=["GET"])
@@ -424,6 +470,36 @@ def trend_now_results():
 @app.route("/trendnow.csv", methods=["GET"])
 def trend_now_csv():
     return _serve_csv("trend_now.csv", "trendline_setups_today.csv")
+
+
+@app.route("/bestnow", methods=["GET"])
+def best_now_results():
+    return _serve_html("best_now.html")
+
+
+@app.route("/bestnow.csv", methods=["GET"])
+def best_now_csv():
+    return _serve_csv("best_now.csv", "best_setups_today.csv")
+
+
+@app.route("/best", methods=["GET"])
+def best_results():
+    return _serve_html("confluence.html")
+
+
+@app.route("/best/effects.csv", methods=["GET"])
+def best_effects_csv():
+    return _serve_csv("confluence_effects.csv", "what_each_clue_is_worth.csv")
+
+
+@app.route("/best/grid.csv", methods=["GET"])
+def best_grid_csv():
+    return _serve_csv("confluence_grid.csv", "setup_clue_rules.csv")
+
+
+@app.route("/best/trades.csv", methods=["GET"])
+def best_trades_csv():
+    return _serve_csv("confluence_trades.csv", "all_historical_setups_with_clues.csv")
 
 
 @app.route("/sma200", methods=["GET"])
