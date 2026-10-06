@@ -744,6 +744,19 @@ def _atomic_csv(df: pd.DataFrame, path: str):
     os.replace(tmp, path)
 
 
+def _ist_stamp(ts, mode) -> str:
+    """DISPLAY ONLY: Dhan stamps are UTC (intraday) or IST-midnight-as-UTC (daily); show them in IST. Signal logic is not touched."""
+    try:
+        t = pd.Timestamp(str(ts))
+        if mode == "intraday":
+            return (t + pd.Timedelta(minutes=330)).strftime("%Y-%m-%d %H:%M")
+        if t.hour == 18 and t.minute == 30:
+            return (t + pd.Timedelta(minutes=330)).strftime("%Y-%m-%d")
+        return t.strftime("%Y-%m-%d") if (t.hour == 0 and t.minute == 0) else str(ts)
+    except Exception:
+        return str(ts)
+
+
 def write_results(mode, signals, signals_b, errors, no_data, scanned, universe_size, elapsed=0.0):
     cfg = MODES[mode]
     prefix = cfg["prefix"]
@@ -768,11 +781,11 @@ def write_results(mode, signals, signals_b, errors, no_data, scanned, universe_s
     _atomic_write(os.path.join(RESULTS_DIR, f"{prefix}.json"), json.dumps(payload, indent=2, default=str))
 
     sig_rows = [{"symbol": r["symbol"], "timeframe": r["timeframe"], "signal": r["signal"], "close": r["close"],
-                 "timestamp": r["timestamp"], **(r["levels"] or {})} for r in signals]
+                 "timestamp": _ist_stamp(r["timestamp"], mode), **(r["levels"] or {})} for r in signals]
     _atomic_csv(pd.DataFrame(sig_rows), os.path.join(RESULTS_DIR, f"{prefix}_signals.csv"))
 
     sig_b_rows = [{"symbol": r["symbol"], "timeframe": r["timeframe"], "signal": r["signal"], "source": r["source"],
-                   "close": r["close"], "rsi": r.get("rsi"), "timestamp": r["timestamp"], **(r["levels"] or {})}
+                   "close": r["close"], "rsi": r.get("rsi"), "timestamp": _ist_stamp(r["timestamp"], mode), **(r["levels"] or {})}
                   for r in signals_b]
     _atomic_csv(pd.DataFrame(sig_b_rows), os.path.join(RESULTS_DIR, f"{prefix}_signals_b.csv"))
 
@@ -800,7 +813,7 @@ def render_html(payload: dict) -> str:
           <td>{lv.get('T1','-')}</td>
           <td>{lv.get('T2','-')}</td>
           <td>{lv.get('T3','-')}</td>
-          <td>{r['timestamp']}</td>
+          <td>{_ist_stamp(r['timestamp'], payload.get('mode', 'intraday'))}</td>
         </tr>"""
     if not payload["signals"]:
         sig_rows_html = '<tr><td colspan="10" class="empty">No Section A signals this run.</td></tr>'
@@ -821,7 +834,7 @@ def render_html(payload: dict) -> str:
           <td>{lv.get('T1','-')}</td>
           <td>{lv.get('T2','-')}</td>
           <td>{r.get('rsi','-')}</td>
-          <td>{r['timestamp']}</td>
+          <td>{_ist_stamp(r['timestamp'], payload.get('mode', 'intraday'))}</td>
         </tr>"""
     if not payload.get("signals_b"):
         sig_b_rows_html = '<tr><td colspan="11" class="empty">No Section B signals this run.</td></tr>'
@@ -874,7 +887,7 @@ def render_html(payload: dict) -> str:
     {cfg['note']}
   </div>
   <table>
-    <thead><tr><th>Symbol</th><th>TF</th><th>Signal</th><th>Close</th><th>Entry</th><th>SL</th><th>T1</th><th>T2</th><th>T3</th><th>Bar Time</th></tr></thead>
+    <thead><tr><th>Symbol</th><th>TF</th><th>Signal</th><th>Close</th><th>Entry</th><th>SL</th><th>T1</th><th>T2</th><th>T3</th><th>Bar Time (IST)</th></tr></thead>
     <tbody>{sig_rows_html}</tbody>
   </table>
 
@@ -884,7 +897,7 @@ def render_html(payload: dict) -> str:
     or RSI_CHECKLIST (RSI + candlestick pattern).
   </div>
   <table>
-    <thead><tr><th>Symbol</th><th>TF</th><th>Signal</th><th>Source</th><th>Close</th><th>Entry</th><th>SL</th><th>T1</th><th>T2</th><th>RSI</th><th>Bar Time</th></tr></thead>
+    <thead><tr><th>Symbol</th><th>TF</th><th>Signal</th><th>Source</th><th>Close</th><th>Entry</th><th>SL</th><th>T1</th><th>T2</th><th>RSI</th><th>Bar Time (IST)</th></tr></thead>
     <tbody>{sig_b_rows_html}</tbody>
   </table>
 </body>
