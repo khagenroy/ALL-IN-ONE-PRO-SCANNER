@@ -80,7 +80,7 @@ def update(results_dir: str, mode: str, rows: list, ist_now: datetime, cycle_sec
                 continue
             k = _key(r)
             if k in keep:
-                keep[k].update({x: r[x] for x in ("close", "sma200", "dist_pct", "slope_pct", "slope_x", "vol_x", "stop", "risk_pct", "bars_ago")})
+                keep[k].update({x: r[x] for x in ("close", "sma200", "dist_pct", "slope_pct", "slope_x", "slope_deg", "vol_x", "stop", "risk_pct", "bars_ago")})
             else:
                 r = dict(r)
                 r["first_seen"] = now_s
@@ -123,7 +123,7 @@ def _render(df: pd.DataFrame, meta: dict, now_s: str) -> str:
             strong = bool(r.get("strong"))
             trs += (f"<tr class='{'strong' if strong else ''}'><td class='sym'>{r['symbol']}{' &#9733;' if strong else ''}</td><td>{r['tf']}</td>"
                     f"<td class='{'pos' if r['side'] == 'LONG' else 'neg'}'>{r['side']}</td><td>{r['bar_time']}</td><td>{_f(r['close'])}</td>"
-                    f"<td>{_f(r['sma200'])}</td><td>{_f(r['dist_pct'], 2, '%')}</td><td>{_f(r['slope_pct'], 2, '%')} ({_f(r['slope_x'], 1)}x)</td>"
+                    f"<td>{_f(r['sma200'])}</td><td>{_f(r['dist_pct'], 2, '%')}</td><td>{_f(r['slope_pct'], 2, '%')} ({_f(r['slope_x'], 1)}x, {_f(r.get('slope_deg'), 0, '&deg;')})</td>"
                     f"<td>{_f(r['vol_x'], 1, 'x')}</td><td>{_f(r['stop'])}</td><td>{_f(r['risk_pct'], 2, '%')}</td><td>{str(r['first_seen'])[11:16]}</td></tr>")
         return ("<table><thead><tr><th>Symbol</th><th>TF</th><th>Side</th><th>Signal candle (IST)</th><th>Close</th><th>SMA200</th><th>Distance</th>"
                 "<th>SMA slope</th><th>Volume vs 20-bar avg</th><th>Stop</th><th>Risk</th><th>Seen at</th></tr></thead><tbody>" + trs + "</tbody></table>")

@@ -166,6 +166,8 @@ def analyse(df: pd.DataFrame, tf: str, sym: str, backtest: bool, recent: int = 1
                 "sma200": round(float(sma[t]), 2), "dist_pct": round((float(c[t]) - float(sma[t])) / float(sma[t]) * 100, 2),
                 "slope_pct": round(float(slope_pct[t]) * sign, 3),
                 "slope_x": round(float(slope_pct[t]) * sign / cfg["slope_base"], 2),
+                # same slope as an angle: 1x "normal" slope = 45 degrees, 2x = 63, 3x = 72, flat = 0 (chart-zoom independent)
+                "slope_deg": round(float(np.degrees(np.arctan(float(slope_pct[t]) * sign / cfg["slope_base"]))), 1),
                 "vol_x": None if not np.isfinite(vol_x[t]) else round(float(vol_x[t]), 2),
                 "atr_pct": round(float(atr[t]) / float(c[t]) * 100, 2),
             }
@@ -386,7 +388,7 @@ def render_html(payload: dict, ranked: pd.DataFrame, grid: pd.DataFrame, lv: pd.
         for _, r in d.iterrows():
             trs += (f"<tr><td class='sym'>{r['symbol']}</td><td>{r['tf']}</td><td class='{'pos' if r['side'] == 'LONG' else 'neg'}'>{r['side']}</td>"
                     f"<td>{r['bar_time']}</td><td>{f(r['close'])}</td><td>{f(r['sma200'])}</td><td>{f(r['dist_pct'], 2, '%')}</td>"
-                    f"<td>{f(r['slope_pct'], 2, '%')} ({f(r['slope_x'], 1)}x)</td><td>{f(r['vol_x'], 1, 'x')}</td><td>{f(r['stop'])}</td><td>{f(r['risk_pct'], 2, '%')}</td></tr>")
+                    f"<td>{f(r['slope_pct'], 2, '%')} ({f(r['slope_x'], 1)}x, {f(r['slope_deg'], 0, '&deg;')})</td><td>{f(r['vol_x'], 1, 'x')}</td><td>{f(r['stop'])}</td><td>{f(r['risk_pct'], 2, '%')}</td></tr>")
         live_html = ("<table><thead><tr><th>Symbol</th><th>Timeframe</th><th>Side</th><th>Signal bar</th><th>Close</th><th>SMA200</th><th>Distance</th>"
                      "<th>SMA slope</th><th>Volume vs 20-bar avg</th><th>Stop</th><th>Risk</th></tr></thead><tbody>" + trs + "</tbody></table>")
 
