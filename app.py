@@ -202,6 +202,96 @@ def _volspurt_loop():
             time.sleep(300)
 
 
+SPURTPB_AUTORUN = os.environ.get("SPURTPB_STUDY_AUTORUN", "true").strip().lower() == "true"
+SPURTPB_RUN_AFTER = (18, 30)       # IST - after the volume-spurt backtest (17:30) has finished
+SPURTPB_RETRY_COOLDOWN_SECONDS = 1800
+
+
+def _spurtpb_results_path() -> str:
+    return os.path.join(RESULTS_DIR, "spurtpb.json")
+
+
+def _spurtpb_due(now_ist: datetime) -> bool:
+    """Seed run when there are no results, outside market hours, and only once the
+    volume-spurt backtest has produced its file (so the studies never run together).
+    Afterwards once a day on weekdays after 18:30 IST."""
+    path = _spurtpb_results_path()
+    if not os.path.exists(path):
+        return (not _within_market_hours(now_ist)) and os.path.exists(_volspurt_results_path())
+    if now_ist.weekday() >= 5:
+        return False
+    after_t = now_ist.replace(hour=SPURTPB_RUN_AFTER[0], minute=SPURTPB_RUN_AFTER[1], second=0, microsecond=0)
+    if now_ist < after_t:
+        return False
+    return datetime.fromtimestamp(os.path.getmtime(path), IST).date() < now_ist.date()
+
+
+def _spurtpb_loop():
+    log.info(f"Spurt-pullback backtest autorun started - once a day after {SPURTPB_RUN_AFTER[0]:02d}:{SPURTPB_RUN_AFTER[1]:02d} IST "
+             f"(Mon-Fri), plus one seed run if no results exist yet (outside market hours, after the volume-spurt backtest).")
+    last_attempt = 0.0
+    while True:
+        try:
+            if _spurtpb_due(datetime.now(IST)) and (time.monotonic() - last_attempt) >= SPURTPB_RETRY_COOLDOWN_SECONDS:
+                last_attempt = time.monotonic()
+                try:
+                    import spurt_pullback_study
+                    log.info("Running spurt-pullback backtest...")
+                    spurt_pullback_study.run_study()
+                    log.info("Spurt-pullback backtest complete.")
+                except Exception as e:
+                    log.error(f"Error during spurt-pullback backtest: {e}")
+            time.sleep(300)
+        except Exception as e:
+            log.error(f"Error in spurt-pullback loop: {e}")
+            time.sleep(300)
+
+
+SMA200_AUTORUN = os.environ.get("SMA200_STUDY_AUTORUN", "true").strip().lower() == "true"
+SMA200_RUN_AFTER = (19, 30)        # IST - after the other research studies (16:30 / 17:30 / 18:30) have finished
+SMA200_RETRY_COOLDOWN_SECONDS = 1800
+
+
+def _sma200_results_path() -> str:
+    return os.path.join(RESULTS_DIR, "sma200.json")
+
+
+def _sma200_due(now_ist: datetime) -> bool:
+    """Seed run when there are no results, outside market hours, and only once the spurt-pullback
+    study has produced its file (so the studies never run together). Afterwards once a day on
+    weekdays after 19:30 IST."""
+    path = _sma200_results_path()
+    if not os.path.exists(path):
+        return (not _within_market_hours(now_ist)) and os.path.exists(_spurtpb_results_path())
+    if now_ist.weekday() >= 5:
+        return False
+    after_t = now_ist.replace(hour=SMA200_RUN_AFTER[0], minute=SMA200_RUN_AFTER[1], second=0, microsecond=0)
+    if now_ist < after_t:
+        return False
+    return datetime.fromtimestamp(os.path.getmtime(path), IST).date() < now_ist.date()
+
+
+def _sma200_loop():
+    log.info(f"SMA200 study autorun started - once a day after {SMA200_RUN_AFTER[0]:02d}:{SMA200_RUN_AFTER[1]:02d} IST "
+             f"(Mon-Fri), plus one seed run if no results exist yet (outside market hours, after the spurt-pullback study).")
+    last_attempt = 0.0
+    while True:
+        try:
+            if _sma200_due(datetime.now(IST)) and (time.monotonic() - last_attempt) >= SMA200_RETRY_COOLDOWN_SECONDS:
+                last_attempt = time.monotonic()
+                try:
+                    import sma200_study
+                    log.info("Running SMA200 study...")
+                    sma200_study.run_study()
+                    log.info("SMA200 study complete.")
+                except Exception as e:
+                    log.error(f"Error during SMA200 study: {e}")
+            time.sleep(300)
+        except Exception as e:
+            log.error(f"Error in SMA200 loop: {e}")
+            time.sleep(300)
+
+
 if AUTORUN:
     threading.Thread(target=_intraday_loop, daemon=True, name="intraday-autorun").start()
 if SWING_AUTORUN:
@@ -210,6 +300,10 @@ if GAINERS_AUTORUN:
     threading.Thread(target=_gainers_loop, daemon=True, name="gainers-autorun").start()
 if VOLSPURT_AUTORUN:
     threading.Thread(target=_volspurt_loop, daemon=True, name="volspurt-autorun").start()
+if SPURTPB_AUTORUN:
+    threading.Thread(target=_spurtpb_loop, daemon=True, name="spurtpb-autorun").start()
+if SMA200_AUTORUN:
+    threading.Thread(target=_sma200_loop, daemon=True, name="sma200-autorun").start()
 
 
 @app.route("/health", methods=["GET"])
@@ -295,6 +389,41 @@ def volspurt_grid_csv():
 @app.route("/volspurt/signals.csv", methods=["GET"])
 def volspurt_signals_csv():
     return _serve_csv("volspurt_signals.csv", "volume_spurt_all_signals.csv")
+
+
+@app.route("/spurtpb", methods=["GET"])
+def spurtpb_results():
+    return _serve_html("spurtpb.html")
+
+
+@app.route("/spurtpb/grid.csv", methods=["GET"])
+def spurtpb_grid_csv():
+    return _serve_csv("spurtpb_grid.csv", "spurt_pullback_rules.csv")
+
+
+@app.route("/spurtpb/trades.csv", methods=["GET"])
+def spurtpb_trades_csv():
+    return _serve_csv("spurtpb_trades.csv", "spurt_pullback_all_trades.csv")
+
+
+@app.route("/sma200", methods=["GET"])
+def sma200_results():
+    return _serve_html("sma200.html")
+
+
+@app.route("/sma200/live.csv", methods=["GET"])
+def sma200_live_csv():
+    return _serve_csv("sma200_live.csv", "sma200_setups_now.csv")
+
+
+@app.route("/sma200/grid.csv", methods=["GET"])
+def sma200_grid_csv():
+    return _serve_csv("sma200_grid.csv", "sma200_rules.csv")
+
+
+@app.route("/sma200/trades.csv", methods=["GET"])
+def sma200_trades_csv():
+    return _serve_csv("sma200_trades.csv", "sma200_all_historical_signals.csv")
 
 
 if __name__ == "__main__":

@@ -133,3 +133,37 @@ Environment variables (all optional): `VOLSPURT_STUDY_AUTORUN` (true), `VOLSPURT
 Run by hand: `python volume_spurt_study.py` (or `TEST_SYMBOL_LIMIT=20 python volume_spurt_study.py` for a quick dry run).
 
 Treat ~40 trading days as one market regime: the best rules are candidates to watch live, not proof.
+
+## Spurt-pullback backtest (`/spurtpb`)
+
+Research only - places no orders and does not touch the Section A / B signal logic.
+
+Tests the idea "pick the volume-spurt stocks at 10:00, then trade the retracement":
+- **Watchlist at 10:00, two definitions:** (1) NSE-style, matching NSE's "Volume Spurts" report: volume traded so far today (09:15-10:00) at least 1x/2x/3x/5x the stock's average full-day volume over the previous 5 sessions; (2) a single 5-minute candle between 09:15 and 10:00 with volume at least 3x/5x/8x that stock's same-time-of-day 10-day average and body at least 0.5%. Both need a move of at least 1% from the day's extreme to the furthest point by 10:00.
+- **Both sides:** an UP spurt is bought on the pullback (LONG), a DOWN spurt is sold on the bounce (SHORT). Reported separately and combined.
+- **Entry (10:00-14:00):** the first time price retraces 38.2% / 50% / 61.8% of the move. SL at the move's start. Targets 1R, 2R, or RETEST (back to the extreme before the pullback). Exit at target, SL or 15:25. Optional VWAP filter. 0.05% round-trip cost.
+- Page shows each rule's trades, win rate, average net R, profit factor, total R, and average R in the first vs second half of the period.
+
+Runs once a day after 18:30 IST (Mon-Fri) and once as a seed when no results exist (outside market hours, after the volume-spurt backtest). Pages / downloads: `/spurtpb`, `/spurtpb/grid.csv`, `/spurtpb/trades.csv`.
+
+Env vars (optional): `SPURTPB_STUDY_AUTORUN` (true), `SPURTPB_HISTORY_DAYS` (60), `SPURTPB_COST_PCT` (0.05), `SPURTPB_MIN_PRICE` (20), `SPURTPB_MIN_SPURT_MOVE` (0.5), `SPURTPB_MIN_IMPULSE_PCT` (1.0), `SPURTPB_MIN_TRADES` (150).
+
+Run by hand: `python spurt_pullback_study.py` (or `TEST_SYMBOL_LIMIT=20 python spurt_pullback_study.py`).
+
+## SMA200 support / rejection (`/sma200`)
+
+Research and setup list only - places no orders and does not touch the Section A / B signal logic.
+
+- **LONG (support):** SMA200 rising, price above it for the previous 5 closes, a bar dips to the SMA200 zone (within 0.25 ATR, no more than 1 ATR through it) and closes back above it on a bullish candle.
+- **SHORT (rejection):** the mirror - SMA200 falling, price below it, a bar rallies to the zone and closes back below it on a bearish candle.
+- **Volume support:** the touch bar's volume as a multiple of the previous 20 bars' average (tested at any / 1x / 1.5x / 2x). One signal per side per 10 bars per stock.
+- **Timeframes:** 1D, 1W, 1H, 10m are backtested; 4H is setups-only (not enough history). 1M is impossible (only ~120 monthly bars exist).
+- **Backtest trade:** entry next bar's open, stop beyond the touch bar (+0.1 ATR), target 1R/2R/3R, exit at target/stop/hold limit (1D 20 bars, 1W 12, 1H 30, 10m 40); stop wins ties; costs 0.15% (1D/1W) or 0.05% (1H/10m) per round trip.
+- **Page:** setups right now on every timeframe (last closed bar), then the ranked rules (win rate, average net R, profit factor, first/second half, years positive).
+- Daily/weekly SHORTs need futures. 1H covers ~5 months and 10m ~2 months, so intraday results are thin.
+
+Runs once a day after 19:30 IST (Mon-Fri), and once as a seed when no results exist (outside market hours, after the spurt-pullback study). Pages / downloads: `/sma200`, `/sma200/live.csv`, `/sma200/grid.csv`, `/sma200/trades.csv`.
+
+Env vars (optional): `SMA200_STUDY_AUTORUN` (true), `SMA200_MIN_TRADES` (150), `SMA200_COST_DAILY` (0.15), `SMA200_COST_INTRADAY` (0.05), `SMA200_INTRADAY_HISTORY_DAYS` (60).
+
+Run by hand: `python sma200_study.py` (or `TEST_SYMBOL_LIMIT=20 python sma200_study.py`).
