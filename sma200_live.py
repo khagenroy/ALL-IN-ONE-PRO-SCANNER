@@ -75,6 +75,9 @@ def update(results_dir: str, mode: str, rows: list, ist_now: datetime, cycle_sec
                 if age <= 14:
                     keep[k] = r
         for r in rows:
+            # intraday setups count only if the signal candle is from TODAY (the first scans after 09:15 still hold yesterday's last candles)
+            if r["tf"] in ("10m", "1H", "4H") and str(r["bar_time"])[:10] != today:
+                continue
             k = _key(r)
             if k in keep:
                 keep[k].update({x: r[x] for x in ("close", "sma200", "dist_pct", "slope_pct", "slope_x", "vol_x", "stop", "risk_pct", "bars_ago")})
@@ -129,11 +132,12 @@ def _render(df: pd.DataFrame, meta: dict, now_s: str) -> str:
         body = "<div class='empty'>No SMA200 setups found yet.</div>"
     else:
         intr = df[df["tf"].isin(["10m", "1H", "4H"])]
-        swing = df[df["tf"].isin(["1D", "1W"])].copy()
-        swing["_o"] = swing["tf"].map(TF_ORDER)
-        swing = swing.sort_values(["bar_time"], ascending=False)
+        swing_all = df[df["tf"].isin(["1D", "1W"])].copy()
+        # show only the LATEST daily candle / latest weekly candle; older ones stay in the CSV
+        latest = swing_all.groupby("tf")["bar_time"].transform("max")
+        swing = swing_all[swing_all["bar_time"] == latest].sort_values(["tf", "vol_x"], ascending=[True, False])
         body = (f"<h2>Intraday setups today ({len(intr)})</h2>{table(intr)}"
-                f"<h2>Daily / weekly setups, last 2 weeks ({len(swing)})</h2>{table(swing)}")
+                f"<h2>Daily / weekly setups on the latest candle ({len(swing)}; {len(swing_all) - len(swing)} older ones are in the CSV)</h2>{table(swing)}")
     mt = " &middot; ".join(f"{k}: updated {v['updated']} ({v['found_this_cycle']} found, cycle {v['cycle_seconds']}s)" for k, v in meta.items())
     return f"""<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
