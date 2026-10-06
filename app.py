@@ -416,6 +416,16 @@ def sma200_now_csv():
     return _serve_csv("sma200_now.csv", "sma200_setups_today.csv")
 
 
+@app.route("/trendnow", methods=["GET"])
+def trend_now_results():
+    return _serve_html("trend_now.html")
+
+
+@app.route("/trendnow.csv", methods=["GET"])
+def trend_now_csv():
+    return _serve_csv("trend_now.csv", "trendline_setups_today.csv")
+
+
 @app.route("/sma200", methods=["GET"])
 def sma200_results():
     return _serve_html("sma200.html")

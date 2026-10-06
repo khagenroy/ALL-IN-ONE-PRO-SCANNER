@@ -635,7 +635,18 @@ def _scan_one_symbol(sym: str, security_id: str, segment: str, mode: str) -> dic
                 out_sma.extend(sma200_live.live_setups(df, tf, sym))
     except Exception:
         out_sma = []
-    return {"signals": out_a, "signals_b": out_b, "sma200": out_sma}
+
+    # Trendline setups (same trendlines as the PA Toolkit) on the SAME bars - also fully isolated from Section A / B.
+    out_trend = []
+    try:
+        import trendline_live
+        for tf in MODES[mode]["timeframes"]:
+            df = frames.get(tf)
+            if df is not None and not df.empty:
+                out_trend.extend(trendline_live.live_setups(df, tf, sym))
+    except Exception:
+        out_trend = []
+    return {"signals": out_a, "signals_b": out_b, "sma200": out_sma, "trend": out_trend}
 
 
 def run_scan(mode: str = "intraday"):
@@ -661,6 +672,7 @@ def run_scan(mode: str = "intraday"):
 
     signals, signals_b, no_data = [], [], []
     sma_rows = []
+    trend_rows = []
     scanned = 0
     t_start = time.time()
 
@@ -682,6 +694,7 @@ def run_scan(mode: str = "intraday"):
                 signals.extend(res["signals"])
                 signals_b.extend(res["signals_b"])
                 sma_rows.extend(res.get("sma200", []))
+                trend_rows.extend(res.get("trend", []))
             if n % 100 == 0:
                 log.info(f"[{mode}] ...{n}/{len(futures)} done, {len(signals)} Section A, "
                          f"{len(signals_b)} Section B signals so far, {time.time() - t_start:.0f}s elapsed")
@@ -697,6 +710,12 @@ def run_scan(mode: str = "intraday"):
         log.info(f"[{mode}] SMA200 setups: {len(sma_rows)} found this cycle (page /sma200now)")
     except Exception as e:
         log.warning(f"[{mode}] SMA200 setup list not updated: {e}")
+    try:
+        import trendline_live
+        trendline_live.update(RESULTS_DIR, mode, trend_rows, datetime.now(IST), elapsed)
+        log.info(f"[{mode}] Trendline setups: {len(trend_rows)} found this cycle (page /trendnow)")
+    except Exception as e:
+        log.warning(f"[{mode}] Trendline setup list not updated: {e}")
     return signals, signals_b
 
 
