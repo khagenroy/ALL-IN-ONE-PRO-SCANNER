@@ -406,6 +406,16 @@ def spurtpb_trades_csv():
     return _serve_csv("spurtpb_trades.csv", "spurt_pullback_all_trades.csv")
 
 
+@app.route("/sma200now", methods=["GET"])
+def sma200_now_results():
+    return _serve_html("sma200_now.html")
+
+
+@app.route("/sma200now.csv", methods=["GET"])
+def sma200_now_csv():
+    return _serve_csv("sma200_now.csv", "sma200_setups_today.csv")
+
+
 @app.route("/sma200", methods=["GET"])
 def sma200_results():
     return _serve_html("sma200.html")

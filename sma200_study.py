@@ -115,8 +115,9 @@ def _sim(is_long, entry, stop, H, L, last_close, k):
     return pnl / risk
 
 
-def analyse(df: pd.DataFrame, tf: str, sym: str, backtest: bool):
-    """Returns (trades list of dicts, live list of dicts) for one symbol / timeframe."""
+def analyse(df: pd.DataFrame, tf: str, sym: str, backtest: bool, recent: int = 1):
+    """Returns (trades list of dicts, live list of dicts) for one symbol / timeframe.
+    `live` = signals on the last `recent` closed bars (default: only the very last bar)."""
     cfg = TF_CFG[tf]
     lb = cfg["slope_bars"]
     if df is None or len(df) < SMA_LEN + lb + PRIOR_BARS + 5:
@@ -169,10 +170,11 @@ def analyse(df: pd.DataFrame, tf: str, sym: str, backtest: bool):
                 "atr_pct": round(float(atr[t]) / float(c[t]) * 100, 2),
             }
             stop = (l[t] - STOP_BUFFER_ATR * atr[t]) if is_long else (h[t] + STOP_BUFFER_ATR * atr[t])
-            if t == n - 1:
+            if t >= n - recent:
                 risk = abs(float(c[t]) - float(stop))
                 row["stop"] = round(float(stop), 2)
                 row["risk_pct"] = round(risk / float(c[t]) * 100, 2)
+                row["bars_ago"] = int(n - 1 - t)
                 live.append(row)
                 continue
             if not backtest:

@@ -623,7 +623,19 @@ def _scan_one_symbol(sym: str, security_id: str, segment: str, mode: str) -> dic
                 out_b.append(result_b)
     except Exception as e:
         return {"error": str(e)}
-    return {"signals": out_a, "signals_b": out_b}
+
+    # SMA200 support / rejection setups on the SAME bars (no extra Dhan calls). Separate from
+    # Section A / B and fully isolated: any failure here is swallowed and never affects the signals above.
+    out_sma = []
+    try:
+        import sma200_live
+        for tf in MODES[mode]["timeframes"]:
+            df = frames.get(tf)
+            if df is not None and not df.empty:
+                out_sma.extend(sma200_live.live_setups(df, tf, sym))
+    except Exception:
+        out_sma = []
+    return {"signals": out_a, "signals_b": out_b, "sma200": out_sma}
 
 
 def run_scan(mode: str = "intraday"):
@@ -648,6 +660,7 @@ def run_scan(mode: str = "intraday"):
         jobs.append((sym, security_id, segment))
 
     signals, signals_b, no_data = [], [], []
+    sma_rows = []
     scanned = 0
     t_start = time.time()
 
@@ -668,6 +681,7 @@ def run_scan(mode: str = "intraday"):
                 scanned += 1
                 signals.extend(res["signals"])
                 signals_b.extend(res["signals_b"])
+                sma_rows.extend(res.get("sma200", []))
             if n % 100 == 0:
                 log.info(f"[{mode}] ...{n}/{len(futures)} done, {len(signals)} Section A, "
                          f"{len(signals_b)} Section B signals so far, {time.time() - t_start:.0f}s elapsed")
@@ -677,6 +691,12 @@ def run_scan(mode: str = "intraday"):
              f"{len(no_data)} no daily data, {len(errors)} errors, {elapsed:.0f}s total")
 
     write_results(mode, signals, signals_b, errors, no_data, scanned, len(symbols), elapsed)
+    try:
+        import sma200_live
+        sma200_live.update(RESULTS_DIR, mode, sma_rows, datetime.now(IST), elapsed)
+        log.info(f"[{mode}] SMA200 setups: {len(sma_rows)} found this cycle (page /sma200now)")
+    except Exception as e:
+        log.warning(f"[{mode}] SMA200 setup list not updated: {e}")
     return signals, signals_b
 
 

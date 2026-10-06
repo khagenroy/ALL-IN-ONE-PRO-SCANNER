@@ -167,3 +167,9 @@ Runs once a day after 19:30 IST (Mon-Fri), and once as a seed when no results ex
 Env vars (optional): `SMA200_STUDY_AUTORUN` (true), `SMA200_MIN_TRADES` (150), `SMA200_COST_DAILY` (0.15), `SMA200_COST_INTRADAY` (0.05), `SMA200_INTRADAY_HISTORY_DAYS` (60).
 
 Run by hand: `python sma200_study.py` (or `TEST_SYMBOL_LIMIT=20 python sma200_study.py`).
+
+## SMA200 live setups (`/sma200now`)
+
+The same SMA200 support / rejection rule, but live: it rides on the existing intraday scan (10m, 1H, 4H, every 10 minutes during market hours) and on the swing scan (1D, 1W, daily after 16:00), using the bars those scans already download - **no extra Dhan calls**. Each cycle it checks the last 3 closed 10m candles, the last 2 for 1H/4H and the last candle for 1D/1W, and adds any setups to one running list for the day (with the time first seen, the SMA slope, the volume multiple, the stop and the risk). A star marks setups with volume at least 1.5x its 20-candle average and an SMA slope at least 1x that timeframe's normal. Page `/sma200now` (refreshes itself every minute), download `/sma200now.csv`.
+
+It is wrapped so it can never change Section A / B signals; if it fails, the scans carry on and a warning is logged. The rule is untested live - the backtest at `/sma200` shows how it did historically.
