@@ -188,4 +188,4 @@ The SMA200 and trendline setups are *lagging* (they fire after price has moved),
 Trades only Section A (Strategy 1 sweep, Strategy 2 order block) from the 10m scan, using the scanner's own volume rule.
 After a signal it waits for the break of the signal candle (up to 15 candles), then sends the same `..._CONFIRMED` message TradingView would send to dhan-bridge.
 Render env vars: `BOT_ENABLED` (default false), `BOT_LIVE` (default false = paper, log only), `BRIDGE_WEBHOOK_URL`, optional `NTFY_TOPIC`, `BOT_MAX_TRADES_PER_DAY` (10), `BOT_CUTOFF` (14:30).
-Record: `/botlog` and `/botlog.csv` (cleared on redeploy - download it).
+Record: `/botlog` and `/botlog.csv` (every decision, with SL and T1-T6). Paper results: `/botpnl` and `/botpnl.csv` (each paper trade followed to its exit with the bridge's SL cascade, P&L in rupees and R; `BOT_PAPER_RISK_RS`, default 2000). Both are cleared on redeploy - download them.

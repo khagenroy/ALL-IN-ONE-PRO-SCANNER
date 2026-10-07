@@ -22,7 +22,16 @@ RECORD
 ENV VARS
   BOT_ENABLED, BOT_LIVE, BRIDGE_WEBHOOK_URL (full dhan-bridge URL, https://.../webhook/<secret>),
   BOT_TIMEFRAMES (default "10m"), BOT_START (09:30), BOT_CUTOFF (14:30), BOT_MAX_TRADES_PER_DAY (10),
-  BOT_ONE_PER_SYMBOL_PER_DAY (true), BOT_CONFIRM_EXPIRY_BARS (15), BOT_MAX_DELAY_MINUTES (20), NTFY_TOPIC.
+  BOT_ONE_PER_SYMBOL_PER_DAY (true), BOT_CONFIRM_EXPIRY_BARS (15), BOT_MAX_DELAY_MINUTES (20), NTFY_TOPIC,
+  BOT_PAPER_RISK_RS (2000 - rupees risked per paper trade; set it equal to RISK_RUPEES_STOCKS on dhan-bridge).
+
+PAPER P&L (/botpnl, /botpnl.csv)
+  Every paper "WOULD_SEND" is followed on the next 10m candles and closed the way the bridge would manage it:
+    entry   = close of the confirming candle (the price sent), quantity = BOT_PAPER_RISK_RS / (entry - stop)
+    cascade = T1 hit -> stop to the signal level ("cost"), T2 -> stop to T1, T3 -> T2, T4 -> T3, T5 -> T4
+    exit    = stop hit, T6 reached (the Super Order target), or 15:10 IST square-off (close of the 15:00 candle)
+  Assumptions: if one candle touches both the stop and a target, the STOP is taken first (pessimistic); a gap
+  through the stop exits at the open; results are BEFORE brokerage/taxes/slippage.
 """
 
 import os
@@ -67,6 +76,7 @@ def cfg():
         "expiry_bars": int(os.environ.get("BOT_CONFIRM_EXPIRY_BARS", "15") or "15"),
         "max_delay_min": int(os.environ.get("BOT_MAX_DELAY_MINUTES", "20") or "20"),
         "ntfy": os.environ.get("NTFY_TOPIC", "").strip(),
+        "paper_risk": float(os.environ.get("BOT_PAPER_RISK_RS", "2000") or "2000"),
     }
 
 
@@ -91,7 +101,8 @@ def _record(cf, action, p, **extra):
     row = {"time_ist": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S"), "action": action,
            "mode": "LIVE" if cf["live"] else "PAPER",
            "symbol": p.get("symbol"), "signal": p.get("signal"), "side": p.get("side"),
-           "signal_bar_ist": _utc_to_ist(p.get("signal_ts")), "level": p.get("level"), "sl": p.get("sl"), **extra}
+           "signal_bar_ist": _utc_to_ist(p.get("signal_ts")), "level": p.get("level"), "sl": p.get("sl"),
+           **{k.lower(): v for k, v in (p.get("targets") or {}).items()}, **extra}
     try:
         os.makedirs(RESULTS_DIR, exist_ok=True)
         with _lock, open(LOG_PATH, "a") as f:
@@ -143,7 +154,7 @@ def read_log(limit=500):
 
 
 COLS = ["time_ist", "mode", "action", "symbol", "signal", "side", "signal_bar_ist", "level", "sl",
-        "confirm_bar_ist", "price", "why", "status", "response"]
+        "t1", "t2", "t3", "t4", "t5", "t6", "confirm_bar_ist", "price", "why", "status", "response"]
 
 
 def log_csv() -> str:
@@ -207,7 +218,7 @@ def _allowed_now(cf, now):
     return None
 
 
-def _send(cf, p, price, confirm_bar_ist, now, st):
+def _send(cf, p, price, confirm_bar_ist, now, st, confirm_ts=None):
     payload = _payload(p, price)
     why = _allowed_now(cf, now)
     today = now.strftime("%Y-%m-%d")
@@ -226,6 +237,7 @@ def _send(cf, p, price, confirm_bar_ist, now, st):
     if not cf["live"]:
         _record(cf, "WOULD_SEND", p, confirm_bar_ist=confirm_bar_ist, price=payload["price"],
                 why="paper mode - no order sent", response=json.dumps(payload))
+        _open_paper(cf, st, p, payload["price"], confirm_bar_ist, confirm_ts)
         return
     if not cf["url"]:
         _record(cf, "SEND_FAILED", p, why="BRIDGE_WEBHOOK_URL not set", confirm_bar_ist=confirm_bar_ist)
@@ -236,6 +248,140 @@ def _send(cf, p, price, confirm_bar_ist, now, st):
                 price=payload["price"], status=r.status_code, response=r.text[:200])
     except Exception as e:
         _record(cf, "SEND_FAILED", p, confirm_bar_ist=confirm_bar_ist, price=payload["price"], why=str(e)[:200])
+
+
+# ---------------------------------------------------------------- paper P&L tracker
+STAGE_NAMES = ["SL", "SL_AT_COST", "SL_AT_T1", "SL_AT_T2", "SL_AT_T3", "SL_AT_T4"]
+SQUAREOFF_IST_MINUTES = 15 * 60 + 10  # 15:10 IST
+
+
+def _open_paper(cf, st, p, entry, confirm_bar_ist, confirm_ts):
+    risk = abs(float(entry) - float(p["sl"]))
+    if risk <= 0:
+        return
+    trades = st.setdefault("paper", [])
+    trades.append({
+        "id": p["key"], "opened_ist": confirm_bar_ist, "symbol": p["symbol"], "signal": p["signal"], "side": p["side"],
+        "entry": round(float(entry), 2), "level": p["level"], "sl": p["sl"], "targets": p["targets"],
+        "qty": max(1, round(cf["paper_risk"] / risk)), "status": "OPEN", "stage": 0, "cur_sl": p["sl"],
+        "last_ts": str(confirm_ts) if confirm_ts is not None else str(p["signal_ts"]),
+        "last_close": round(float(entry), 2), "exit_time_ist": "", "exit_reason": "", "exit_price": ""})
+
+
+def _step_trade(t, ts, o, h, l, c):
+    """Apply one closed 10m candle to an open paper trade. Returns True when the trade closed on it."""
+    buy = t["side"] == "buy"
+    tg = [t["targets"].get(k) for k in ("T1", "T2", "T3", "T4", "T5", "T6")]
+    sl = float(t["cur_sl"])
+    # 1) stop first (pessimistic when one candle touches both the stop and a target)
+    if (buy and l <= sl) or ((not buy) and h >= sl):
+        px = (min(o, sl) if buy else max(o, sl))
+        return _close_trade(t, ts, px, STAGE_NAMES[t["stage"]])
+    # 2) targets, one stage at a time: stop moves up the cascade as each T is touched
+    while t["stage"] < 6:
+        k = t["stage"]
+        if tg[k] is None:
+            break
+        if (buy and h >= tg[k]) or ((not buy) and l <= tg[k]):
+            if k == 5:
+                return _close_trade(t, ts, tg[5], "TARGET_T6")
+            t["stage"] = k + 1
+            t["cur_sl"] = t["level"] if k == 0 else tg[k - 1]
+        else:
+            break
+    # 3) 15:10 square-off (the 15:00-15:10 candle closes at 15:10)
+    end_ist = (pd.Timestamp(ts) + pd.Timedelta(minutes=330 + 10))
+    if end_ist.hour * 60 + end_ist.minute >= SQUAREOFF_IST_MINUTES:
+        return _close_trade(t, ts, c, "SQUAREOFF_1510")
+    t["last_close"] = round(float(c), 2)
+    return False
+
+
+def _close_trade(t, ts, px, reason):
+    t["status"] = "CLOSED"
+    t["exit_reason"] = reason
+    t["exit_price"] = round(float(px), 2)
+    t["exit_time_ist"] = _utc_to_ist(pd.Timestamp(ts) + pd.Timedelta(minutes=10))
+    t["last_close"] = t["exit_price"]
+    return True
+
+
+def _track_paper(cf, st):
+    for t in st.get("paper", []):
+        if t.get("status") != "OPEN":
+            continue
+        try:
+            bars = _recent_10m_bars(t["symbol"])
+        except Exception as e:
+            log.warning(f"[bot] paper tracker: no bars for {t['symbol']}: {e}")
+            continue
+        trade_day = _utc_to_ist(t["last_ts"])[:10]
+        for ts, b in bars[bars.index > pd.Timestamp(str(t["last_ts"]))].iterrows():
+            if _utc_to_ist(ts)[:10] != trade_day:  # the day ended without a 15:10 candle - close at the last price
+                _close_trade(t, pd.Timestamp(str(t["last_ts"])), t["last_close"], "SQUAREOFF_1510")
+                break
+            t["last_ts"] = str(ts)
+            if _step_trade(t, ts, float(b["open"]), float(b["high"]), float(b["low"]), float(b["close"])):
+                break
+
+
+PNL_COLS = ["opened_ist", "symbol", "signal", "side", "entry", "sl", "t1", "t2", "t3", "t4", "t5", "t6", "qty", "status",
+            "highest_target", "exit_time_ist", "exit_reason", "exit_price", "pnl_per_share", "pnl_rupees", "r_multiple"]
+
+
+def pnl_rows():
+    rows = []
+    for t in _load_state().get("paper", []):
+        buy = t["side"] == "buy"
+        px = t["exit_price"] if t["status"] == "CLOSED" else t.get("last_close")
+        risk = abs(t["entry"] - float(t["sl"]))
+        try:
+            pps = round((float(px) - t["entry"]) * (1 if buy else -1), 2)
+        except Exception:
+            pps = ""
+        rows.append({"opened_ist": t["opened_ist"], "symbol": t["symbol"], "signal": t["signal"], "side": t["side"],
+                     "entry": t["entry"], "sl": t["sl"], **{k.lower(): v for k, v in t["targets"].items()},
+                     "qty": t["qty"], "status": t["status"] if t["status"] == "CLOSED" else "OPEN (unrealised)",
+                     "highest_target": ("T%d" % t["stage"]) if t["stage"] else "none",
+                     "exit_time_ist": t["exit_time_ist"], "exit_reason": t["exit_reason"], "exit_price": t["exit_price"],
+                     "pnl_per_share": pps, "pnl_rupees": round(pps * t["qty"]) if pps != "" else "",
+                     "r_multiple": round(pps / risk, 2) if pps != "" and risk else ""})
+    return rows
+
+
+def pnl_csv() -> str:
+    df = pd.DataFrame(pnl_rows(), columns=PNL_COLS)
+    return df.to_csv(index=False)
+
+
+def pnl_html() -> str:
+    rows = pnl_rows()
+    closed = [r for r in rows if r["status"] == "CLOSED"]
+    wins = [r for r in closed if r["pnl_rupees"] != "" and r["pnl_rupees"] > 0]
+    tot = sum(r["pnl_rupees"] for r in closed if r["pnl_rupees"] != "")
+    totr = sum(r["r_multiple"] for r in closed if r["r_multiple"] != "")
+    opn = [r for r in rows if r["status"] != "CLOSED"]
+    unreal = sum(r["pnl_rupees"] for r in opn if r["pnl_rupees"] != "")
+    summary = (f"Closed trades: {len(closed)} | Winners: {len(wins)}"
+               + (f" ({100 * len(wins) / len(closed):.0f}%)" if closed else "")
+               + f" | Total P&L (closed): Rs {tot:,.0f} | Total R: {totr:.2f} | Open trades: {len(opn)} "
+               f"(unrealised Rs {unreal:,.0f})")
+    head = "".join(f"<th>{html.escape(h)}</th>" for h in PNL_COLS)
+    body = "".join("<tr>" + "".join(f"<td>{html.escape(str(r.get(h, '')))}</td>" for h in PNL_COLS) + "</tr>"
+                   for r in rows[::-1])
+    return f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Section A paper P&amp;L</title><style>
+body{{font-family:system-ui,Arial;margin:16px;background:#fff;color:#111}}
+table{{border-collapse:collapse;font-size:13px}} th,td{{border:1px solid #ccc;padding:4px 8px;white-space:nowrap}}
+th{{background:#f0f0f0;position:sticky;top:0}} .w{{overflow-x:auto}} small{{color:#666}}
+@media(prefers-color-scheme:dark){{body{{background:#111;color:#eee}}th{{background:#222}}th,td{{border-color:#444}}small{{color:#aaa}}}}
+</style></head><body><h2>Section A paper trades - P&amp;L</h2>
+<p><b>{summary}</b></p>
+<p><small>Entry = close of the confirming candle. Stop moves to cost at T1, then to T1, T2, T3, T4 as each next target is hit;
+exit at the stop, at T6, or at the 15:10 square-off. If one candle touches both the stop and a target, the stop is taken first.
+Before brokerage, taxes and slippage. Newest first. <a href="/botpnl.csv">Download CSV</a>.
+Render clears this on every redeploy - download the CSV if you want to keep it.</small></p>
+<div class="w"><table><tr>{head}</tr>{body}</table></div></body></html>"""
 
 
 def run(signals):
@@ -254,6 +400,8 @@ def run(signals):
             if s.get("timeframe") not in cf["tfs"] or s.get("signal") not in STRATEGY_TYPE:
                 continue
             lv = s.get("levels") or {}
+            if _utc_to_ist(s.get("timestamp"))[:10] != now.strftime("%Y-%m-%d"):
+                continue  # a leftover candle from an earlier day (scan started before today's first candle closed)
             key = f"{s['symbol']}|{s['signal']}|{s['timestamp']}"
             if key in seen or not lv:
                 continue
@@ -299,13 +447,17 @@ def run(signals):
                     _record(cf, "CONFIRMED_BUT_SKIPPED", p, confirm_bar_ist=cbar, price=round(close, 2),
                             why=f"confirmation was {late:.0f} min ago - too old to chase")
                     continue
-                _send(cf, p, close, cbar, now, st)
+                _send(cf, p, close, cbar, now, st, confirm_ts=ts)
             except Exception as e:
                 _record(cf, "CHECK_ERROR", p, why=str(e)[:200])
                 keep.append(p)  # try again next scan
 
         st["pending"] = keep
         st["seen"] = list(seen)[-3000:]
+        try:
+            _track_paper(cf, st)
+        except Exception as e:
+            log.error(f"paper tracker failed: {e}")
         _save_state(st)
     except Exception as e:
         log.error(f"section_a_bot.run failed: {e}")

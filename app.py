@@ -385,6 +385,19 @@ def botlog():
     return section_a_bot.log_html()
 
 
+@app.route("/botpnl", methods=["GET"])
+def botpnl():
+    import section_a_bot
+    return section_a_bot.pnl_html()
+
+
+@app.route("/botpnl.csv", methods=["GET"])
+def botpnl_csv():
+    import section_a_bot
+    return section_a_bot.pnl_csv(), 200, {"Content-Type": "text/csv",
+                                         "Content-Disposition": "attachment; filename=bot_paper_pnl.csv"}
+
+
 @app.route("/botlog.csv", methods=["GET"])
 def botlog_csv():
     import section_a_bot
