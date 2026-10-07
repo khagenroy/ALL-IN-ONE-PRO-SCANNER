@@ -140,6 +140,7 @@ MODES = {
         "other_title": "Swing / Positional (1D / 1W / 1M)",
         "csv_a": "/scanner/signals.csv",
         "csv_b": "/scanner/signals_b.csv",
+        "csv_rsi": "/scanner/rsi_flush.csv",
     },
     "swing": {
         "timeframes": SWING_TFS,
@@ -647,13 +648,26 @@ def _scan_one_symbol(sym: str, security_id: str, segment: str, mode: str) -> dic
     except Exception:
         out_trend = []
 
+    # RSI Flush (RSI extreme -> back inside -> break of the signal candle) on the SAME bars - shown on the
+    # /scanner page under Section A. Fully isolated: any failure is swallowed and never affects Section A / B.
+    out_rsi = []
+    try:
+        import rsi_flush_live
+        if rsi_flush_live.ENABLED and mode in rsi_flush_live.MODES:
+            for tf in MODES[mode]["timeframes"]:
+                df = frames.get(tf)
+                if df is not None and not df.empty:
+                    out_rsi.extend(rsi_flush_live.live_setups(df, tf, sym))
+    except Exception:
+        out_rsi = []
+
     # Clue checklist (volume build-up, squeeze, higher timeframe, SMA200 + trendline together) and tested-rule tags - isolated too.
     try:
         import confluence
         confluence.enrich_live(sym, out_sma, out_trend, RESULTS_DIR)
     except Exception:
         pass
-    return {"signals": out_a, "signals_b": out_b, "sma200": out_sma, "trend": out_trend}
+    return {"signals": out_a, "signals_b": out_b, "sma200": out_sma, "trend": out_trend, "rsiflush": out_rsi}
 
 
 def run_scan(mode: str = "intraday"):
@@ -680,6 +694,7 @@ def run_scan(mode: str = "intraday"):
     signals, signals_b, no_data = [], [], []
     sma_rows = []
     trend_rows = []
+    rsi_rows = []
     scanned = 0
     t_start = time.time()
 
@@ -702,6 +717,7 @@ def run_scan(mode: str = "intraday"):
                 signals_b.extend(res["signals_b"])
                 sma_rows.extend(res.get("sma200", []))
                 trend_rows.extend(res.get("trend", []))
+                rsi_rows.extend(res.get("rsiflush", []))
             if n % 100 == 0:
                 log.info(f"[{mode}] ...{n}/{len(futures)} done, {len(signals)} Section A, "
                          f"{len(signals_b)} Section B signals so far, {time.time() - t_start:.0f}s elapsed")
@@ -710,7 +726,22 @@ def run_scan(mode: str = "intraday"):
     log.info(f"[{mode}] Done: {scanned} scanned, {len(signals)} Section A signals, {len(signals_b)} Section B signals, "
              f"{len(no_data)} no daily data, {len(errors)} errors, {elapsed:.0f}s total")
 
-    write_results(mode, signals, signals_b, errors, no_data, scanned, len(symbols), elapsed)
+    rsi_on = False
+    try:
+        import rsi_flush_live
+        rsi_on = bool(rsi_flush_live.ENABLED and mode in rsi_flush_live.MODES)
+    except Exception:
+        rsi_on = False
+    write_results(mode, signals, signals_b, errors, no_data, scanned, len(symbols), elapsed,
+                  rsi_flush=(rsi_rows if rsi_on else None))
+    if rsi_on:
+        log.info(f"[{mode}] RSI Flush: {len(rsi_rows)} setups today (shown on {cfg['page']})")
+        # Phone alerts + paper P&L for RSI Flush (paper only - never sends an order). Isolated: failures are swallowed.
+        try:
+            import section_a_bot
+            section_a_bot.run_rsi(rsi_rows)
+        except Exception as e:
+            log.warning(f"[{mode}] RSI Flush alerts / paper trades not processed: {e}")
     try:
         import sma200_live
         sma200_live.update(RESULTS_DIR, mode, sma_rows, datetime.now(IST), elapsed)
@@ -757,7 +788,7 @@ def _ist_stamp(ts, mode) -> str:
         return str(ts)
 
 
-def write_results(mode, signals, signals_b, errors, no_data, scanned, universe_size, elapsed=0.0):
+def write_results(mode, signals, signals_b, errors, no_data, scanned, universe_size, elapsed=0.0, rsi_flush=None):
     cfg = MODES[mode]
     prefix = cfg["prefix"]
     os.makedirs(RESULTS_DIR, exist_ok=True)
@@ -775,6 +806,7 @@ def write_results(mode, signals, signals_b, errors, no_data, scanned, universe_s
         "duration_sec": round(elapsed),
         "signals": signals,
         "signals_b": signals_b,
+        "rsi_flush": rsi_flush,
         "no_data": no_data,
         "errors": errors,
     }
@@ -788,6 +820,11 @@ def write_results(mode, signals, signals_b, errors, no_data, scanned, universe_s
                    "close": r["close"], "rsi": r.get("rsi"), "timestamp": _ist_stamp(r["timestamp"], mode), **(r["levels"] or {})}
                   for r in signals_b]
     _atomic_csv(pd.DataFrame(sig_b_rows), os.path.join(RESULTS_DIR, f"{prefix}_signals_b.csv"))
+
+    if rsi_flush is not None:
+        rsi_rows_csv = [{**r, "signal_ts": _ist_stamp(r["signal_ts"], mode),
+                         "confirm_ts": _ist_stamp(r["confirm_ts"], mode) if r.get("confirm_ts") else ""} for r in rsi_flush]
+        _atomic_csv(pd.DataFrame(rsi_rows_csv), os.path.join(RESULTS_DIR, f"{prefix}_rsi_flush.csv"))
 
     _atomic_write(os.path.join(RESULTS_DIR, f"{prefix}.html"), render_html(payload))
 
@@ -839,6 +876,53 @@ def render_html(payload: dict) -> str:
     if not payload.get("signals_b"):
         sig_b_rows_html = '<tr><td colspan="11" class="empty">No Section B signals this run.</td></tr>'
 
+    # RSI Flush table (only on the page(s) where the scan is enabled - intraday by default)
+    rsi_section_html = ""
+    if payload.get("rsi_flush") is not None:
+        rsi_list = payload["rsi_flush"]
+        order = {"ACTIVE": 0, "PENDING": 1, "T6 DONE": 2, "STOPPED": 3}
+        rsi_list = sorted(rsi_list, key=lambda r: (order.get(r["status"], 9), str(r.get("confirm_ts") or r.get("signal_ts")), r["symbol"]), reverse=False)
+        mode_ = payload.get("mode", "intraday")
+        rows_html = ""
+        for r in rsi_list:
+            side_cls = "buy" if r["side"] == "BUY" else "sell"
+            st_cls = {"ACTIVE": "buy", "T6 DONE": "buy", "STOPPED": "sell"}.get(r["status"], "wait")
+            rows_html += f"""
+        <tr>
+          <td class="sym">{r['symbol']}</td>
+          <td class="tf">{r['timeframe']}</td>
+          <td class="{side_cls} verdict">{r['side']}</td>
+          <td class="{st_cls} verdict">{r['status']}</td>
+          <td>{r['detail']}</td>
+          <td>{r['entry']}</td>
+          <td>{r['sl']}</td>
+          <td>{r['sl_now']}</td>
+          <td>{r['T1']}</td>
+          <td>{r['T2']}</td>
+          <td>{r['T3']}</td>
+          <td>{r['T6']}</td>
+          <td>{r['risk_pct']}%</td>
+          <td>{_ist_stamp(r['signal_ts'], mode_)}</td>
+          <td>{_ist_stamp(r['confirm_ts'], mode_) if r.get('confirm_ts') else '-'}</td>
+        </tr>"""
+        if not rsi_list:
+            rows_html = '<tr><td colspan="15" class="empty">No RSI Flush setups today yet.</td></tr>'
+        n_conf = sum(1 for r in rsi_list if r["status"] != "PENDING")
+        n_pend = len(rsi_list) - n_conf
+        rsi_section_html = f"""
+  <h1>ALL IN ONE PRO - Section A - RSI Flush (RSI extreme, back inside, break of the signal candle) - {cfg['title']}</h1>
+  <div class="meta">
+    {n_conf} confirmed today &middot; {n_pend} waiting for the break &middot;
+    Buy: RSI &le; 30 within the last 4 candles, back above 30, volume &ge; 1.5&times; average; entry = high of the signal candle once a later candle breaks it (within 4 candles).
+    Sell is the mirror. SL = lowest low / highest high of the last 5 candles. T1-T6 = 1R-6R, SL cascade T1&rarr;cost, T2&rarr;T1 ... T5&rarr;T4.
+    Status is as of the last closed candle. Same rule as the TradingView indicator &mdash; scanner view only, no orders are placed from this table.
+  </div>
+  <table>
+    <thead><tr><th>Symbol</th><th>TF</th><th>Side</th><th>Status</th><th>Detail</th><th>Entry</th><th>SL</th><th>SL now</th><th>T1</th><th>T2</th><th>T3</th><th>T6</th><th>Risk</th><th>Signal candle (IST)</th><th>Break candle (IST)</th></tr></thead>
+    <tbody>{rows_html}</tbody>
+  </table>
+"""
+
     no_data_txt = ""
     if payload.get("no_data_count"):
         no_data_txt = f" &middot; {payload['no_data_count']} symbols skipped (Dhan returned no daily data)"
@@ -866,6 +950,7 @@ def render_html(payload: dict) -> str:
   .verdict {{ font-weight: 700; }}
   .buy {{ color: #3fb950; }}
   .sell {{ color: #f85149; }}
+  .wait {{ color: #d29922; }}
   .empty {{ text-align: center; color: #9aa0a6; padding: 40px; }}
   tr:hover {{ background: #161b22; }}
 </style>
@@ -876,6 +961,7 @@ def render_html(payload: dict) -> str:
     <a href="{cfg['other_page']}">{cfg['other_title']}</a>
     <a href="{cfg['csv_a']}">Section A CSV</a>
     <a href="{cfg['csv_b']}">Section B CSV</a>
+    {('<a href="' + cfg['csv_rsi'] + '">RSI Flush CSV</a>') if (cfg.get('csv_rsi') and payload.get('rsi_flush') is not None) else ''}
   </div>
   <h1>ALL IN ONE PRO - Section A (Sweep + Order Block) - {cfg['title']}</h1>
   <div class="meta">
@@ -890,7 +976,7 @@ def render_html(payload: dict) -> str:
     <thead><tr><th>Symbol</th><th>TF</th><th>Signal</th><th>Close</th><th>Entry</th><th>SL</th><th>T1</th><th>T2</th><th>T3</th><th>Bar Time (IST)</th></tr></thead>
     <tbody>{sig_rows_html}</tbody>
   </table>
-
+{rsi_section_html}
   <h1>ALL IN ONE PRO - Section B (Keltner/SMC + RSI Pattern) - {cfg['title']}</h1>
   <div class="meta">
     {payload.get('signal_b_count', 0)} signals &middot; "source" is SSL_SWEEP / BSL_SWEEP (liquidity reclaim)

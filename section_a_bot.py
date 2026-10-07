@@ -25,6 +25,17 @@ ENV VARS
   BOT_ONE_PER_SYMBOL_PER_DAY (true), BOT_CONFIRM_EXPIRY_BARS (15), BOT_MAX_DELAY_MINUTES (20), NTFY_TOPIC,
   BOT_PAPER_RISK_RS (2000 - rupees risked per paper trade; set it equal to RISK_RUPEES_STOCKS on dhan-bridge).
 
+RSI FLUSH (added 2026-10-07) - run_rsi() near the bottom
+  The RSI Flush scan (rsi_flush_live.py, table on /scanner) hands its rows here after every intraday scan:
+    - PHONE ALERT (needs NTFY_TOPIC): once per setup when a break is confirmed (optionally also when a signal candle
+      forms: RSIFLUSH_NTFY_PENDING=true). Capped per day (RSIFLUSH_NTFY_MAX_PER_DAY, default 40).
+    - PAPER TRADE (needs BOT_ENABLED=true): the confirmed break is followed exactly like a Section A paper trade
+      (entry = close of the confirming candle, the same cascade, same P&L page, signal shown as RSI_FLUSH_BUY_10m ...).
+      ALWAYS PAPER, even when BOT_LIVE=true - the bridge does not know the RSI Flush alert types yet, so nothing is ever sent.
+  Own switches/limits: BOT_RSI_ENABLED (true), BOT_RSI_TIMEFRAMES (10m), BOT_RSI_MAX_TRADES_PER_DAY (20),
+  BOT_RSI_ONE_PER_SYMBOL_PER_DAY (true), RSIFLUSH_NTFY (true), RSIFLUSH_NTFY_TIMEFRAMES (10m,1H,4H),
+  RSIFLUSH_NTFY_PENDING (false), RSIFLUSH_NTFY_MAX_PER_DAY (40). Section A's own daily limit is not touched.
+
 PAPER P&L (/botpnl, /botpnl.csv)
   Every paper "WOULD_SEND" is followed on the next 10m candles and closed the way the bridge would manage it:
     entry   = close of the confirming candle (the price sent), quantity = BOT_PAPER_RISK_RS / (entry - stop)
@@ -366,6 +377,23 @@ def pnl_html() -> str:
                + (f" ({100 * len(wins) / len(closed):.0f}%)" if closed else "")
                + f" | Total P&L (closed): Rs {tot:,.0f} | Total R: {totr:.2f} | Open trades: {len(opn)} "
                f"(unrealised Rs {unreal:,.0f})")
+    # split by strategy: Section A (sweep / order block) vs RSI Flush
+    by_src = []
+    for label, test in (("Section A (Sweep + OB)", lambda r: not str(r["signal"]).startswith("RSI_FLUSH")),
+                        ("RSI Flush", lambda r: str(r["signal"]).startswith("RSI_FLUSH"))):
+        sub = [r for r in rows if test(r)]
+        if not sub:
+            continue
+        sc = [r for r in sub if r["status"] == "CLOSED"]
+        sw = [r for r in sc if r["pnl_rupees"] != "" and r["pnl_rupees"] > 0]
+        sp = sum(r["pnl_rupees"] for r in sc if r["pnl_rupees"] != "")
+        sr = sum(r["r_multiple"] for r in sc if r["r_multiple"] != "")
+        so = [r for r in sub if r["status"] != "CLOSED"]
+        su = sum(r["pnl_rupees"] for r in so if r["pnl_rupees"] != "")
+        by_src.append(f"<b>{label}</b>: closed {len(sc)}"
+                      + (f", winners {len(sw)} ({100 * len(sw) / len(sc):.0f}%)" if sc else "")
+                      + f", P&amp;L Rs {sp:,.0f}, R {sr:.2f}, open {len(so)} (unrealised Rs {su:,.0f})")
+    by_src_html = "".join(f"<p>{x}</p>" for x in by_src) if len(by_src) > 1 else ""
     head = "".join(f"<th>{html.escape(h)}</th>" for h in PNL_COLS)
     body = "".join("<tr>" + "".join(f"<td>{html.escape(str(r.get(h, '')))}</td>" for h in PNL_COLS) + "</tr>"
                    for r in rows[::-1])
@@ -377,6 +405,7 @@ th{{background:#f0f0f0;position:sticky;top:0}} .w{{overflow-x:auto}} small{{colo
 @media(prefers-color-scheme:dark){{body{{background:#111;color:#eee}}th{{background:#222}}th,td{{border-color:#444}}small{{color:#aaa}}}}
 </style></head><body><h2>Section A paper trades - P&amp;L</h2>
 <p><b>{summary}</b></p>
+{by_src_html}
 <p><small>Entry = close of the confirming candle. Stop moves to cost at T1, then to T1, T2, T3, T4 as each next target is hit;
 exit at the stop, at T6, or at the 15:10 square-off. If one candle touches both the stop and a target, the stop is taken first.
 Before brokerage, taxes and slippage. Newest first. <a href="/botpnl.csv">Download CSV</a>.
@@ -461,3 +490,142 @@ def run(signals):
         _save_state(st)
     except Exception as e:
         log.error(f"section_a_bot.run failed: {e}")
+
+
+
+# ---------------------------------------------------------------- RSI Flush: phone alerts + paper trades
+RSI_TF_MINUTES = {"10m": 10, "1H": 60, "4H": 240}
+
+
+def _rsi_cfg():
+    def lst(name, default):
+        return [t.strip() for t in os.environ.get(name, default).split(",") if t.strip()]
+    return {
+        "paper": _env_bool("BOT_RSI_ENABLED", True),
+        "tfs": lst("BOT_RSI_TIMEFRAMES", "10m"),
+        "max_per_day": int(os.environ.get("BOT_RSI_MAX_TRADES_PER_DAY", "20") or "20"),
+        "one_per_symbol": _env_bool("BOT_RSI_ONE_PER_SYMBOL_PER_DAY", True),
+        "ntfy": _env_bool("RSIFLUSH_NTFY", True),
+        "ntfy_tfs": lst("RSIFLUSH_NTFY_TIMEFRAMES", "10m,1H,4H"),
+        "ntfy_pending": _env_bool("RSIFLUSH_NTFY_PENDING", False),
+        "ntfy_cap": int(os.environ.get("RSIFLUSH_NTFY_MAX_PER_DAY", "40") or "40"),
+    }
+
+
+def _rsi_push(topic, title, text, tags="chart_with_upwards_trend"):
+    try:
+        requests.post(f"https://ntfy.sh/{topic}", data=text.encode("utf-8"), timeout=5,
+                      headers={"Title": title, "Priority": "high", "Tags": tags})
+    except Exception:
+        pass
+
+
+def run_rsi(rows):
+    """Call once after each intraday scan with the RSI Flush rows. Never raises, never sends an order."""
+    try:
+        if not rows:
+            return
+        cf = cfg()
+        rc = _rsi_cfg()
+        paper_on = cf["enabled"] and rc["paper"]
+        push_on = bool(cf["ntfy"] and rc["ntfy"])
+        if not paper_on and not push_on:
+            return
+        cf_quiet = dict(cf, ntfy="")           # RSI Flush decisions are logged without the Section A style urgent push
+        now = datetime.now(IST)
+        today = now.strftime("%Y-%m-%d")
+        st = _load_state()
+        seen = set(st.setdefault("rsi_seen", []))
+        nd = st.setdefault("rsi_ntfy_day", {"date": today, "count": 0})
+        if nd.get("date") != today:
+            nd.update({"date": today, "count": 0})
+        dd = st.setdefault("rsi_day", {"date": today, "count": 0, "symbols": []})
+        if dd.get("date") != today:
+            dd.update({"date": today, "count": 0, "symbols": []})
+
+        def push(title, text):
+            if not push_on:
+                return
+            if nd["count"] >= rc["ntfy_cap"]:
+                if nd["count"] == rc["ntfy_cap"]:
+                    nd["count"] += 1
+                    _rsi_push(cf["ntfy"], "[RSI Flush] daily alert cap reached",
+                              f"{rc['ntfy_cap']} alerts sent today - further setups are still on /scanner and in the paper P&L.")
+                return
+            nd["count"] += 1
+            _rsi_push(cf["ntfy"], title, text)
+
+        for r in rows:
+            tf, sym, side = r.get("timeframe"), r.get("symbol"), r.get("side")
+            tfmin = RSI_TF_MINUTES.get(tf)
+            if not tfmin or side not in ("BUY", "SELL"):
+                continue
+            levels = f"entry {r.get('entry')} | SL {r.get('sl')} | T1 {r.get('T1')} | T6 {r.get('T6')} | risk {r.get('risk_pct')}%"
+
+            # --- signal candle formed, waiting for the break (alert only, optional)
+            if r.get("status") == "PENDING":
+                if not (push_on and rc["ntfy_pending"] and tf in rc["ntfy_tfs"]):
+                    continue
+                if _utc_to_ist(r["signal_ts"])[:10] != today:
+                    continue
+                key = f"P|{sym}|{tf}|{side}|{r['signal_ts']}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                late = (pd.Timestamp(datetime.now(timezone.utc).replace(tzinfo=None))
+                        - (pd.Timestamp(str(r["signal_ts"])) + pd.Timedelta(minutes=tfmin))).total_seconds() / 60
+                if late > cf["max_delay_min"]:
+                    continue
+                push(f"[RSI Flush] {side} signal candle - {sym} ({tf})", f"Waiting for the break. {levels}")
+                continue
+
+            # --- break confirmed
+            if not r.get("confirm_ts") or _utc_to_ist(r["confirm_ts"])[:10] != today:
+                continue
+            key = f"{sym}|RSI_FLUSH_{side}|{tf}|{r['confirm_ts']}"
+            if key in seen:
+                continue
+            seen.add(key)
+            bar_end = pd.Timestamp(str(r["confirm_ts"])) + pd.Timedelta(minutes=tfmin)
+            late = (pd.Timestamp(datetime.now(timezone.utc).replace(tzinfo=None)) - bar_end).total_seconds() / 60
+            if late > cf["max_delay_min"]:
+                continue            # old confirmation (e.g. after a restart) - not alerted, not traded
+            cbar = _utc_to_ist(r["confirm_ts"])
+            close = r.get("confirm_close")
+            ok_stage = r.get("status") == "ACTIVE"
+
+            if tf in rc["ntfy_tfs"] and ok_stage:
+                push(f"[RSI Flush] {side} CONFIRMED - {sym} ({tf})",
+                     f"Break confirmed on the {cbar} candle (close {close}). {levels}")
+
+            if not (paper_on and tf in rc["tfs"]):
+                continue
+            p = {"key": key, "symbol": sym, "signal": f"RSI_FLUSH_{side}_{tf}", "side": side.lower(),
+                 "signal_ts": r["signal_ts"], "level": r.get("entry"), "sl": r.get("sl"),
+                 "targets": {k: r.get(k) for k in ("T1", "T2", "T3", "T4", "T5", "T6")}}
+            why = None
+            if not ok_stage:
+                why = f"already {str(r.get('status')).lower()} on its first look - not traded"
+            elif close is None or (side == "BUY" and close <= p["sl"]) or (side == "SELL" and close >= p["sl"]):
+                why = "confirming candle closed beyond the stop - setup invalid"
+            if not why:
+                why = _allowed_now(cf, now)
+            if not why and dd["count"] >= rc["max_per_day"]:
+                why = f"RSI Flush daily limit of {rc['max_per_day']} paper trades reached"
+            if not why and rc["one_per_symbol"] and sym in dd["symbols"]:
+                why = "already traded this symbol today (RSI Flush)"
+            if why:
+                _record(cf_quiet, "CONFIRMED_BUT_SKIPPED", p, why=why, confirm_bar_ist=cbar, price=close)
+                continue
+            dd["count"] += 1
+            dd["symbols"].append(sym)
+            _record(cf_quiet, "WOULD_SEND", p, confirm_bar_ist=cbar, price=close,
+                    why="RSI Flush is paper only - no order sent")
+            # the paper tracker follows 10m candles: start after the last 10m candle of the confirming bar
+            last_ts = pd.Timestamp(str(r["confirm_ts"])) + pd.Timedelta(minutes=tfmin - 10)
+            _open_paper(cf, st, p, close, cbar, last_ts)
+
+        st["rsi_seen"] = list(seen)[-3000:]
+        _save_state(st)
+    except Exception as e:
+        log.error(f"section_a_bot.run_rsi failed: {e}")

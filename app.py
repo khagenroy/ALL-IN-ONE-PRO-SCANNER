@@ -420,6 +420,11 @@ def scanner_signals_b_csv():
     return _serve_csv("latest_signals_b.csv", "all_in_one_pro_intraday_signals_section_b.csv")
 
 
+@app.route("/scanner/rsi_flush.csv", methods=["GET"])
+def scanner_rsi_flush_csv():
+    return _serve_csv("latest_rsi_flush.csv", "all_in_one_pro_intraday_rsi_flush.csv")
+
+
 @app.route("/swing", methods=["GET"])
 def swing_results():
     return _serve_html("latest_swing.html")

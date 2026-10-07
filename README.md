@@ -189,3 +189,24 @@ Trades only Section A (Strategy 1 sweep, Strategy 2 order block) from the 10m sc
 After a signal it waits for the break of the signal candle (up to 15 candles), then sends the same `..._CONFIRMED` message TradingView would send to dhan-bridge.
 Render env vars: `BOT_ENABLED` (default false), `BOT_LIVE` (default false = paper, log only), `BRIDGE_WEBHOOK_URL`, optional `NTFY_TOPIC`, `BOT_MAX_TRADES_PER_DAY` (10), `BOT_CUTOFF` (14:30).
 Record: `/botlog` and `/botlog.csv` (every decision, with SL and T1-T6). Paper results: `/botpnl` and `/botpnl.csv` (each paper trade followed to its exit with the bridge's SL cascade, P&L in rupees and R; `BOT_PAPER_RISK_RS`, default 2000). Both are cleared on redeploy - download them.
+
+## RSI Flush on the intraday page (added 2026-10-07)
+
+`/scanner` (Section A area) now also has an **RSI Flush** table, with a CSV at `/scanner/rsi_flush.csv`.
+It is the same rule as the TradingView indicator "RSI Flush with Volume Filter + Break Confirm"
+(RSI 14, 30/70, 4-candle window, volume >= 1.5x average, entry = signal candle high/low once a later candle breaks it
+within 4 candles, SL = lowest low / highest high of the last 5 candles, T1-T6 = 1R-6R, cascade SL).
+Rows: PENDING (waiting for the break), ACTIVE, STOPPED, T6 DONE - today's session only, as of the last closed candle.
+It uses the bars the intraday scan already downloads (no extra Dhan calls) and places no orders.
+
+Env vars: `RSIFLUSH_SCAN` (default `true`; `false` removes it), `RSIFLUSH_SCAN_MODES` (default `intraday`; `intraday,swing` adds it to /swing).
+Code: `rsi_flush_live.py`; hooked into `live_scanner.py` in its own try/except so it can never affect Section A / B.
+
+### RSI Flush: phone alerts and paper P&L (added 2026-10-07)
+After each intraday scan the RSI Flush rows go to `section_a_bot.run_rsi()`:
+- **Phone alert** (uses the existing `NTFY_TOPIC`): one push per setup when a break is confirmed. Capped at `RSIFLUSH_NTFY_MAX_PER_DAY` (40).
+  `RSIFLUSH_NTFY_PENDING=true` also pushes when a signal candle forms. `RSIFLUSH_NTFY_TIMEFRAMES` (default `10m,1H,4H`), `RSIFLUSH_NTFY=false` turns it off.
+- **Paper trade + P&L** (needs `BOT_ENABLED=true`): the confirmed break is followed like a Section A paper trade
+  (entry = close of the confirming candle, same cascade, shown on `/botpnl` as `RSI_FLUSH_BUY_10m` / `RSI_FLUSH_SELL_10m`, with a separate RSI Flush total).
+  **Always paper, even when `BOT_LIVE=true`** - dhan-bridge does not know the RSI Flush alert types yet, so no order is ever sent.
+  `BOT_RSI_ENABLED` (true), `BOT_RSI_TIMEFRAMES` (10m), `BOT_RSI_MAX_TRADES_PER_DAY` (20), `BOT_RSI_ONE_PER_SYMBOL_PER_DAY` (true).
