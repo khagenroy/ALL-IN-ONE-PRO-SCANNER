@@ -10,10 +10,10 @@ scrip_master.py's header for why). Two background scans run in this process:
   SWING (1D/1W/1M)     - once a day after the close (16:00 IST), plus one seed
       scan if no swing results exist yet (fresh deploy). Page: /swing
 
-This process does NOT place orders, does NOT touch dhan-bridge, and does
-NOT execute trades of any kind - it only reads market data and reports
-signals for a person to act on manually (or wire up separately later, if
-ever wanted).
+By default this process does NOT place orders: it only reads market data and
+reports signals. The ONLY exception is the optional Section A bot
+(section_a_bot.py), which is OFF unless BOT_ENABLED=true, logs only (paper
+mode) unless BOT_LIVE=true, and sends orders only via your dhan-bridge webhook.
 """
 
 import os
@@ -59,8 +59,15 @@ def _intraday_loop():
                 try:
                     import live_scanner
                     log.info("Running intraday scan...")
-                    live_scanner.run_scan("intraday")
+                    _sig_a, _sig_b = live_scanner.run_scan("intraday")
                     log.info("Intraday scan complete.")
+                    # Section A auto-trade bot (does nothing unless BOT_ENABLED=true; paper mode unless BOT_LIVE=true).
+                    # Isolated: any failure here is swallowed and never affects the scan.
+                    try:
+                        import section_a_bot
+                        section_a_bot.run(_sig_a)
+                    except Exception as e:
+                        log.error(f"Section A bot error: {e}")
                 except Exception as e:
                     log.error(f"Error during intraday scan: {e}")
                 # fixed-rate: next scan is due POLL_INTERVAL after this one STARTED
@@ -370,6 +377,19 @@ def _serve_csv(filename: str, download_name: str):
     if not os.path.exists(path):
         return "No scan has run yet.", 404
     return send_file(path, mimetype="text/csv", as_attachment=True, download_name=download_name)
+
+
+@app.route("/botlog", methods=["GET"])
+def botlog():
+    import section_a_bot
+    return section_a_bot.log_html()
+
+
+@app.route("/botlog.csv", methods=["GET"])
+def botlog_csv():
+    import section_a_bot
+    return section_a_bot.log_csv(), 200, {"Content-Type": "text/csv",
+                                         "Content-Disposition": "attachment; filename=bot_log.csv"}
 
 
 @app.route("/scanner", methods=["GET"])
