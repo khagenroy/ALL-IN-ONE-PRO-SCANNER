@@ -51,7 +51,7 @@ AGAINST_PCT = 0.01
 DAYS = int(os.environ.get("OIZONES_DAYS", "90") or "90")
 MAX_STOCKS = int(os.environ.get("OIZONES_MAX_STOCKS", "0") or "0")
 WORKERS = 4
-MIN_OI_JUMP_PCT = 0.015        # a buildup day must add at least 1.5% to OI ...
+MIN_OI_JUMP_PCT = 0.03         # a buildup day must add at least 3% of the stock's typical OI ...
 JUMP_QUANTILE = 0.80           # ... and be among the biggest 20% OI additions in the window
 KEEP_PER_SIDE = 3
 MERGE_PAD = 0.002
@@ -72,14 +72,21 @@ def load_fno():
     global _fno
     if _fno is not None:
         return _fno
-    for attempt in (1, 2):
+    for attempt in (1, 2, 3, 4):
         sm._ensure_fresh_cache()
-        df = pd.read_csv(sm.CACHE_FILE, dtype=str)
+        try:
+            df = pd.read_csv(sm.CACHE_FILE, dtype=str)
+        except Exception as e:                       # file half-written by another thread's download
+            if attempt == 4:
+                raise
+            log.warning(f"OI zones: instrument file not readable yet ({e}) - retrying in 20s")
+            time.sleep(20)
+            continue
         cols = list(df.columns)
         ins = df["SEM_INSTRUMENT_NAME"].fillna("").str.upper().str.strip()
         exch = df["SEM_EXM_EXCH_ID"].fillna("").str.upper().str.strip()
         f = df[(ins == "FUTSTK") & (exch == "NSE")].copy()
-        if len(f) > 0 or attempt == 2:
+        if len(f) > 0 or attempt == 4:
             break
         log.warning("OI zones: instrument file had no stock futures (it may still have been downloading) - retrying in 20s")
         time.sleep(20)
@@ -179,14 +186,31 @@ def zones_from_df(d):
     if n < 15:
         return []
     doi = np.diff(oi, prepend=np.nan)
-    pct = doi / np.where(np.roll(oi, 1) > 0, np.roll(oi, 1), np.nan)
-    pos = doi[doi > 0]
+    med = float(np.nanmedian(oi))
+    if not med > 0:
+        return []
+    # Contract rollover guard: after a monthly expiry OI collapses and then rebuilds from near zero, which makes the
+    # first days of a new series look like giant "buildups". Skip bars that follow a big OI drop, and bars where
+    # OI is still far below its normal level.
+    prev_oi = np.roll(oi, 1)
+    drop = np.zeros(n, dtype=bool)
+    drop[1:] = (doi[1:] / np.where(prev_oi[1:] > 0, prev_oi[1:], np.nan)) < -0.35
+    skip = np.zeros(n, dtype=bool)
+    for i in np.where(drop)[0]:
+        skip[i:i + 4] = True                       # the expiry day and the next 3 sessions
+    eligible = (~skip) & (prev_oi >= 0.5 * med)
+    eligible[:6] = False
+    # a steady OI ramp (new series filling up) is not a buildup day: only count days whose OI addition stands out
+    # from the previous 5 sessions' typical change
+    base = pd.Series(doi).shift(1).rolling(5, min_periods=3).median().to_numpy()
+    add_rel = (doi - np.nan_to_num(base)) / med    # extra OI added, as a share of the stock's typical OI
+    pos = add_rel[(doi > 0) & eligible & (add_rel > 0)]
     if pos.size < 5:
         return []
     thr = np.quantile(pos, JUMP_QUANTILE)
     raw = []
     for i in range(1, n):
-        if not (doi[i] >= thr and pct[i] >= MIN_OI_JUMP_PCT):
+        if not (eligible[i] and doi[i] > 0 and add_rel[i] >= thr and add_rel[i] >= MIN_OI_JUMP_PCT):
             continue
         body_lo, body_hi = min(o[i], c[i]), max(o[i], c[i])
         rng = max(h[i] - l[i], 1e-9)
@@ -217,7 +241,7 @@ def zones_from_df(d):
         if kind == "RESISTANCE" and later.size and (later > hi * (1 + MERGE_PAD)).any():
             continue
         out.append({"type": kind, "lo": round(lo, 2), "hi": round(hi, 2), "oi_added": int(add),
-                    "oi_added_pct": round(add / oi[-1] * 100, 1), "date": str(d.index[i].date()),
+                    "oi_added_pct": round(add / med * 100, 1), "date": str(d.index[i].date()),
                     "bars_ago": int(n - 1 - i)})
     res = []
     for kind in ("SUPPORT", "RESISTANCE"):
@@ -429,6 +453,7 @@ def _zones_due(now):
 
 def loop():
     log.info("OI zones autorun started - zones once a day after 16:00 IST (and at start-up if none), near/signal table every 10 min.")
+    time.sleep(90)            # let the main scanner finish its own start-up download of the instrument file first
     last_try = 0.0
     last_live = 0.0
     while True:
