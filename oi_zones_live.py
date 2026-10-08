@@ -27,6 +27,7 @@ ENV (optional): OIZONES_AUTORUN=true  OIZONES_NEAR_PCT=0.5  OIZONES_DAYS=90  OIZ
 """
 
 import os
+import re
 import json
 import time
 import logging
@@ -71,12 +72,17 @@ def load_fno():
     global _fno
     if _fno is not None:
         return _fno
-    sm._ensure_fresh_cache()
-    df = pd.read_csv(sm.CACHE_FILE, dtype=str)
-    cols = list(df.columns)
-    ins = df["SEM_INSTRUMENT_NAME"].fillna("").str.upper().str.strip()
-    exch = df["SEM_EXM_EXCH_ID"].fillna("").str.upper().str.strip()
-    f = df[(ins == "FUTSTK") & (exch == "NSE")].copy()
+    for attempt in (1, 2):
+        sm._ensure_fresh_cache()
+        df = pd.read_csv(sm.CACHE_FILE, dtype=str)
+        cols = list(df.columns)
+        ins = df["SEM_INSTRUMENT_NAME"].fillna("").str.upper().str.strip()
+        exch = df["SEM_EXM_EXCH_ID"].fillna("").str.upper().str.strip()
+        f = df[(ins == "FUTSTK") & (exch == "NSE")].copy()
+        if len(f) > 0 or attempt == 2:
+            break
+        log.warning("OI zones: instrument file had no stock futures (it may still have been downloading) - retrying in 20s")
+        time.sleep(20)
     n_fut = len(f)
     # expiry: mixed formats must not turn real contracts into NaT, so parse each value on its own
     f["_exp"] = f["SEM_EXPIRY_DATE"].apply(lambda v: pd.to_datetime(v, errors="coerce", format="mixed")
@@ -92,6 +98,7 @@ def load_fno():
         if und_col and isinstance(r[und_col], str) and r[und_col].strip():
             cand.append(r[und_col].strip().upper())
         ts = str(r["SEM_TRADING_SYMBOL"]).strip().upper()
+        cand.append(re.sub(r"-[A-Z]{3}\d{4}-FUT$", "", ts))        # BAJAJ-AUTO-OCT2026-FUT -> BAJAJ-AUTO
         cand.append(ts.split("-")[0].split(" ")[0])
         und = next((c for c in cand if c in eq_names), None)
         if und is None:

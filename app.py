@@ -410,7 +410,7 @@ def _serve_html(filename: str):
     path = os.path.join(RESULTS_DIR, filename)
     if not os.path.exists(path):
         return "No scan has run yet.", 404
-    with open(path) as f:
+    with open(path, encoding="utf-8", errors="replace") as f:
         return f.read()
 
 
@@ -449,6 +449,14 @@ def botlog_csv():
 
 @app.route("/scanner", methods=["GET"])
 def scanner_results():
+    try:
+        return _scanner_page()
+    except Exception:
+        log.exception("/scanner page failed")
+        return "Scanner page error - see the Render log line '/scanner page failed'.", 200
+
+
+def _scanner_page():
     page = _serve_html("latest.html")
     no_scan = not isinstance(page, str)
     if no_scan:          # no scan saved yet (e.g. right after a redeploy / outside market hours): still show the extra tables
@@ -464,7 +472,7 @@ def scanner_results():
             m = __import__(mod)
             extra += m.section_html() or ""
         except Exception as e:
-            log.error(f"{mod} section on /scanner failed: {e}")
+            log.exception(f"{mod} section on /scanner failed: {e}")
     if extra:
         page = page.replace("</body>", extra + "</body>", 1) if "</body>" in page else page + extra
     return page if (not no_scan or extra) else (page, 200)
