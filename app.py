@@ -368,6 +368,20 @@ def _oizones_loop():
 if OIZONES_AUTORUN:
     threading.Thread(target=_oizones_loop, daemon=True, name="oizones-autorun").start()
 
+ORB_AUTORUN = os.environ.get("ORB_AUTORUN", "true").strip().lower() == "true"
+
+
+def _orb_loop():
+    try:
+        import orb_live
+        orb_live.loop()
+    except Exception as e:
+        log.error(f"ORB loop could not start: {e}")
+
+
+if ORB_AUTORUN:
+    threading.Thread(target=_orb_loop, daemon=True, name="orb-autorun").start()
+
 if SPURT10_AUTORUN:
     threading.Thread(target=_spurt10_loop, daemon=True, name="spurt10-autorun").start()
 
@@ -436,23 +450,24 @@ def botlog_csv():
 @app.route("/scanner", methods=["GET"])
 def scanner_results():
     page = _serve_html("latest.html")
-    if isinstance(page, str) and SPURT10_AUTORUN:
+    no_scan = not isinstance(page, str)
+    if no_scan:          # no scan saved yet (e.g. right after a redeploy / outside market hours): still show the extra tables
+        page = ('<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+                '<meta http-equiv="refresh" content="60"><title>Scanner</title></head><body style="font-family:Arial,sans-serif;margin:12px">'
+                '<h2>Scanner</h2><p>No intraday scan has run yet today - Section A / B / RSI Flush tables fill in at the next market-hours scan.</p>'
+                '</body></html>')
+    extra = ""
+    for flag, mod in ((SPURT10_AUTORUN, "spurt10_live"), (ORB_AUTORUN, "orb_live"), (OIZONES_AUTORUN, "oi_zones_live")):
+        if not flag:
+            continue
         try:
-            import spurt10_live
-            frag = spurt10_live.section_html()
-            if frag:
-                page = page.replace("</body>", frag + "</body>", 1) if "</body>" in page else page + frag
+            m = __import__(mod)
+            extra += m.section_html() or ""
         except Exception as e:
-            log.error(f"Spurt10 section on /scanner failed: {e}")
-    if isinstance(page, str) and OIZONES_AUTORUN:
-        try:
-            import oi_zones_live
-            frag = oi_zones_live.section_html()
-            if frag:
-                page = page.replace("</body>", frag + "</body>", 1) if "</body>" in page else page + frag
-        except Exception as e:
-            log.error(f"OI zones section on /scanner failed: {e}")
-    return page
+            log.error(f"{mod} section on /scanner failed: {e}")
+    if extra:
+        page = page.replace("</body>", extra + "</body>", 1) if "</body>" in page else page + extra
+    return page if (not no_scan or extra) else (page, 200)
 
 
 @app.route("/scanner/signals.csv", methods=["GET"])
