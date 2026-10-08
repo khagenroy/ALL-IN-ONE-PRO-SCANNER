@@ -343,6 +343,34 @@ def _confluence_loop():
             time.sleep(300)
 
 
+SPURT10_AUTORUN = os.environ.get("SPURT10_AUTORUN", "true").strip().lower() == "true"
+
+
+def _spurt10_loop():
+    try:
+        import spurt10_live
+        spurt10_live.loop()
+    except Exception as e:
+        log.error(f"Spurt10 loop could not start: {e}")
+
+
+OIZONES_AUTORUN = os.environ.get("OIZONES_AUTORUN", "true").strip().lower() == "true"
+
+
+def _oizones_loop():
+    try:
+        import oi_zones_live
+        oi_zones_live.loop()
+    except Exception as e:
+        log.error(f"OI zones loop could not start: {e}")
+
+
+if OIZONES_AUTORUN:
+    threading.Thread(target=_oizones_loop, daemon=True, name="oizones-autorun").start()
+
+if SPURT10_AUTORUN:
+    threading.Thread(target=_spurt10_loop, daemon=True, name="spurt10-autorun").start()
+
 if AUTORUN:
     threading.Thread(target=_intraday_loop, daemon=True, name="intraday-autorun").start()
 if SWING_AUTORUN:
@@ -407,7 +435,24 @@ def botlog_csv():
 
 @app.route("/scanner", methods=["GET"])
 def scanner_results():
-    return _serve_html("latest.html")
+    page = _serve_html("latest.html")
+    if isinstance(page, str) and SPURT10_AUTORUN:
+        try:
+            import spurt10_live
+            frag = spurt10_live.section_html()
+            if frag:
+                page = page.replace("</body>", frag + "</body>", 1) if "</body>" in page else page + frag
+        except Exception as e:
+            log.error(f"Spurt10 section on /scanner failed: {e}")
+    if isinstance(page, str) and OIZONES_AUTORUN:
+        try:
+            import oi_zones_live
+            frag = oi_zones_live.section_html()
+            if frag:
+                page = page.replace("</body>", frag + "</body>", 1) if "</body>" in page else page + frag
+        except Exception as e:
+            log.error(f"OI zones section on /scanner failed: {e}")
+    return page
 
 
 @app.route("/scanner/signals.csv", methods=["GET"])
@@ -423,6 +468,21 @@ def scanner_signals_b_csv():
 @app.route("/scanner/rsi_flush.csv", methods=["GET"])
 def scanner_rsi_flush_csv():
     return _serve_csv("latest_rsi_flush.csv", "all_in_one_pro_intraday_rsi_flush.csv")
+
+
+@app.route("/spurt10", methods=["GET"])
+def spurt10_page():
+    return _serve_html("spurt10.html")
+
+
+@app.route("/spurt10.csv", methods=["GET"])
+def spurt10_csv():
+    return _serve_csv("spurt10.csv", "volume_spurt_10min_top30.csv")
+
+
+@app.route("/oizones.csv", methods=["GET"])
+def oizones_csv():
+    return _serve_csv("oizones.csv", "oi_zones_near.csv")
 
 
 @app.route("/swing", methods=["GET"])
