@@ -39,7 +39,7 @@ import pandas as pd
 
 import live_scanner as ls
 import scrip_master as sm
-from scrip_master import get_security_id_and_segment
+from scrip_master import get_security_id_and_segment, get_all_nse_equity_symbols
 
 log = logging.getLogger("oizones")
 IST = ZoneInfo("Asia/Kolkata")
@@ -64,32 +64,53 @@ _fno = None          # {underlying: (future_security_id, cash_security_id)}
 
 
 # ---------------------------------------------------------------- universe
+_fno_diag = {"note": ""}
+
+
 def load_fno():
     global _fno
     if _fno is not None:
         return _fno
     sm._ensure_fresh_cache()
     df = pd.read_csv(sm.CACHE_FILE, dtype=str)
-    m = (df["SEM_EXM_EXCH_ID"].str.upper() == "NSE") & (df["SEM_INSTRUMENT_NAME"].str.upper() == "FUTSTK")
-    f = df[m].copy()
-    f["_exp"] = pd.to_datetime(f["SEM_EXPIRY_DATE"], errors="coerce")
-    f = f[f["_exp"] >= pd.Timestamp.now().normalize()].sort_values("_exp")
-    out = {}
+    cols = list(df.columns)
+    ins = df["SEM_INSTRUMENT_NAME"].fillna("").str.upper().str.strip()
+    exch = df["SEM_EXM_EXCH_ID"].fillna("").str.upper().str.strip()
+    f = df[(ins == "FUTSTK") & (exch == "NSE")].copy()
+    n_fut = len(f)
+    # expiry: mixed formats must not turn real contracts into NaT, so parse each value on its own
+    f["_exp"] = f["SEM_EXPIRY_DATE"].apply(lambda v: pd.to_datetime(v, errors="coerce", format="mixed")
+                                           if isinstance(v, str) else pd.NaT)
+    today = pd.Timestamp.now().normalize()
+    f = f[(f["_exp"].isna()) | (f["_exp"] >= today)].sort_values("_exp", na_position="last")
+    n_live = len(f)
+    eq_names = set(get_all_nse_equity_symbols())
+    und_col = "SEM_UNDERLYING_SYMBOL" if "SEM_UNDERLYING_SYMBOL" in f.columns else None
+    out, skipped = {}, []
     for _, r in f.iterrows():
-        und = str(r["SEM_TRADING_SYMBOL"]).split("-")[0].strip().upper()
-        if und in out:
+        cand = []
+        if und_col and isinstance(r[und_col], str) and r[und_col].strip():
+            cand.append(r[und_col].strip().upper())
+        ts = str(r["SEM_TRADING_SYMBOL"]).strip().upper()
+        cand.append(ts.split("-")[0].split(" ")[0])
+        und = next((c for c in cand if c in eq_names), None)
+        if und is None:
+            if len(skipped) < 6:
+                skipped.append(ts)
             continue
-        try:
-            cash_id, seg = get_security_id_and_segment(und)
-        except Exception:
+        if und in out or "NSETEST" in und:
             continue
+        cash_id, seg = get_security_id_and_segment(und)
         if not cash_id or seg != "NSE_EQ":
             continue
         out[und] = (str(r["SEM_SMST_SECURITY_ID"]).strip(), str(cash_id))
     if MAX_STOCKS > 0:
         out = dict(list(out.items())[:MAX_STOCKS])
-    _fno = out
-    log.info(f"OI zones: {len(out)} F&O stocks with a near-month future")
+    _fno_diag["note"] = (f"scrip master: {n_fut} NSE FUTSTK rows, {n_live} not expired, {len(out)} matched to a cash stock; "
+                         f"unmatched samples {skipped}; columns {cols[:12]}")
+    log.info("OI zones: " + _fno_diag["note"])
+    if out:
+        _fno = out
     return out
 
 
@@ -202,7 +223,10 @@ def build_zones():
     t0 = time.monotonic()
     fno = load_fno()
     if not fno:
-        raise RuntimeError("no F&O futures found in the scrip master")
+        _save_zones({"built": datetime.now(IST).isoformat(), "stocks": {}, "errors": 0, "universe": 0,
+                     "note": "NO F&O FUTURES FOUND - " + _fno_diag["note"]})
+        log.error("OI zones: no F&O futures found - " + _fno_diag["note"])
+        return
     if not _probe(fno):
         log.error(_variant["note"])
         _save_zones({"built": datetime.now(IST).isoformat(), "stocks": {}, "note": _variant["note"], "errors": len(fno)})
@@ -389,8 +413,8 @@ def section_html():
 # ---------------------------------------------------------------- loop
 def _zones_due(now):
     z = load_zones()
-    if z is None:
-        return True
+    if z is None or not z.get("stocks"):
+        return True                      # nothing built yet (or the last build failed): retry, at most every 30 min
     if now.weekday() >= 5 or now.hour < 16:
         return False
     return z.get("built", "")[:10] < now.strftime("%Y-%m-%d")
