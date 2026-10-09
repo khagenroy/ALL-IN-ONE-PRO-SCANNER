@@ -59,6 +59,7 @@ MERGE_PAD = 0.002
 RESULTS_DIR = os.path.join(os.path.dirname(__file__), "results")
 ZONES_PATH = os.path.join(RESULTS_DIR, "oi_zones.json")
 NEAR_CSV = os.path.join(RESULTS_DIR, "oizones.csv")
+SIGS_CSV = os.path.join(RESULTS_DIR, "oizones_signals.csv")
 LIVE_PATH = os.path.join(RESULTS_DIR, "oi_zones_live.json")
 
 _fno = None          # {underlying: (future_security_id, cash_security_id)}
@@ -390,6 +391,7 @@ def refresh_live():
         verdict, why = judge(s["side"], s["price"], zs)
         sigs.append({**s, "verdict": verdict, "why": why})
     order = {"ALIGNED": 0, "AGAINST": 1, "neutral": 2}
+    sigs = [r for r in sigs if r["verdict"] != "neutral"]      # only ALIGNED / AGAINST are shown (and exported) - neutral rows dropped
     sigs.sort(key=lambda r: (order[r["verdict"]], r["symbol"]))
     meta = {"run": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"), "zones_built": zd.get("built", "")[:16].replace("T", " "),
             "stocks_with_zones": len(zd["stocks"]), "universe": zd.get("universe"), "errors": zd.get("errors"),
@@ -397,6 +399,7 @@ def refresh_live():
     _write_live({"meta": meta, "near": near, "signals": sigs})
     os.makedirs(RESULTS_DIR, exist_ok=True)
     pd.DataFrame(near).to_csv(NEAR_CSV, index=False)
+    pd.DataFrame(sigs).to_csv(SIGS_CSV, index=False)
 
 
 def _write_live(obj):
@@ -414,31 +417,37 @@ def section_html():
     except Exception:
         return ""
     m, near, sigs = d["meta"], d["near"], d["signals"]
-    colr = {"ALIGNED": "#0a7d33", "AGAINST": "#c62828", "neutral": "#666"}
+    colr = {"ALIGNED": "#3fb950", "AGAINST": "#f85149", "neutral": "#9aa0a6"}
 
     def table(head, rows):
-        return ('<div style="overflow-x:auto"><table style="border-collapse:collapse;width:100%;background:#fff">'
-                + "<tr>" + "".join(f'<th style="border:1px solid #ddd;padding:6px 8px;background:#222;color:#fff">{h}</th>' for h in head) + "</tr>"
-                + "".join("<tr>" + "".join(f'<td style="border:1px solid #ddd;padding:6px 8px;text-align:left">{c}</td>' for c in r) + "</tr>" for r in rows)
+        # no inline colours/borders: the /scanner page's own dark table style (same as Section A / B) applies
+        return ('<div style="overflow-x:auto"><table>'
+                + "<tr>" + "".join(f"<th>{h}</th>" for h in head) + "</tr>"
+                + "".join("<tr>" + "".join(f"<td>{c}</td>" for c in r) + "</tr>" for r in rows)
                 + "</table></div>")
 
     near_rows = [[f"<b>{r['symbol']}</b>", r["price"],
-                  f'<span style="color:{"#0a7d33" if r["zone"] == "SUPPORT" else "#c62828"}">{r["zone"]}</span>',
+                  f'<span style="color:{"#3fb950" if r["zone"] == "SUPPORT" else "#f85149"}">{r["zone"]}</span>',
                   f"{r['zone_lo']} - {r['zone_hi']}", f"{r['dist_pct']:+.2f}%", f"{r['oi_added_pct']}%", r["zone_date"]] for r in near]
     sig_rows = [[f"<b>{r['symbol']}</b>", r["section"], r["tf"], r["signal"], round(r["price"], 2),
                  f'<b style="color:{colr[r["verdict"]]}">{r["verdict"]}</b>', r["why"]] for r in sigs]
-    return (
+    sig_block = (
+        '<div style="margin-top:28px;font-family:Arial,sans-serif">'
+        f'<h2>Our signals vs OI zones ({len(sigs)}) &middot; <a href="/oizones_signals.csv" style="font-size:13px;font-weight:400">CSV</a></h2>'
+        + (table(["Symbol", "Sec", "TF", "Signal", "Price", "Verdict", "Why"], sig_rows) if sig_rows else "<p style=\"color:#9aa0a6\">No ALIGNED or AGAINST signals on F&amp;O stocks in the last scan.</p>")
+        + "</div>")
+    zone_block = (
         '<div style="margin-top:28px;font-family:Arial,sans-serif">'
         f'<h2>OI support / resistance zones (futures OI buildup)</h2>'
-        f'<div style="color:#555;font-size:13px;margin:6px 0 12px">Zones built {m.get("zones_built", "-")} &middot; '
+        f'<div style="color:#9aa0a6;font-size:13px;margin:6px 0 12px">Zones built {m.get("zones_built", "-")} &middot; '
         f'{m.get("stocks_with_zones", 0)} of {m.get("universe", "?")} F&amp;O stocks have zones &middot; errors {m.get("errors", "?")} &middot; '
         f'near = within {m.get("near_pct", 0.5):.1f}% &middot; run {m.get("run", "-")} &middot; <a href="/oizones.csv">CSV</a><br>'
         f'<i>{m.get("note", "")}</i></div>'
         f'<h3>Stocks at an OI zone now ({len(near)})</h3>'
-        + (table(["Symbol", "Price", "Zone", "Zone range", "Dist from edge", "OI added", "Zone day"], near_rows) if near_rows else "<p>None right now.</p>")
-        + f'<h3>Our signals vs OI zones ({len(sigs)})</h3>'
-        + (table(["Symbol", "Sec", "TF", "Signal", "Price", "Verdict", "Why"], sig_rows) if sig_rows else "<p>No signals on F&amp;O stocks in the last scan.</p>")
+        + (table(["Symbol", "Price", "Zone", "Zone range", "Dist from edge", "OI added", "Zone day"], near_rows) if near_rows else "<p style=\"color:#9aa0a6\">None right now.</p>")
         + "</div>")
+    # page order wanted by Khagen: 2 = signals vs OI zones, 3 = OI zones
+    return sig_block + zone_block
 
 
 # ---------------------------------------------------------------- loop

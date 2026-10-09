@@ -23,6 +23,9 @@ ENV (all optional)
   SPURT10_AUTORUN=true      SPURT10_TOP_N=30        SPURT10_MIN_PRICE=50      SPURT10_SMA_LEN=50
   SPURT10_SHORTLIST=150     SPURT10_MIN_SMA_VOL=1000  (ignore stocks whose 50-candle average is below this many shares)
   SPURT10_WORKERS=4
+  SPURT10_ALERT_MULT=3.0    phone alert (ntfy) when a stock's latest 10-min candle volume is >= this many times the 50-candle average
+  SPURT10_NTFY=true         switch the phone alert on/off (uses the same NTFY_TOPIC as the other scanner alerts)
+  SPURT10_NTFY_MAX_PER_DAY=40   safety cap on phone notifications per day
 """
 
 import os
@@ -50,6 +53,9 @@ SMA_LEN = int(os.environ.get("SPURT10_SMA_LEN", "50") or "50")
 SHORTLIST = int(os.environ.get("SPURT10_SHORTLIST", "150") or "150")
 MIN_SMA_VOL = float(os.environ.get("SPURT10_MIN_SMA_VOL", "1000") or "1000")
 WORKERS = int(os.environ.get("SPURT10_WORKERS", "4") or "4")
+ALERT_MULT = float(os.environ.get("SPURT10_ALERT_MULT", "3.0") or "3.0")
+NTFY_ON = os.environ.get("SPURT10_NTFY", "true").strip().lower() == "true"
+NTFY_MAX_PER_DAY = int(os.environ.get("SPURT10_NTFY_MAX_PER_DAY", "40") or "40")
 HISTORY_DAYS = 8            # calendar days of 5-min candles: 50 ten-minute candles need ~3 sessions
 
 RESULTS_DIR = os.path.join(os.path.dirname(__file__), "results")
@@ -201,11 +207,54 @@ def _score_symbol(sym, sid):
         "day_chg_pct": round((close / prev_close - 1) * 100, 2) if prev_close == prev_close else None,
         "candle": _ist(df.index[-1]).strftime("%H:%M"),
         "candle_chg_pct": round((close / float(last["open"]) - 1) * 100, 2) if last["open"] else None,
+        "candle_type": ("GREEN" if close > float(last["open"]) else "RED" if close < float(last["open"]) else "DOJI") if last["open"] else "",
         "candle_vol": int(vol[-1]),
         "sma_vol": int(round(base)),
         "multiple": round(float(vol[-1] / base), 2),
         "day_vol": int(vol[today_mask].sum()),
     }
+
+
+# ---------------------------------------------------------------- phone alert
+_alerted = {"date": None, "keys": set(), "count": 0}
+
+
+def _send_alerts(rows, now_ist):
+    """ADDED 2026-10-09: one phone notification per cycle listing every stock whose latest closed 10-min candle volume is
+    >= ALERT_MULT x its 50-candle average. A stock is announced once per candle (never twice for the same candle), and at most
+    NTFY_MAX_PER_DAY notifications a day. Read-only - it only sends a notification."""
+    topic = os.environ.get("NTFY_TOPIC", "").strip()
+    if not (NTFY_ON and topic):
+        return
+    today = now_ist.strftime("%Y-%m-%d")
+    if _alerted["date"] != today:
+        _alerted.update(date=today, keys=set(), count=0)
+    if _alerted["count"] >= NTFY_MAX_PER_DAY:
+        return
+    hits = [r for r in rows if r["multiple"] >= ALERT_MULT and (r["symbol"], r["candle"]) not in _alerted["keys"]]
+    if not hits:
+        return
+    hits.sort(key=lambda r: -r["multiple"])
+    lines = []
+    for r in hits[:12]:
+        chg = r.get("candle_chg_pct")
+        lines.append(f"{r['symbol']}  {r['multiple']:.1f}x  Rs {r['price']:.2f}" + (f"  candle {chg:+.2f}%" if chg is not None else ""))
+    extra = f"\n+{len(hits) - 12} more on the scanner page" if len(hits) > 12 else ""
+    try:
+        import requests
+        resp = requests.post(f"https://ntfy.sh/{topic}", data=("\n".join(lines) + extra).encode("utf-8"), timeout=8,
+                             headers={"Title": f"Volume spurt >= {ALERT_MULT:g}x ({hits[0]['candle']} candle)", "Priority": "high",
+                                      "Tags": "chart_with_upwards_trend"})
+        if resp.status_code >= 300:
+            log.warning(f"Spurt10 ntfy refused: {resp.status_code} {resp.text[:150]}")
+            return
+    except Exception as e:
+        log.warning(f"Spurt10 ntfy failed: {e}")
+        return
+    for r in hits:
+        _alerted["keys"].add((r["symbol"], r["candle"]))
+    _alerted["count"] += 1
+    log.info(f"Spurt10 alert sent for {len(hits)} stock(s) at >= {ALERT_MULT:g}x")
 
 
 # ---------------------------------------------------------------- run + output
@@ -230,10 +279,14 @@ def run_once():
                     log.warning(f"Spurt10 candle fetch failed: {e}")
     rows.sort(key=lambda r: -r["multiple"])
     top = rows[:TOP_N]
+    try:
+        _send_alerts(rows, now_ist)
+    except Exception as e:
+        log.warning(f"Spurt10 alert step failed: {e}")
     meta = {
         "run": now_ist.strftime("%Y-%m-%d %H:%M:%S IST"), "took_s": round(time.monotonic() - t0),
         "universe": len(uni), "quoted": len(quotes), "price_ok": n_pass, "shortlisted": len(names),
-        "scored": len(rows), "failed": failed, "etf_excluded": len(_excluded), "min_price": MIN_PRICE, "sma_len": SMA_LEN,
+        "scored": len(rows), "failed": failed, "etf_excluded": len(_excluded), "min_price": MIN_PRICE, "sma_len": SMA_LEN, "alert_mult": ALERT_MULT,
     }
     _write(top, meta)
     log.info(f"Spurt10 done: {meta}")
@@ -259,12 +312,23 @@ def _html(top, meta):
     def pct(v):
         return "-" if v is None else f'<span style="color:{col(v)}">{v:+.2f}%</span>'
 
+    def ctype(r):
+        t = r.get("candle_type")
+        if not t:
+            c = r.get("candle_chg_pct")
+            t = "" if c is None else "GREEN" if c > 0 else "RED" if c < 0 else "DOJI"
+        colr = {"GREEN": "#0a7d33", "RED": "#c62828"}.get(t, "#555")
+        return f'<b style="color:{colr}">{t or "-"}</b>'
+
+    def hl(r):
+        return ' style="background:#fff3b0"' if r["multiple"] >= meta.get("alert_mult", 3.0) else ""
+
     body = "".join(
-        f"<tr><td>{i}</td><td><b>{r['symbol']}</b></td><td>{r['price']:.2f}</td><td>{pct(r['day_chg_pct'])}</td>"
-        f"<td>{r['candle']}</td><td>{pct(r['candle_chg_pct'])}</td><td>{r['candle_vol']:,}</td>"
+        f"<tr{hl(r)}><td>{i}</td><td><b>{r['symbol']}</b></td><td>{r['price']:.2f}</td><td>{pct(r['day_chg_pct'])}</td>"
+        f"<td>{r['candle']}</td><td>{pct(r['candle_chg_pct'])}</td><td>{ctype(r)}</td><td>{r['candle_vol']:,}</td>"
         f"<td>{r['sma_vol']:,}</td><td><b>{r['multiple']:.2f}x</b></td><td>{r['day_vol']:,}</td></tr>"
         for i, r in enumerate(top, 1)
-    ) or '<tr><td colspan="10">No stocks qualified in this cycle.</td></tr>'
+    ) or '<tr><td colspan="11">No stocks qualified in this cycle.</td></tr>'
     return f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="refresh" content="60"><title>Volume Spurt 10-min</title>
 <style>body{{font-family:Arial,sans-serif;margin:12px;background:#fafafa}}table{{border-collapse:collapse;width:100%;background:#fff}}
@@ -272,9 +336,9 @@ th,td{{border:1px solid #ddd;padding:6px 8px;text-align:right;font-size:14px}}th
 .m{{color:#555;font-size:13px;margin:6px 0 12px}}.w{{overflow-x:auto}}</style></head><body>
 <h2>Volume Spurt &mdash; latest 10-min candle vs {meta['sma_len']}-candle volume average (top {len(top)})</h2>
 <div class="m">Run: {meta['run']} (took {meta['took_s']}s) &middot; {meta['universe']} NSE stocks (ETFs left out: {meta.get('etf_excluded', 0)}), {meta['price_ok']} priced &ge; {meta['min_price']:.0f},
-{meta['shortlisted']} shortlisted, {meta['scored']} scored, {meta['failed']} errors &middot; refreshes every 10 min &middot;
+{meta['shortlisted']} shortlisted, {meta['scored']} scored, {meta['failed']} errors &middot; refreshes every 10 min &middot; yellow rows = {meta.get('alert_mult', 3.0):g}x or more (phone alert) &middot;
 <a href="/spurt10.csv">CSV</a> &middot; <a href="/scanner">Scanner</a></div>
-<div class="w"><table><tr><th>#</th><th>Symbol</th><th>Price</th><th>Day %</th><th>Candle</th><th>Candle %</th>
+<div class="w"><table><tr><th>#</th><th>Symbol</th><th>Price</th><th>Day %</th><th>Candle</th><th>Candle %</th><th>Candle type</th>
 <th>Candle volume</th><th>{meta['sma_len']}-candle avg vol</th><th>Multiple</th><th>Day volume</th></tr>{body}</table></div>
 </body></html>"""
 
@@ -287,7 +351,8 @@ def section_html():
         full = _html(d["rows"], d["meta"])
         a = full.index("<h2>")
         b = full.index("</body>")
-        return '<div style="margin-top:28px">' + full[a:b] + "</div>"
+        blk = full[a:b].replace("#fff3b0", "rgba(210,153,34,0.22)").replace("#0a7d33", "#3fb950").replace("#c62828", "#f85149").replace("#555", "#9aa0a6")
+        return '<div style="margin-top:28px">' + blk + "</div>"
     except Exception:
         return ""
 

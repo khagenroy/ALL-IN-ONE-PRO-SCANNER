@@ -461,11 +461,13 @@ def _scanner_page():
     no_scan = not isinstance(page, str)
     if no_scan:          # no scan saved yet (e.g. right after a redeploy / outside market hours): still show the extra tables
         page = ('<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
-                '<meta http-equiv="refresh" content="60"><title>Scanner</title></head><body style="font-family:Arial,sans-serif;margin:12px">'
+                '<meta http-equiv="refresh" content="60"><title>Scanner</title><style>body{background:#0e1117;color:#e6e6e6;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:0;padding:24px}table{border-collapse:collapse;width:100%;font-size:13px;margin-bottom:32px}th,td{padding:8px 10px;text-align:left;border-bottom:1px solid #262b36}th{background:#161b22;color:#9aa0a6;font-weight:600}tr:hover{background:#161b22}a{color:#58a6ff}</style></head><body>'
                 '<h2>Scanner</h2><p>No intraday scan has run yet today - Section A / B / RSI Flush tables fill in at the next market-hours scan.</p>'
                 '</body></html>')
     extra = ""
-    for flag, mod in ((SPURT10_AUTORUN, "spurt10_live"), (ORB_AUTORUN, "orb_live"), (OIZONES_AUTORUN, "oi_zones_live")):
+    # Page order (Khagen 2026-10-09): 1 opening range, 2 signals vs OI zones, 3 OI zones, then 4 Section A, 5 RSI Flush, 6 Section B.
+    # Volume spurt has its own page (/spurt10) and is no longer repeated here.
+    for flag, mod in ((ORB_AUTORUN, "orb_live"), (OIZONES_AUTORUN, "oi_zones_live")):
         if not flag:
             continue
         try:
@@ -474,7 +476,10 @@ def _scanner_page():
         except Exception as e:
             log.exception(f"{mod} section on /scanner failed: {e}")
     if extra:
-        page = page.replace("</body>", extra + "</body>", 1) if "</body>" in page else page + extra
+        if "<h1>" in page:            # put the extra tables above Section A (first heading of the scanner page)
+            page = page.replace("<h1>", extra + "<h1>", 1)
+        else:
+            page = page.replace("</body>", extra + "</body>", 1) if "</body>" in page else page + extra
     return page if (not no_scan or extra) else (page, 200)
 
 
@@ -506,6 +511,16 @@ def spurt10_csv():
 @app.route("/oizones.csv", methods=["GET"])
 def oizones_csv():
     return _serve_csv("oizones.csv", "oi_zones_near.csv")
+
+
+@app.route("/oizones_signals.csv", methods=["GET"])
+def oizones_signals_csv():
+    return _serve_csv("oizones_signals.csv", "signals_vs_oi_zones.csv")
+
+
+@app.route("/orb.csv", methods=["GET"])
+def orb_csv():
+    return _serve_csv("orb.csv", "signals_vs_opening_range.csv")
 
 
 @app.route("/swing", methods=["GET"])

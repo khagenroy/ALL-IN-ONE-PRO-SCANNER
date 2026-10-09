@@ -41,6 +41,7 @@ REFRESH_SECONDS = int(os.environ.get("ORB_REFRESH_SECONDS", "300") or "300")
 
 RESULTS_DIR = os.path.join(os.path.dirname(__file__), "results")
 LIVE_PATH = os.path.join(RESULTS_DIR, "orb_live.json")
+ORB_CSV = os.path.join(RESULTS_DIR, "orb.csv")
 
 _or_cache = {"date": None, "rng": {}, "tries": {}}      # {symbol: (high, low) or None if unavailable}
 _ids = {}
@@ -137,13 +138,19 @@ def refresh():
         p = px.get(s["symbol"])
         rows.append({**s, "or_high": round(hi, 2), "or_low": round(lo, 2), "now": _pos(p, hi, lo) if p else "",
                      "now_px": round(p, 2) if p else None, "verdict": verdict})
-    order = {"ALIGNED": 0, "AGAINST": 1, "INSIDE": 2}
+    # 2026-10-09 (Khagen): show only ALIGNED / AGAINST - INSIDE (neutral), "range forming" and "no range data" are not required
+    rows = [x for x in rows if x["verdict"] in ("ALIGNED", "AGAINST")]
+    order = {"ALIGNED": 0, "AGAINST": 1}
     rows.sort(key=lambda x: (order.get(x["verdict"], 3), x["symbol"]))
     os.makedirs(RESULTS_DIR, exist_ok=True)
     with open(LIVE_PATH + ".tmp", "w") as f:
         json.dump({"meta": {"run": now.strftime("%Y-%m-%d %H:%M:%S IST"), "minutes": ORB_MINUTES, "errors": errors,
                             "symbols": len(syms)}, "rows": rows}, f)
     os.replace(LIVE_PATH + ".tmp", LIVE_PATH)
+    try:
+        pd.DataFrame(rows).to_csv(ORB_CSV, index=False)
+    except Exception as e:
+        log.warning(f"ORB: csv write failed: {e}")
     log.info(f"ORB refreshed: {len(rows)} signals, {len(syms)} stocks, {errors} errors")
 
 
@@ -154,24 +161,24 @@ def section_html():
     except Exception:
         return ""
     m, rows = d["meta"], d["rows"]
-    colr = {"ALIGNED": "#0a7d33", "AGAINST": "#c62828"}
+    colr = {"ALIGNED": "#3fb950", "AGAINST": "#f85149"}
     head = ["Symbol", "Sec", "TF", "Signal", "Signal price", "Range high", "Range low", "Verdict", "Now"]
     body = "".join(
-        "<tr>" + "".join(f'<td style="border:1px solid #ddd;padding:6px 8px;text-align:left">{c}</td>' for c in [
+        "<tr>" + "".join(f"<td>{c}</td>" for c in [
             f"<b>{r['symbol']}</b>", r["section"], r["tf"], r["signal"], round(r["price"], 2),
             r["or_high"] if r["or_high"] is not None else "-", r["or_low"] if r["or_low"] is not None else "-",
-            f'<b style="color:{colr.get(r["verdict"], "#666")}">{r["verdict"]}</b>',
+            f'<b style="color:{colr.get(r["verdict"], "#9aa0a6")}">{r["verdict"]}</b>',
             (f"{r['now']} ({r['now_px']})" if r.get("now") else "-")]) + "</tr>"
         for r in rows)
     if not body:
-        body = f'<tr><td colspan="{len(head)}" style="padding:8px">No signals in the last scan.</td></tr>'
+        body = f'<tr><td colspan="{len(head)}" style="color:#9aa0a6">No ALIGNED or AGAINST signals in the last scan.</td></tr>'
     return (
         '<div style="margin-top:28px;font-family:Arial,sans-serif">'
         f'<h2>Our signals vs opening range ({m["minutes"]}-min, 09:15 start)</h2>'
-        f'<div style="color:#555;font-size:13px;margin:6px 0 12px">{len(rows)} signals &middot; run {m["run"]} &middot; '
-        f'errors {m["errors"]} &middot; ALIGNED = buy above the range high / sell below the range low</div>'
-        '<div style="overflow-x:auto"><table style="border-collapse:collapse;width:100%;background:#fff"><tr>'
-        + "".join(f'<th style="border:1px solid #ddd;padding:6px 8px;background:#222;color:#fff">{h}</th>' for h in head)
+        f'<div style="color:#9aa0a6;font-size:13px;margin:6px 0 12px">{len(rows)} signals &middot; run {m["run"]} &middot; '
+        f'errors {m["errors"]} &middot; <a href="/orb.csv">CSV</a> &middot; ALIGNED = buy above the range high / sell below the range low</div>'
+        '<div style="overflow-x:auto"><table><tr>'
+        + "".join(f"<th>{h}</th>" for h in head)
         + "</tr>" + body + "</table></div></div>")
 
 
