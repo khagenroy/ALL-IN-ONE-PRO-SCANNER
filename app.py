@@ -385,6 +385,21 @@ if ORB_AUTORUN:
 if SPURT10_AUTORUN:
     threading.Thread(target=_spurt10_loop, daemon=True, name="spurt10-autorun").start()
 
+MCX_AUTORUN = os.environ.get("MCX_AUTORUN", "true").strip().lower() == "true"
+
+
+def _mcx_loop():
+    """MCX commodity volume spurt + OI zones (read-only)."""
+    try:
+        import mcx_live
+        mcx_live.loop()
+    except Exception as e:
+        log.error(f"MCX loop could not start: {e}")
+
+
+if MCX_AUTORUN:
+    threading.Thread(target=_mcx_loop, daemon=True, name="mcx-autorun").start()
+
 SPZ_AUTORUN = os.environ.get("SPZ_AUTORUN", "true").strip().lower() == "true"
 
 
@@ -516,6 +531,32 @@ def scanner_rsi_flush_csv():
 @app.route("/spurt10", methods=["GET"])
 def spurt10_page():
     return _serve_html("spurt10.html")
+
+
+@app.route("/commodity", methods=["GET"])
+def commodity_page():
+    import mcx_live
+    return mcx_live.page_html()
+
+
+@app.route("/mcx_signals.csv", methods=["GET"])
+def mcx_signals_csv():
+    return _serve_csv("mcx_signals.csv", "commodity_signals_vs_oi_zones.csv")
+
+
+@app.route("/mcx_signals_all.csv", methods=["GET"])
+def mcx_signals_all_csv():
+    return _serve_csv("mcx_signals_all.csv", "commodity_signals_all.csv")
+
+
+@app.route("/mcx_spurt.csv", methods=["GET"])
+def mcx_spurt_csv():
+    return _serve_csv("mcx_spurt.csv", "mcx_volume_spurt_15min.csv")
+
+
+@app.route("/mcx_oizones.csv", methods=["GET"])
+def mcx_oizones_csv():
+    return _serve_csv("mcx_oizones.csv", "mcx_oi_zones.csv")
 
 
 @app.route("/spz", methods=["GET"])
