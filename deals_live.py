@@ -358,7 +358,7 @@ def page_html(message=None, ok=True):
            '<div class="m"><a href="/scanner">Stock scanner</a> &middot; <a href="/commodity">Commodity</a> &middot; <a href="/crypto">Crypto</a></div>']
     keyf = '<input type="password" name="key" placeholder="key"> ' if KEY else ""
     out.append('<div class="box"><b>Upload today\'s NSE large-deals file(s)</b> (BULK and/or BLOCK .csv, or this page\'s own history .csv to restore it)'
-               '<form method="post" enctype="multipart/form-data" style="margin-top:10px">'
+               '<form method="post" action="/deals" enctype="multipart/form-data" style="margin-top:10px">'
                '<input type="file" name="files" accept=".csv" multiple> ' + keyf + '<button type="submit">Upload and analyse</button></form>'
                + (f'<div style="margin-top:10px;color:{G if ok else R}">{message}</div>' if message else "") + "</div>")
     if a.empty:
@@ -677,7 +677,7 @@ def backtest_html():
         except Exception:
             pass
     run = bool(prog.get("running")) and (_bt_lock["running"] or time.time() - float(prog.get("updated", 0)) < 300)
-    out = ['<h2>5. Backtest on your deal history</h2>',
+    out = ['<h2 id="bt">5. Backtest on your deal history</h2>',
            "<div class='m'>Takes every one-sided deal in the history, buys at the <b>next session's open</b> (the deal is public only after the close) and measures the move "
            "in the deal's direction, net of a cost allowance. 'Rule' = the strategy: enter only if that open is on the right side of the deal price, stop at the deal price, exit at session 5. "
            "'vs own average' = the move minus that stock's own average move over the same months, so general market drift is removed.</div>"]

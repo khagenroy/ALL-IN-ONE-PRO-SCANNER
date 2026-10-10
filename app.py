@@ -23,7 +23,7 @@ import threading
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from flask import Flask, send_file, request
+from flask import Flask, send_file, request, redirect
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -613,7 +613,9 @@ def deals_page():
         if request.method == "POST":
             ok, msg = deals_live.handle_upload(request.files.getlist("files"), request.form.get("key", ""))
             return deals_live.page_html(msg, ok)
-        return deals_live.page_html()
+        import html as _h
+        msg = request.args.get("msg", "")[:300]
+        return deals_live.page_html(_h.escape(msg) if msg else None, request.args.get("ok", "1") == "1")
     except Exception as e:
         import traceback
         log.error(f"Deals page failed: {traceback.format_exc()}")
@@ -625,8 +627,9 @@ def deals_page():
 def deals_backtest_start():
     try:
         import deals_live
+        from urllib.parse import quote
         ok, msg = deals_live.start_backtest()
-        return deals_live.page_html(msg, ok)
+        return redirect(f"/deals?ok={1 if ok else 0}&msg={quote(msg)}#bt", code=303)
     except Exception as e:
         import traceback
         log.error(f"Deals backtest start failed: {traceback.format_exc()}")
