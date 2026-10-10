@@ -23,7 +23,7 @@ import threading
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from flask import Flask, send_file
+from flask import Flask, send_file, request
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -576,8 +576,14 @@ def mcx_oizones_csv():
 
 @app.route("/crypto", methods=["GET"])
 def crypto_page():
-    import crypto_live
-    return crypto_live.page_html()
+    try:
+        import crypto_live
+        return crypto_live.page_html()
+    except Exception as e:
+        import traceback
+        log.error(f"Crypto route failed: {traceback.format_exc()}")
+        return ("<h2>Crypto page error</h2><p>Please send a screenshot of this page.</p><pre>"
+                + traceback.format_exc()[-1800:].replace("<", "&lt;") + "</pre>")
 
 
 @app.route("/crypto_signals.csv", methods=["GET"])
@@ -598,6 +604,48 @@ def crypto_spurt_csv():
 @app.route("/crypto_oizones.csv", methods=["GET"])
 def crypto_oizones_csv():
     return _serve_csv("crypto_oizones.csv", "crypto_oi_zones.csv")
+
+
+@app.route("/deals", methods=["GET", "POST"])
+def deals_page():
+    try:
+        import deals_live
+        if request.method == "POST":
+            ok, msg = deals_live.handle_upload(request.files.getlist("files"), request.form.get("key", ""))
+            return deals_live.page_html(msg, ok)
+        return deals_live.page_html()
+    except Exception as e:
+        import traceback
+        log.error(f"Deals page failed: {traceback.format_exc()}")
+        return ("<h2>Deals page error</h2><p>Please send a screenshot of this page.</p><pre>"
+                + traceback.format_exc()[-1800:].replace("<", "&lt;") + "</pre>")
+
+
+@app.route("/deals_backtest", methods=["POST"])
+def deals_backtest_start():
+    try:
+        import deals_live
+        ok, msg = deals_live.start_backtest()
+        return deals_live.page_html(msg, ok)
+    except Exception as e:
+        import traceback
+        log.error(f"Deals backtest start failed: {traceback.format_exc()}")
+        return "<h2>Deals backtest error</h2><pre>" + traceback.format_exc()[-1800:].replace("<", "&lt;") + "</pre>"
+
+
+@app.route("/deals_backtest_events.csv", methods=["GET"])
+def deals_backtest_events_csv():
+    return _serve_csv("deals_backtest_events.csv", "deals_backtest_events.csv")
+
+
+@app.route("/deals_onesided.csv", methods=["GET"])
+def deals_onesided_csv():
+    return _serve_csv("deals_onesided.csv", "one_sided_deals_with_outcomes.csv")
+
+
+@app.route("/deals_history.csv", methods=["GET"])
+def deals_history_csv():
+    return _serve_csv("deals_history.csv", "deals_history.csv")
 
 
 @app.route("/spz", methods=["GET"])
