@@ -400,6 +400,21 @@ def _mcx_loop():
 if MCX_AUTORUN:
     threading.Thread(target=_mcx_loop, daemon=True, name="mcx-autorun").start()
 
+CRYPTO_AUTORUN = os.environ.get("CRYPTO_AUTORUN", "true").strip().lower() == "true"
+
+
+def _crypto_loop():
+    """Crypto (Delta) volume spurt + OI zones + signals (read-only, 24x7)."""
+    try:
+        import crypto_live
+        crypto_live.loop()
+    except Exception as e:
+        log.error(f"Crypto loop could not start: {e}")
+
+
+if CRYPTO_AUTORUN:
+    threading.Thread(target=_crypto_loop, daemon=True, name="crypto-autorun").start()
+
 SPZ_AUTORUN = os.environ.get("SPZ_AUTORUN", "true").strip().lower() == "true"
 
 
@@ -557,6 +572,32 @@ def mcx_spurt_csv():
 @app.route("/mcx_oizones.csv", methods=["GET"])
 def mcx_oizones_csv():
     return _serve_csv("mcx_oizones.csv", "mcx_oi_zones.csv")
+
+
+@app.route("/crypto", methods=["GET"])
+def crypto_page():
+    import crypto_live
+    return crypto_live.page_html()
+
+
+@app.route("/crypto_signals.csv", methods=["GET"])
+def crypto_signals_csv():
+    return _serve_csv("crypto_signals.csv", "crypto_signals_vs_oi_zones.csv")
+
+
+@app.route("/crypto_signals_all.csv", methods=["GET"])
+def crypto_signals_all_csv():
+    return _serve_csv("crypto_signals_all.csv", "crypto_signals_all.csv")
+
+
+@app.route("/crypto_spurt.csv", methods=["GET"])
+def crypto_spurt_csv():
+    return _serve_csv("crypto_spurt.csv", "crypto_volume_spurt_30min.csv")
+
+
+@app.route("/crypto_oizones.csv", methods=["GET"])
+def crypto_oizones_csv():
+    return _serve_csv("crypto_oizones.csv", "crypto_oi_zones.csv")
 
 
 @app.route("/spz", methods=["GET"])
