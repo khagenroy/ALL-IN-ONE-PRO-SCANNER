@@ -33,6 +33,7 @@ ENV (optional)   DEALS_MIN_CR=2.0   DEALS_DIRECTIONAL_PCT=25   DEALS_KEY=<passwo
 
 import os
 import io
+import time
 import json
 import html
 import logging
@@ -181,6 +182,14 @@ def analyse(h):
 _daily_cache = {}
 
 
+def _ist_day_index(idx):
+    """Dhan daily stamps are IST midnight written as UTC: either 18:30 of the PREVIOUS day (true epoch) or 00:00. Both -> the IST calendar day."""
+    idx = pd.DatetimeIndex(pd.to_datetime(idx))
+    shift = (idx.hour == 18) & (idx.minute == 30)
+    idx = idx + pd.to_timedelta(np.where(shift, 330, 0), unit="m")
+    return idx.normalize()
+
+
 def _fetch_daily_df(sym, cached=True):
     """Daily candles for an NSE stock from Dhan. cached=True uses the scanner's own once-a-day disk cache; False fetches directly (backtest)."""
     import scrip_master as sm
@@ -190,7 +199,8 @@ def _fetch_daily_df(sym, cached=True):
         return None
     df = ls.fetch_daily_history_cached(sym, str(sid), seg) if cached else ls.fetch_daily_history(str(sid), seg)
     df = df.copy()
-    df.index = pd.to_datetime(df.index).normalize()
+    df.index = _ist_day_index(df.index)
+    df = df[~df.index.duplicated(keep="last")].sort_index()
     return df
 
 
@@ -292,7 +302,8 @@ def handle_upload(files, key=""):
             new = parse_file(raw, f.filename)
             added, total = add_to_history(new)
             added_total += added
-            days = ", ".join(sorted(set(new["date"])))
+            ds = sorted(set(new["date"]))
+            days = ds[0] if len(ds) == 1 else f"{ds[0]} to {ds[-1]}, {len(ds)} days"
             msgs.append(f"{html.escape(f.filename)}: {len(new)} rows read ({days}), {added} new")
         except ValueError as e:
             msgs.append(html.escape(str(e)))
@@ -545,23 +556,31 @@ def build_events(hist, fetch):
     if one.empty:
         return pd.DataFrame(), {"events": 0, "with_prices": 0, "symbols": 0, "no_data_symbols": 0, "from": "", "to": ""}
     d0, d1 = one["date"].min(), one["date"].max()
-    base_cache, rows, nodata = {}, [], set()
+    base_cache, rows, nodata, bad = {}, [], set(), set()
     for r in one.to_dict("records"):
         sym = r["symbol"]
-        df = fetch(sym)
-        if df is None or df.empty:
-            nodata.add(sym)
+        if sym in bad:
             continue
-        sim = simulate_event(df, r["date"], r["verdict"], r["deal_price"], r["dir_net_qty"])
-        if sim is None:
-            continue
-        if sym not in base_cache:
-            base_cache[sym] = _baseline(df, d0, d1)
-        rows.append({**{k: r[k] for k in ("date", "symbol", "verdict", "directional_net_cr", "deal_price", "kind", "who")}, **sim,
-                     "base3": base_cache[sym][3], "sgn": 1 if r["verdict"] == "ONE-SIDED BUY" else -1, "net_cr_abs": abs(r["directional_net_cr"])})
+        try:
+            df = fetch(sym)
+            if df is None or df.empty:
+                nodata.add(sym)
+                continue
+            if not df.index.is_unique:
+                df = df[~df.index.duplicated(keep="last")].sort_index()
+            sim = simulate_event(df, r["date"], r["verdict"], r["deal_price"], r["dir_net_qty"])
+            if sim is None:
+                continue
+            if sym not in base_cache:
+                base_cache[sym] = _baseline(df, d0, d1)
+            rows.append({**{k: r[k] for k in ("date", "symbol", "verdict", "directional_net_cr", "deal_price", "kind", "who")}, **sim,
+                         "base3": base_cache[sym][3], "sgn": 1 if r["verdict"] == "ONE-SIDED BUY" else -1, "net_cr_abs": abs(r["directional_net_cr"])})
+        except Exception as e:
+            log.info(f"Deals backtest: skipped {sym}: {str(e)[:80]}")
+            bad.add(sym)
     ev = pd.DataFrame(rows)
     cov = {"events": int(len(one)), "with_prices": int(len(ev)), "symbols": int(one["symbol"].nunique()), "no_data_symbols": int(len(nodata)),
-           "from": d0, "to": d1}
+           "skipped_symbols": int(len(bad)), "from": d0, "to": d1}
     return ev, cov
 
 
@@ -573,6 +592,7 @@ def _bt_progress(**kw):
             with open(BT_PROG) as f:
                 cur = json.load(f)
         cur.update(kw)
+        cur["updated"] = time.time()
         with open(BT_PROG + ".tmp", "w") as f:
             json.dump(cur, f)
         os.replace(BT_PROG + ".tmp", BT_PROG)
@@ -598,7 +618,7 @@ def run_backtest(fetch_raw=None):
                 store[sym] = df[(df.index >= d0) & (df.index <= d1)].copy()      # keep only the window: small in memory
         except Exception as e:
             log.info(f"Deals backtest: {sym}: {str(e)[:80]}")
-        if n % 10 == 0 or n == len(syms):
+        if n % 5 == 0 or n == len(syms):
             _bt_progress(done=n)
     ev, cov = build_events(hist, lambda s: store.get(s))
     os.makedirs(RESULTS_DIR, exist_ok=True)
@@ -619,7 +639,12 @@ def start_backtest(force=False):
     now = datetime.now(IST)
     if not force and now.weekday() < 5 and 9 * 60 + 5 <= now.hour * 60 + now.minute <= 15 * 60 + 40:
         return False, "Not during NSE hours (09:05-15:40 IST, Mon-Fri): it would slow the live scanner. Start it in the evening or at the weekend."
-    if _bt_lock["running"]:
+    try:
+        with open(BT_PROG) as f:
+            pg = json.load(f)
+    except Exception:
+        pg = {}
+    if _bt_lock["running"] or (pg.get("running") and time.time() - float(pg.get("updated", 0)) < 300):
         return False, "The backtest is already running."
     if load_history().empty:
         return False, "No deal history yet - upload files first."
@@ -651,7 +676,7 @@ def backtest_html():
                 res = v
         except Exception:
             pass
-    run = bool(prog.get("running")) and _bt_lock["running"]
+    run = bool(prog.get("running")) and (_bt_lock["running"] or time.time() - float(prog.get("updated", 0)) < 300)
     out = ['<h2>5. Backtest on your deal history</h2>',
            "<div class='m'>Takes every one-sided deal in the history, buys at the <b>next session's open</b> (the deal is public only after the close) and measures the move "
            "in the deal's direction, net of a cost allowance. 'Rule' = the strategy: enter only if that open is on the right side of the deal price, stop at the deal price, exit at session 5. "
@@ -667,7 +692,7 @@ def backtest_html():
         return "".join(out)
     cv = res["coverage"]
     out.append(f'<div class="m">Built {res["built"]} &middot; {cv["events"]:,} one-sided deals ({cv["from"]} to {cv["to"]}) in {cv["symbols"]} stocks &middot; '
-               f'prices found for {cv["with_prices"]:,} of them ({cv["no_data_symbols"]} stocks had no Dhan prices: renamed or delisted) &middot; cost allowance {res["cost_pct"]}% per trade '
+               f'prices found for {cv["with_prices"]:,} of them ({cv["no_data_symbols"]} stocks had no Dhan prices: renamed or delisted{", " + str(cv["skipped_symbols"]) + " skipped on errors" if cv.get("skipped_symbols") else ""}) &middot; cost allowance {res["cost_pct"]}% per trade '
                f'&middot; <a href="/deals_backtest_events.csv">events CSV</a></div>')
     col = lambda v, suf="%": "-" if v is None else f'<span style="color:{G if v > 0 else R if v < 0 else M}">{v:+.2f}{suf}</span>'
     rows = []
