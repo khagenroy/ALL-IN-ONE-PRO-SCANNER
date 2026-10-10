@@ -20,6 +20,8 @@ right after a contract rollover (new nearest-expiry contract) the 4H / 1H signal
 ENV (all optional)
   MCX_AUTORUN=true   MCX_SYMBOLS=CRUDEOILM,NATURALGASM,GOLDM,SILVERM   MCX_TFS=15m,1H,4H   MCX_SPURT_TF=15m
   MCX_ALERT_MULT=3.0   MCX_NTFY=true   MCX_NTFY_MAX_PER_DAY=40   MCX_SMA_LEN=50   MCX_ZONE_DAYS=120
+  MCX_NEAR_ATR_MULT=0.25  MCX_NEAR_MIN=0.15  MCX_NEAR_MAX=1.5  MCX_AGAINST_RATIO=2.0   zone buffer scaled to each commodity's daily range
+  MCX_NEAR_PCT_<SYMBOL>=0.3   force one commodity's at-zone buffer (percent), e.g. MCX_NEAR_PCT_GOLDM
   MCX_SESSION_END=23:55   (MCX evening session end, IST; 23:30 from the first Monday after US clocks go back - 2 Nov 2026)
 """
 
@@ -47,6 +49,14 @@ NTFY_MAX_PER_DAY = int(os.environ.get("MCX_NTFY_MAX_PER_DAY", "40") or "40")
 ZONE_DAYS = int(os.environ.get("MCX_ZONE_DAYS", "120") or "120")
 BAR_GRACE_S = 5
 KEEP_HOURS = 24
+# Zone buffer per commodity, scaled to its own volatility (14-day average daily range as % of price):
+#   "at the zone" distance = NEAR_ATR_MULT x daily range %, kept between NEAR_MIN and NEAR_MAX (in %); AGAINST distance = AGAINST_RATIO x that.
+# 0.25 x a typical stock's 2% daily range = the 0.5% the stock page uses. A fixed value can be forced per commodity: MCX_NEAR_PCT_GOLDM=0.3
+NEAR_ATR_MULT = float(os.environ.get("MCX_NEAR_ATR_MULT", "0.25") or "0.25")
+NEAR_MIN = float(os.environ.get("MCX_NEAR_MIN", "0.15") or "0.15")
+NEAR_MAX = float(os.environ.get("MCX_NEAR_MAX", "1.5") or "1.5")
+AGAINST_RATIO = float(os.environ.get("MCX_AGAINST_RATIO", "2.0") or "2.0")
+DEFAULT_NEAR, DEFAULT_AGAINST = 0.5, 1.0             # percent, used only if a commodity has no volatility figure yet
 
 
 def _hhmm_min(v, default):
@@ -98,6 +108,54 @@ def _resolve_ids():
 
 def _ist(ts):
     return pd.Timestamp(ts) + pd.Timedelta(minutes=330)
+
+
+def _buffers(sym, zd):
+    """(near, against) as fractions for this commodity: a manual MCX_NEAR_PCT_<SYMBOL> if set, else scaled to its daily range."""
+    manual = os.environ.get(f"MCX_NEAR_PCT_{sym}", "").strip()
+    v = ((zd or {}).get("vol") or {}).get(sym) or {}
+    try:
+        near_pct = float(manual) if manual else float(v.get("near_pct", DEFAULT_NEAR))
+    except ValueError:
+        near_pct = float(v.get("near_pct", DEFAULT_NEAR))
+    ag_pct = near_pct * AGAINST_RATIO if (manual or v) else DEFAULT_AGAINST
+    return near_pct / 100.0, ag_pct / 100.0
+
+
+def _is_near(price, z, near):
+    return z["lo"] * (1 - near) <= price <= z["hi"] * (1 + near)
+
+
+def _judge(side, price, zs, near, against):
+    """Same rule as oi_zones_live.judge, with this commodity's own buffers."""
+    sup = [z for z in zs if z["type"] == "SUPPORT"]
+    res = [z for z in zs if z["type"] == "RESISTANCE"]
+    if side == "BUY":
+        for z in sup:
+            if _is_near(price, z, near):
+                return "ALIGNED", f"at OI support {z['lo']}-{z['hi']}"
+        for z in res:
+            if z["lo"] * (1 - near) <= price <= z["hi"] or 0 <= (z["lo"] - price) / price <= against:
+                return "AGAINST", f"OI resistance {z['lo']}-{z['hi']} just above"
+    else:
+        for z in res:
+            if _is_near(price, z, near):
+                return "ALIGNED", f"at OI resistance {z['lo']}-{z['hi']}"
+        for z in sup:
+            if z["lo"] <= price <= z["hi"] * (1 + near) or 0 <= (price - z["hi"]) / price <= against:
+                return "AGAINST", f"OI support {z['lo']}-{z['hi']} just below"
+    return "neutral", ""
+
+
+def _range_pct(d):
+    """14-day average true range of the completed daily futures candles, as % of the last close."""
+    h, l, c = d["high"].to_numpy(float), d["low"].to_numpy(float), d["close"].to_numpy(float)
+    if len(c) < 16:
+        return None
+    pc = c[:-1]
+    tr = np.maximum(h[1:] - l[1:], np.maximum(abs(h[1:] - pc), abs(l[1:] - pc)))
+    atr = float(tr[-14:].mean())
+    return atr / float(c[-1]) * 100.0 if c[-1] > 0 else None
 
 
 def _chunk(sid, interval, d_from, d_to):
@@ -292,7 +350,7 @@ def _fetch_daily_oi(sid):
 def build_zones():
     import oi_zones_live as oz
     _resolve_ids()
-    zones, errors, notes = {}, 0, []
+    zones, errors, notes, vol = {}, 0, [], {}
     for s in SYMBOLS:
         sid = _ids.get(s)
         if not sid:
@@ -305,6 +363,10 @@ def build_zones():
                 errors += 1
                 notes.append(f"{s}: no OI rows")
                 continue
+            rp = _range_pct(d)
+            if rp:
+                np_ = min(max(NEAR_ATR_MULT * rp, NEAR_MIN), NEAR_MAX)
+                vol[s] = {"atr_pct": round(rp, 2), "near_pct": round(np_, 2), "against_pct": round(np_ * AGAINST_RATIO, 2)}
             z = oz.zones_from_df(d)
             if z:
                 zones[s] = z
@@ -313,7 +375,7 @@ def build_zones():
         except Exception as e:
             errors += 1
             notes.append(f"{s}: {str(e)[:80]}")
-    obj = {"built": datetime.now(IST).isoformat(), "stocks": zones, "errors": errors, "universe": len(SYMBOLS), "note": " | ".join(notes)}
+    obj = {"built": datetime.now(IST).isoformat(), "stocks": zones, "vol": vol, "errors": errors, "universe": len(SYMBOLS), "note": " | ".join(notes)}
     os.makedirs(RESULTS_DIR, exist_ok=True)
     with open(ZONES_JSON + ".tmp", "w") as f:
         json.dump(obj, f)
@@ -347,7 +409,6 @@ def _zones_due(now):
 
 # ======================================================================================= one cycle
 def run_once():
-    import oi_zones_live as oz
     now = datetime.now(IST)
     if _zones_due(now):
         try:
@@ -385,8 +446,9 @@ def run_once():
         if px is None:
             continue
         best = None
+        nr, _ag = _buffers(s, zd)
         for z in zs:
-            if oz._near(px, z):
+            if _is_near(px, z, nr):
                 dist = (px - z["hi"]) / px * 100 if z["type"] == "SUPPORT" else (px - z["lo"]) / px * 100
                 if best is None or abs(dist) < abs(best[1]):
                     best = (z, dist)
@@ -400,7 +462,8 @@ def run_once():
         if r["section"] == "RSI" and r.get("status") not in ("PENDING", "ACTIVE"):
             r["verdict"], r["why"] = "closed", ""
             continue
-        v, why = oz.judge(r["side"], float(r["price"]), zones.get(r["symbol"], [])) if r.get("price") is not None and r["side"] else ("neutral", "")
+        nr, ag = _buffers(r["symbol"], zd)
+        v, why = _judge(r["side"], float(r["price"]), zones.get(r["symbol"], []), nr, ag) if r.get("price") is not None and r["side"] else ("neutral", "")
         r["verdict"], r["why"] = v, why
     all_sigs.sort(key=lambda r: r["bar"], reverse=True)
 
@@ -492,7 +555,12 @@ def page_html():
     out.append(f'<h2>3. OI support / resistance zones (MCX futures OI buildup)</h2>'
                f'<div class="m">Zones built {m["zones_built"] or "-"} &middot; {m["zones_count"]} of {m["zones_universe"]} commodities have zones &middot; <a href="/mcx_oizones.csv">CSV</a>'
                + (f'<br><i>{m["zones_note"]}</i>' if m.get("zones_note") else "") + "</div>"
-               f"<h3>Commodities at an OI zone now ({len(near)})</h3>"
+               f"<h3>Zone buffer per commodity</h3>"
+               + tbl(["Symbol", "Daily range (14-day avg)", "At-zone buffer", "AGAINST distance", "Source"],
+                     [[f"<b>{s_}</b>", (f"{(zd.get('vol') or {}).get(s_, {}).get('atr_pct', '-')}%"), f"{_buffers(s_, zd)[0] * 100:.2f}%", f"{_buffers(s_, zd)[1] * 100:.2f}%",
+                       "manual (MCX_NEAR_PCT_" + s_ + ")" if os.environ.get(f"MCX_NEAR_PCT_{s_}", "").strip() else ("volatility" if (zd.get("vol") or {}).get(s_) else "default")]
+                      for s_ in m["symbols"]], "")
+               + f"<h3>Commodities at an OI zone now ({len(near)})</h3>"
                + tbl(["Symbol", "Price", "Zone", "Zone range", "Dist from edge", "OI added", "Zone day"], near, "None right now.")
                + f"<h3>All zones ({len(allz)})</h3>" + tbl(["Symbol", "Zone", "Zone range", "OI added", "Zone day"], allz, "No zones built yet."))
 
