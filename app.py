@@ -385,6 +385,21 @@ if ORB_AUTORUN:
 if SPURT10_AUTORUN:
     threading.Thread(target=_spurt10_loop, daemon=True, name="spurt10-autorun").start()
 
+SPZ_AUTORUN = os.environ.get("SPZ_AUTORUN", "true").strip().lower() == "true"
+
+
+def _spz_loop():
+    """Spurt-at-OI-zone reversal tracker (PAPER trades + phone alerts only; never sends an order)."""
+    try:
+        import spz_live
+        spz_live.loop()
+    except Exception as e:
+        log.error(f"SPZ loop could not start: {e}")
+
+
+if SPZ_AUTORUN:
+    threading.Thread(target=_spz_loop, daemon=True, name="spz-autorun").start()
+
 if AUTORUN:
     threading.Thread(target=_intraday_loop, daemon=True, name="intraday-autorun").start()
 if SWING_AUTORUN:
@@ -501,6 +516,22 @@ def scanner_rsi_flush_csv():
 @app.route("/spurt10", methods=["GET"])
 def spurt10_page():
     return _serve_html("spurt10.html")
+
+
+@app.route("/spz", methods=["GET"])
+def spz_page():
+    import spz_live
+    return spz_live.page_html()
+
+
+@app.route("/spz.csv", methods=["GET"])
+def spz_csv():
+    return _serve_csv("spz.csv", "spurt_at_zone_today.csv")
+
+
+@app.route("/spz_history.csv", methods=["GET"])
+def spz_history_csv():
+    return _serve_csv("spz_history.csv", "spurt_at_zone_history.csv")
 
 
 @app.route("/spurt10.csv", methods=["GET"])
