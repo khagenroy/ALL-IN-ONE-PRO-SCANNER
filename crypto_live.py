@@ -325,7 +325,7 @@ def _signals_for(sym, frames):
             log.warning(f"Crypto Section B failed for {sym} {tf}: {e}")
         try:
             import rsi_flush_live
-            for r in rsi_flush_live.live_setups(df, tf, sym):
+            for r in rsi_flush_live.live_setups(df, tf, sym, hours=KEEP_HOURS):
                 rows.append({"symbol": sym, "section": "RSI", "tf": tf, "signal": f"RSI_FLUSH_{r['side']}", "side": r["side"],
                              "price": r["entry"], "sl": r["sl"], "t1": r.get("T1"), "t2": r.get("T2"),
                              "bar": _ist(r["signal_ts"]).strftime("%Y-%m-%d %H:%M"), "status": r["status"],
@@ -353,6 +353,8 @@ def _update_log(new_rows, now):
             logd[r["key"]] = {**r, "seen": stamp}
     cut = (now - timedelta(hours=KEEP_HOURS)).isoformat()
     logd = {k: v for k, v in logd.items() if v.get("seen", stamp) >= cut}
+    cut_bar = (now.astimezone(IST) - timedelta(hours=KEEP_HOURS)).strftime("%Y-%m-%d %H:%M")
+    logd = {k: v for k, v in logd.items() if v.get("section") != "RSI" or str(v.get("bar", "9")) >= cut_bar}
     os.makedirs(RESULTS_DIR, exist_ok=True)
     with open(SIGLOG_JSON + ".tmp", "w") as f:
         json.dump(logd, f)
@@ -567,7 +569,7 @@ def _load():
         return None
 
 
-def page_html():
+def _page_html_inner():
     d = _load()
     head = ('<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
             '<meta http-equiv="refresh" content="60"><title>Crypto scanner</title>'
@@ -655,6 +657,20 @@ def page_html():
     out.append(f'<div class="m" style="margin-top:20px"><a href="/crypto_signals_all.csv">CSV of all signals</a> &middot; Signals are computed by the same functions as the stock scanner on 30m / 1H / 4H perpetual candles. Day = UTC day.</div>')
     out.append("</body></html>")
     return "".join(out)
+
+
+def page_html():
+    """The page, never an HTTP 500: if building it fails, the error and where it happened are shown on the page and logged."""
+    try:
+        return _page_html_inner()
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        log.error(f"Crypto page failed: {tb}")
+        import html as _h
+        return ('<!doctype html><html><body style="background:#0e1117;color:#e6e6e6;font-family:Arial;padding:24px">'
+                '<h2>Crypto scanner - the page could not be drawn</h2><p>Please send a screenshot of this page.</p>'
+                f'<pre style="white-space:pre-wrap;color:#f85149">{_h.escape(tb[-1800:])}</pre></body></html>')
 
 
 # ======================================================================================= loop

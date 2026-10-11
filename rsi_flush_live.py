@@ -102,8 +102,10 @@ def _step_trade(tr: dict, hi: float, lo: float):
             tr["state"] = "T6 DONE"
 
 
-def live_setups(df: pd.DataFrame, tf: str, sym: str) -> list:
-    """Rows for TODAY's session (the session of the last closed bar). Never raises on short data - returns []."""
+def live_setups(df: pd.DataFrame, tf: str, sym: str, hours=None) -> list:
+    """Rows for TODAY's session (the session of the last closed bar). Never raises on short data - returns [].
+    hours=None (stocks, default): unchanged. hours=N (24x7 crypto): no session reset at IST midnight; rows for every trade
+    whose signal/confirm candle is within the last N hours."""
     if df is None or df.empty:
         return []
     n = len(df)
@@ -122,6 +124,10 @@ def live_setups(df: pd.DataFrame, tf: str, sym: str) -> list:
     days = np.array([_ist_date(t) for t in idx[-(WINDOW + 1):]])       # per-bar IST date for the replay window
     first = max(1, n - WINDOW)
     today = days[-1]
+    cutoff = (pd.Timestamp(idx[-1]) - pd.Timedelta(hours=hours)) if hours is not None else None
+
+    def in_window(i):
+        return (pd.Timestamp(idx[i]) >= cutoff) if cutoff is not None else (_ist_date(idx[i]) == today)
 
     last_buy = last_sell = -999
     pend = {"BUY": None, "SELL": None}      # {bar, level, sl}
@@ -131,7 +137,7 @@ def live_setups(df: pd.DataFrame, tf: str, sym: str) -> list:
     for i in range(first, n):
         d_i = days[i - (n - len(days))]
         d_prev = days[i - 1 - (n - len(days))]
-        new_day = d_i != d_prev
+        new_day = (d_i != d_prev) and hours is None
         if new_day:
             pend["BUY"] = pend["SELL"] = None
             for tr in trades:                           # intraday positions are squared off at the new day
@@ -188,7 +194,7 @@ def live_setups(df: pd.DataFrame, tf: str, sym: str) -> list:
 
     # trades confirmed TODAY
     for tr in trades:
-        if _ist_date(idx[tr["conf_i"]]) != today:
+        if not in_window(tr["conf_i"]):
             continue
         t = tr["t"]
         state = tr["state"]
@@ -209,7 +215,7 @@ def live_setups(df: pd.DataFrame, tf: str, sym: str) -> list:
 
     # still waiting for the break on the last closed candle
     for side, p in pend.items():
-        if p is None or _ist_date(idx[p["bar"]]) != today:
+        if p is None or not in_window(p["bar"]):
             continue
         sl, risk, t = _levels(side, p["level"], p["sl"])
         left = CONFIRM_EXPIRY - (n - 1 - p["bar"])
