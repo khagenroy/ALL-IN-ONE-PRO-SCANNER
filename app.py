@@ -672,6 +672,11 @@ def spurt10_csv():
     return _serve_csv("spurt10.csv", "volume_spurt_10min_top30.csv")
 
 
+@app.route("/spurt10_history.csv", methods=["GET"])
+def spurt10_history_csv():
+    return _serve_csv("spurt10_history.csv", "volume_spurt_10min_history.csv")
+
+
 @app.route("/oizones.csv", methods=["GET"])
 def oizones_csv():
     return _serve_csv("oizones.csv", "oi_zones_near.csv")

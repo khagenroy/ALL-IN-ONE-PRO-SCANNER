@@ -61,6 +61,9 @@ HISTORY_DAYS = 8            # calendar days of 5-min candles: 50 ten-minute cand
 RESULTS_DIR = os.path.join(os.path.dirname(__file__), "results")
 JSON_PATH = os.path.join(RESULTS_DIR, "spurt10.json")
 CSV_PATH = os.path.join(RESULTS_DIR, "spurt10.csv")
+HIST_PATH = os.path.join(RESULTS_DIR, "spurt10_history.csv")
+HISTORY_ON = os.environ.get("SPURT10_HISTORY", "true").strip().lower() == "true"       # ADDED: full-day log of every cycle
+HISTORY_MIN_MULT = float(os.environ.get("SPURT10_HISTORY_MIN_MULT", "0") or "0")      # 0 = keep every row passed in (the top 30)
 HTML_PATH = os.path.join(RESULTS_DIR, "spurt10.html")
 
 _universe = None            # list of (symbol, security_id)
@@ -207,7 +210,6 @@ def _score_symbol(sym, sid):
         "day_chg_pct": round((close / prev_close - 1) * 100, 2) if prev_close == prev_close else None,
         "candle": _ist(df.index[-1]).strftime("%H:%M"),
         "candle_chg_pct": round((close / float(last["open"]) - 1) * 100, 2) if last["open"] else None,
-        "candle_type": ("GREEN" if close > float(last["open"]) else "RED" if close < float(last["open"]) else "DOJI") if last["open"] else "",
         "candle_vol": int(vol[-1]),
         "sma_vol": int(round(base)),
         "multiple": round(float(vol[-1] / base), 2),
@@ -289,8 +291,44 @@ def run_once():
         "scored": len(rows), "failed": failed, "etf_excluded": len(_excluded), "min_price": MIN_PRICE, "sma_len": SMA_LEN, "alert_mult": ALERT_MULT,
     }
     _write(top, meta)
+    _append_history(top, now_ist)      # top 30 of the cycle only
     log.info(f"Spurt10 done: {meta}")
     return top, meta
+
+
+_hist_seen = {"date": None, "keys": set()}
+HIST_COLS = ["date", "run", "candle", "symbol", "price", "day_chg_pct", "candle_chg_pct", "candle_vol", "sma_vol", "multiple", "day_vol"]
+
+
+def _append_history(rows, now_ist):
+    """ADDED: append the top-30 stocks of this cycle to results/spurt10_history.csv, one row per
+    (date, 10-min candle, symbol). Read-only logging: never raises, never touches the scan itself."""
+    if not HISTORY_ON or not rows:
+        return
+    try:
+        today = now_ist.strftime("%Y-%m-%d")
+        if _hist_seen["date"] != today:
+            _hist_seen.update(date=today, keys=set())
+            if os.path.exists(HIST_PATH):                      # restart in the middle of the day: do not write the same candle twice
+                old = pd.read_csv(HIST_PATH, usecols=["date", "candle", "symbol"], dtype=str)
+                for d, c, sy in old[old["date"] == today].itertuples(index=False):
+                    _hist_seen["keys"].add((c, sy))
+        run = now_ist.strftime("%H:%M:%S")
+        out = []
+        for r in rows:
+            k = (r["candle"], r["symbol"])
+            if k in _hist_seen["keys"] or r["multiple"] < HISTORY_MIN_MULT:
+                continue
+            _hist_seen["keys"].add(k)
+            out.append({"date": today, "run": run, **{c: r.get(c) for c in HIST_COLS[2:]}})
+        if not out:
+            return
+        os.makedirs(RESULTS_DIR, exist_ok=True)
+        new_file = not os.path.exists(HIST_PATH)
+        pd.DataFrame(out, columns=HIST_COLS).sort_values(["candle", "multiple"], ascending=[True, False]).to_csv(
+            HIST_PATH, mode="a", header=new_file, index=False)
+    except Exception as e:
+        log.warning(f"Spurt10 history write failed: {e}")
 
 
 def _write(top, meta):
@@ -312,23 +350,15 @@ def _html(top, meta):
     def pct(v):
         return "-" if v is None else f'<span style="color:{col(v)}">{v:+.2f}%</span>'
 
-    def ctype(r):
-        t = r.get("candle_type")
-        if not t:
-            c = r.get("candle_chg_pct")
-            t = "" if c is None else "GREEN" if c > 0 else "RED" if c < 0 else "DOJI"
-        colr = {"GREEN": "#0a7d33", "RED": "#c62828"}.get(t, "#555")
-        return f'<b style="color:{colr}">{t or "-"}</b>'
-
     def hl(r):
         return ' style="background:#fff3b0"' if r["multiple"] >= meta.get("alert_mult", 3.0) else ""
 
     body = "".join(
         f"<tr{hl(r)}><td>{i}</td><td><b>{r['symbol']}</b></td><td>{r['price']:.2f}</td><td>{pct(r['day_chg_pct'])}</td>"
-        f"<td>{r['candle']}</td><td>{pct(r['candle_chg_pct'])}</td><td>{ctype(r)}</td><td>{r['candle_vol']:,}</td>"
+        f"<td>{r['candle']}</td><td>{pct(r['candle_chg_pct'])}</td><td>{r['candle_vol']:,}</td>"
         f"<td>{r['sma_vol']:,}</td><td><b>{r['multiple']:.2f}x</b></td><td>{r['day_vol']:,}</td></tr>"
         for i, r in enumerate(top, 1)
-    ) or '<tr><td colspan="11">No stocks qualified in this cycle.</td></tr>'
+    ) or '<tr><td colspan="10">No stocks qualified in this cycle.</td></tr>'
     return f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="refresh" content="60"><title>Volume Spurt 10-min</title>
 <style>body{{font-family:Arial,sans-serif;margin:12px;background:#fafafa}}table{{border-collapse:collapse;width:100%;background:#fff}}
@@ -337,8 +367,8 @@ th,td{{border:1px solid #ddd;padding:6px 8px;text-align:right;font-size:14px}}th
 <h2>Volume Spurt &mdash; latest 10-min candle vs {meta['sma_len']}-candle volume average (top {len(top)})</h2>
 <div class="m">Run: {meta['run']} (took {meta['took_s']}s) &middot; {meta['universe']} NSE stocks (ETFs left out: {meta.get('etf_excluded', 0)}), {meta['price_ok']} priced &ge; {meta['min_price']:.0f},
 {meta['shortlisted']} shortlisted, {meta['scored']} scored, {meta['failed']} errors &middot; refreshes every 10 min &middot; yellow rows = {meta.get('alert_mult', 3.0):g}x or more (phone alert) &middot;
-<a href="/spurt10.csv">CSV</a> &middot; <a href="/scanner">Scanner</a></div>
-<div class="w"><table><tr><th>#</th><th>Symbol</th><th>Price</th><th>Day %</th><th>Candle</th><th>Candle %</th><th>Candle type</th>
+<a href="/spurt10.csv">CSV</a> (this cycle) &middot; <a href="/spurt10_history.csv">full-day history CSV</a> &middot; <a href="/scanner">Scanner</a></div>
+<div class="w"><table><tr><th>#</th><th>Symbol</th><th>Price</th><th>Day %</th><th>Candle</th><th>Candle %</th>
 <th>Candle volume</th><th>{meta['sma_len']}-candle avg vol</th><th>Multiple</th><th>Day volume</th></tr>{body}</table></div>
 </body></html>"""
 
@@ -351,8 +381,7 @@ def section_html():
         full = _html(d["rows"], d["meta"])
         a = full.index("<h2>")
         b = full.index("</body>")
-        blk = full[a:b].replace("#fff3b0", "rgba(210,153,34,0.22)").replace("#0a7d33", "#3fb950").replace("#c62828", "#f85149").replace("#555", "#9aa0a6")
-        return '<div style="margin-top:28px">' + blk + "</div>"
+        return '<div style="margin-top:28px">' + full[a:b] + "</div>"
     except Exception:
         return ""
 
