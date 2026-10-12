@@ -672,6 +672,20 @@ def spurt10_csv():
     return _serve_csv("spurt10.csv", "volume_spurt_10min_top30.csv")
 
 
+@app.route("/spurt10_history", methods=["GET"])
+def spurt10_history_page():
+    try:
+        import spurt10_live
+        try:
+            mn = float(request.args.get("min", "0") or 0)
+        except ValueError:
+            mn = 0.0
+        return spurt10_live.history_html(request.args.get("date"), mn, (request.args.get("sym") or "").strip() or None)
+    except Exception as e:
+        log.exception("/spurt10_history failed")
+        return f"History page error: {e}", 200
+
+
 @app.route("/spurt10_history.csv", methods=["GET"])
 def spurt10_history_csv():
     return _serve_csv("spurt10_history.csv", "volume_spurt_10min_history.csv")

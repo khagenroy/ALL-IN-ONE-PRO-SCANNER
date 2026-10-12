@@ -367,10 +367,53 @@ th,td{{border:1px solid #ddd;padding:6px 8px;text-align:right;font-size:14px}}th
 <h2>Volume Spurt &mdash; latest 10-min candle vs {meta['sma_len']}-candle volume average (top {len(top)})</h2>
 <div class="m">Run: {meta['run']} (took {meta['took_s']}s) &middot; {meta['universe']} NSE stocks (ETFs left out: {meta.get('etf_excluded', 0)}), {meta['price_ok']} priced &ge; {meta['min_price']:.0f},
 {meta['shortlisted']} shortlisted, {meta['scored']} scored, {meta['failed']} errors &middot; refreshes every 10 min &middot; yellow rows = {meta.get('alert_mult', 3.0):g}x or more (phone alert) &middot;
-<a href="/spurt10.csv">CSV</a> (this cycle) &middot; <a href="/spurt10_history.csv">full-day history CSV</a> &middot; <a href="/scanner">Scanner</a></div>
+<a href="/spurt10.csv">CSV</a> (this cycle) &middot; <a href="/spurt10_history">full-day history page</a> &middot; <a href="/spurt10_history.csv">history CSV</a> &middot; <a href="/scanner">Scanner</a></div>
 <div class="w"><table><tr><th>#</th><th>Symbol</th><th>Price</th><th>Day %</th><th>Candle</th><th>Candle %</th>
 <th>Candle volume</th><th>{meta['sma_len']}-candle avg vol</th><th>Multiple</th><th>Day volume</th></tr>{body}</table></div>
 </body></html>"""
+
+
+def history_html(date=None, min_mult=0.0, sym=None):
+    """ADDED: /spurt10_history page - every logged top-30 cycle of one day (default: latest day), with a day picker,
+    a minimum-multiple filter and a per-stock summary. Reads results/spurt10_history.csv; never raises."""
+    import html as _h
+    try:
+        if not os.path.exists(HIST_PATH):
+            return "<p>No history yet. It starts filling at the first cycle after 09:25 IST on a trading day.</p>"
+        df = pd.read_csv(HIST_PATH)
+        if df.empty:
+            return "<p>No history yet.</p>"
+        dates = sorted(df["date"].unique(), reverse=True)
+        d = date if date in dates else dates[0]
+        x = df[df["date"] == d].copy()
+        x = x[x["multiple"] >= min_mult]
+        if sym:
+            x = x[x["symbol"].str.upper() == sym.upper()]
+        col = lambda v: "#0a7d33" if (v or 0) > 0 else "#c62828" if (v or 0) < 0 else "#555"
+        pct = lambda v: "-" if v != v or v is None else f'<span style="color:{col(v)}">{v:+.2f}%</span>'
+        summ = (x.groupby("symbol").agg(times=("candle", "count"), first=("candle", "min"), last=("candle", "max"),
+                                        best=("multiple", "max"), price=("price", "last"), day=("day_chg_pct", "last"))
+                .sort_values(["times", "best"], ascending=False))
+        srows = "".join(f"<tr><td><b>{_h.escape(str(i))}</b></td><td>{int(r.times)}</td><td>{r['first']}</td><td>{r['last']}</td>"
+                        f"<td>{r.best:.2f}x</td><td>{r.price:.2f}</td><td>{pct(r.day)}</td></tr>" for i, r in summ.iterrows())
+        x = x.sort_values(["candle", "multiple"], ascending=[False, False])
+        rows = "".join(f"<tr><td>{r.candle}</td><td><b>{_h.escape(str(r.symbol))}</b></td><td>{r.price:.2f}</td><td>{pct(r.day_chg_pct)}</td>"
+                       f"<td>{pct(r.candle_chg_pct)}</td><td>{int(r.candle_vol):,}</td><td>{int(r.sma_vol):,}</td><td><b>{r.multiple:.2f}x</b></td><td>{int(r.day_vol):,}</td></tr>"
+                       for r in x.itertuples())
+        opts = "".join(f'<option value="{_h.escape(v)}"{" selected" if v == d else ""}>{_h.escape(v)}</option>' for v in dates)
+        return f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Volume Spurt history</title>
+<style>body{{font-family:Arial,sans-serif;margin:12px;background:#fafafa}}table{{border-collapse:collapse;background:#fff;margin-bottom:24px}}
+th,td{{border:1px solid #ddd;padding:5px 8px;text-align:right;font-size:14px}}th{{background:#222;color:#fff}}td:nth-child(2){{text-align:left}}.m{{color:#555;font-size:13px;margin:6px 0 12px}}</style></head><body>
+<h2>Volume Spurt history &mdash; {_h.escape(d)}</h2>
+<form method="get" class="m">Day <select name="date">{opts}</select> &nbsp; min multiple <input name="min" value="{min_mult:g}" size="4"> &nbsp; stock <input name="sym" value="{_h.escape(sym or '')}" size="10"> <button>Show</button>
+ &middot; {len(x)} rows, {len(summ)} stocks &middot; <a href="/spurt10_history.csv">download CSV (all days)</a> &middot; <a href="/spurt10">live /spurt10</a></form>
+<h3>Stocks of the day (how many cycles each was in the top 30)</h3>
+<table><tr><th>Stock</th><th>Times in top 30</th><th>First</th><th>Last</th><th>Best multiple</th><th>Last price</th><th>Day %</th></tr>{srows}</table>
+<h3>Every cycle (newest first)</h3>
+<table><tr><th>Candle</th><th>Symbol</th><th>Price</th><th>Day %</th><th>Candle %</th><th>Candle vol</th><th>50-candle avg</th><th>Multiple</th><th>Day volume</th></tr>{rows}</table>
+</body></html>"""
+    except Exception as e:
+        return f"<p>History page error: {_h.escape(str(e))}</p>"
 
 
 def section_html():
