@@ -680,7 +680,7 @@ def spurt10_history_page():
             mn = float(request.args.get("min", "0") or 0)
         except ValueError:
             mn = 0.0
-        return spurt10_live.history_html(request.args.get("date"), mn, (request.args.get("sym") or "").strip() or None)
+        return spurt10_live.history_html(request.args.get("date"), mn, (request.args.get("sym") or "").strip() or None, request.args.get("only"))
     except Exception as e:
         log.exception("/spurt10_history failed")
         return f"History page error: {e}", 200

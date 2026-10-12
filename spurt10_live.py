@@ -205,6 +205,7 @@ def _score_symbol(sym, sid):
     prev_close = df["close"][~today_mask].iloc[-1] if (~today_mask).any() else np.nan
     close = float(last["close"])
     return {
+        "_zones": _secA_zones(df),
         "symbol": sym,
         "price": round(close, 2),
         "day_chg_pct": round((close / prev_close - 1) * 100, 2) if prev_close == prev_close else None,
@@ -281,6 +282,11 @@ def run_once():
                     log.warning(f"Spurt10 candle fetch failed: {e}")
     rows.sort(key=lambda r: -r["multiple"])
     top = rows[:TOP_N]
+    top_ids = {id(x) for x in top}
+    for r in rows:                                                  # ADDED: Section A support / resistance zones of each stock
+        zs = r.pop("_zones", None)
+        if id(r) in top_ids:
+            r.update(_zone_fields(zs, r["price"], r.get("candle_chg_pct")))
     try:
         _send_alerts(rows, now_ist)
     except Exception as e:
@@ -296,8 +302,66 @@ def run_once():
     return top, meta
 
 
+ZONE_NEAR_PCT = float(os.environ.get("SPURT10_ZONE_NEAR_PCT", "0.5") or "0.5")      # "at" a zone = inside it or within this % of it
+ZONE_AGAINST_PCT = 1.0                                                                # opposite zone this close ahead = AGAINST
+
+
+def _secA_zones(df):
+    """Live order-block zones from Section A on this stock's 10-min candles: the same zones the ALL IN ONE PRO indicator draws
+    (bullish OB = support, bearish OB = resistance). Runs on candles already downloaded - no extra Dhan call."""
+    try:
+        import all_in_one_scanner as sec_a
+        r = sec_a.compute_section_a(df, with_zones=True)
+        return (r or {}).get("zones") or []
+    except Exception:
+        return []
+
+
+def _zone_fields(zs, price, candle_chg):
+    """Nearest support below / resistance above the price and whether the spurt candle's direction agrees with it."""
+    out = {"support": "", "support_dist_pct": None, "resistance": "", "resistance_dist_pct": None, "zone_view": "no zone", "zone_src": "", "at_zone": ""}
+    try:
+        if not zs or not price:
+            return out
+        out["zone_src"] = "Section A 10m"
+        near, ag = ZONE_NEAR_PCT / 100.0, ZONE_AGAINST_PCT / 100.0
+        sup = [z for z in zs if z["type"] == "SUPPORT"]
+        res = [z for z in zs if z["type"] == "RESISTANCE"]
+        zsup = max(sup, key=lambda z: z["hi"]) if sup else None          # nearest support (highest one)
+        zres = min(res, key=lambda z: z["lo"]) if res else None          # nearest resistance (lowest one)
+        if zsup:
+            out["support"] = f"{zsup['lo']:g}-{zsup['hi']:g}"
+            out["support_dist_pct"] = round(max(price - zsup["hi"], 0) / price * 100, 2)
+        if zres:
+            out["resistance"] = f"{zres['lo']:g}-{zres['hi']:g}"
+            out["resistance_dist_pct"] = round(max(zres["lo"] - price, 0) / price * 100, 2)
+        at_s = zsup is not None and zsup["lo"] * (1 - near) <= price <= zsup["hi"] * (1 + near)
+        at_r = zres is not None and zres["lo"] * (1 - near) <= price <= zres["hi"] * (1 + near)
+        out["zone_view"] = "between zones" if (zsup or zres) else "no zone"
+        if at_s and at_r:                                                 # inside both (very narrow range): the nearer one
+            at_s, at_r = (out["support_dist_pct"] <= out["resistance_dist_pct"]), (out["support_dist_pct"] > out["resistance_dist_pct"])
+        out["at_zone"] = "SUPPORT" if at_s else "RESISTANCE" if at_r else ""
+        if candle_chg is not None and abs(candle_chg) >= 0.05:
+            up = candle_chg > 0
+            if (up and at_s) or (not up and at_r):
+                out["zone_view"] = "ALIGNED"                              # green at support / red at resistance
+            elif (up and zres and (at_r or 0 <= (zres["lo"] - price) / price <= ag)) or \
+                 (not up and zsup and (at_s or 0 <= (price - zsup["hi"]) / price <= ag)):
+                out["zone_view"] = "AGAINST"                              # green into resistance / red onto support
+            elif at_s:
+                out["zone_view"] = "at support"
+            elif at_r:
+                out["zone_view"] = "at resistance"
+        else:
+            out["zone_view"] = "at support" if at_s else "at resistance" if at_r else out["zone_view"]
+    except Exception:
+        pass
+    return out
+
+
 _hist_seen = {"date": None, "keys": set()}
-HIST_COLS = ["date", "run", "candle", "symbol", "price", "day_chg_pct", "candle_chg_pct", "candle_vol", "sma_vol", "multiple", "day_vol"]
+HIST_COLS = ["date", "run", "candle", "symbol", "price", "day_chg_pct", "candle_chg_pct", "candle_vol", "sma_vol", "multiple", "day_vol",
+             "support", "support_dist_pct", "resistance", "resistance_dist_pct", "zone_view", "zone_src", "at_zone"]
 
 
 def _append_history(rows, now_ist):
@@ -325,6 +389,12 @@ def _append_history(rows, now_ist):
             return
         os.makedirs(RESULTS_DIR, exist_ok=True)
         new_file = not os.path.exists(HIST_PATH)
+        if not new_file:                                   # file written by an older version (fewer columns): upgrade it in place
+            with open(HIST_PATH) as fh:
+                first = fh.readline().strip().split(",")
+            if first != HIST_COLS:
+                pd.read_csv(HIST_PATH).reindex(columns=HIST_COLS).to_csv(HIST_PATH + ".tmp", index=False)
+                os.replace(HIST_PATH + ".tmp", HIST_PATH)
         pd.DataFrame(out, columns=HIST_COLS).sort_values(["candle", "multiple"], ascending=[True, False]).to_csv(
             HIST_PATH, mode="a", header=new_file, index=False)
     except Exception as e:
@@ -343,6 +413,36 @@ def _write(top, meta):
     os.replace(HTML_PATH + ".tmp", HTML_PATH)
 
 
+ROW_BG = {"SUPPORT": "#d4f1dc", "RESISTANCE": "#fadad6"}          # row colour: price is AT a support zone (green) / resistance zone (red)
+LEGEND = ('<span style="background:#d4f1dc;padding:2px 8px;border:1px solid #9ccfae">green row = price AT a support zone</span> '
+          '<span style="background:#fadad6;padding:2px 8px;border:1px solid #e0a39c">red row = price AT a resistance zone</span> '
+          '<span style="background:#ffe066;padding:2px 8px;border:1px solid #d9b800">yellow multiple = phone-alert strength</span>')
+
+
+def _rowstyle(at):
+    return f' style="background:{ROW_BG[at]}"' if at in ROW_BG else ""
+
+
+def _zc(r, k):
+    z = r.get(k) or ""
+    d = r.get(k + "_dist_pct")
+    if not z:
+        return "-"
+    return f"{z}<br><small>{'inside/at' if (d or 0) == 0 else f'{d:.2f}% away'}</small>"
+
+
+def _zh(z, d):
+    if not isinstance(z, str) or not z:
+        return "-"
+    return f"{z}<br><small>{'inside/at' if (d or 0) == 0 else f'{d:.2f}% away'}</small>"
+
+
+def _zv(v, src=None):
+    c = {"ALIGNED": "#0a7d33", "AGAINST": "#c62828", "at support": "#0a7d33", "at resistance": "#c62828"}.get(v or "", "#777")
+    lab = f'<br><small>{src} zones</small>' if isinstance(src, str) and src else ""
+    return f'<span style="color:{c}"><b>{v or "-"}</b></span>{lab}'
+
+
 def _html(top, meta):
     def col(v):
         return "#0a7d33" if (v or 0) > 0 else "#c62828" if (v or 0) < 0 else "#555"
@@ -351,14 +451,18 @@ def _html(top, meta):
         return "-" if v is None else f'<span style="color:{col(v)}">{v:+.2f}%</span>'
 
     def hl(r):
-        return ' style="background:#fff3b0"' if r["multiple"] >= meta.get("alert_mult", 3.0) else ""
+        return _rowstyle(r.get("at_zone"))
+
+    def mc(r):
+        return ' style="background:#ffe066"' if r["multiple"] >= meta.get("alert_mult", 3.0) else ""
 
     body = "".join(
         f"<tr{hl(r)}><td>{i}</td><td><b>{r['symbol']}</b></td><td>{r['price']:.2f}</td><td>{pct(r['day_chg_pct'])}</td>"
         f"<td>{r['candle']}</td><td>{pct(r['candle_chg_pct'])}</td><td>{r['candle_vol']:,}</td>"
-        f"<td>{r['sma_vol']:,}</td><td><b>{r['multiple']:.2f}x</b></td><td>{r['day_vol']:,}</td></tr>"
+        f"<td>{r['sma_vol']:,}</td><td{mc(r)}><b>{r['multiple']:.2f}x</b></td><td>{r['day_vol']:,}</td>"
+        f"<td>{_zc(r, 'support')}</td><td>{_zc(r, 'resistance')}</td><td>{_zv(r.get('zone_view'), r.get('zone_src'))}</td></tr>"
         for i, r in enumerate(top, 1)
-    ) or '<tr><td colspan="10">No stocks qualified in this cycle.</td></tr>'
+    ) or '<tr><td colspan="13">No stocks qualified in this cycle.</td></tr>'
     return f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="refresh" content="60"><title>Volume Spurt 10-min</title>
 <style>body{{font-family:Arial,sans-serif;margin:12px;background:#fafafa}}table{{border-collapse:collapse;width:100%;background:#fff}}
@@ -366,14 +470,14 @@ th,td{{border:1px solid #ddd;padding:6px 8px;text-align:right;font-size:14px}}th
 .m{{color:#555;font-size:13px;margin:6px 0 12px}}.w{{overflow-x:auto}}</style></head><body>
 <h2>Volume Spurt &mdash; latest 10-min candle vs {meta['sma_len']}-candle volume average (top {len(top)})</h2>
 <div class="m">Run: {meta['run']} (took {meta['took_s']}s) &middot; {meta['universe']} NSE stocks (ETFs left out: {meta.get('etf_excluded', 0)}), {meta['price_ok']} priced &ge; {meta['min_price']:.0f},
-{meta['shortlisted']} shortlisted, {meta['scored']} scored, {meta['failed']} errors &middot; refreshes every 10 min &middot; yellow rows = {meta.get('alert_mult', 3.0):g}x or more (phone alert) &middot;
+{meta['shortlisted']} shortlisted, {meta['scored']} scored, {meta['failed']} errors &middot; refreshes every 10 min &middot; {LEGEND} &middot; phone alert at {meta.get('alert_mult', 3.0):g}x or more &middot; zones = ALL IN ONE PRO order-block zones on the 10-min chart (same as the indicator on a 10-min chart) &middot;
 <a href="/spurt10.csv">CSV</a> (this cycle) &middot; <a href="/spurt10_history">full-day history page</a> &middot; <a href="/spurt10_history.csv">history CSV</a> &middot; <a href="/scanner">Scanner</a></div>
 <div class="w"><table><tr><th>#</th><th>Symbol</th><th>Price</th><th>Day %</th><th>Candle</th><th>Candle %</th>
-<th>Candle volume</th><th>{meta['sma_len']}-candle avg vol</th><th>Multiple</th><th>Day volume</th></tr>{body}</table></div>
+<th>Candle volume</th><th>{meta['sma_len']}-candle avg vol</th><th>Multiple</th><th>Day volume</th><th>Support zone (10m)</th><th>Resistance zone (10m)</th><th>Zone view</th></tr>{body}</table></div>
 </body></html>"""
 
 
-def history_html(date=None, min_mult=0.0, sym=None):
+def history_html(date=None, min_mult=0.0, sym=None, only=None):
     """ADDED: /spurt10_history page - every logged top-30 cycle of one day (default: latest day), with a day picker,
     a minimum-multiple filter and a per-stock summary. Reads results/spurt10_history.csv; never raises."""
     import html as _h
@@ -385,32 +489,40 @@ def history_html(date=None, min_mult=0.0, sym=None):
             return "<p>No history yet.</p>"
         dates = sorted(df["date"].unique(), reverse=True)
         d = date if date in dates else dates[0]
+        for c_ in ("support", "support_dist_pct", "resistance", "resistance_dist_pct", "zone_view", "zone_src", "at_zone"):
+            if c_ not in df.columns:                           # rows logged before zones were added
+                df[c_] = np.nan
         x = df[df["date"] == d].copy()
         x = x[x["multiple"] >= min_mult]
         if sym:
             x = x[x["symbol"].str.upper() == sym.upper()]
+        x["at_zone"] = x["at_zone"].fillna("")
+        if only == "zone":
+            x = x[x["at_zone"] != ""]
         col = lambda v: "#0a7d33" if (v or 0) > 0 else "#c62828" if (v or 0) < 0 else "#555"
         pct = lambda v: "-" if v != v or v is None else f'<span style="color:{col(v)}">{v:+.2f}%</span>'
-        summ = (x.groupby("symbol").agg(times=("candle", "count"), first=("candle", "min"), last=("candle", "max"),
+        summ = (x.groupby("symbol").agg(times=("candle", "count"), atz=("at_zone", lambda v: int((v != "").sum())), first=("candle", "min"), last=("candle", "max"),
                                         best=("multiple", "max"), price=("price", "last"), day=("day_chg_pct", "last"))
                 .sort_values(["times", "best"], ascending=False))
-        srows = "".join(f"<tr><td><b>{_h.escape(str(i))}</b></td><td>{int(r.times)}</td><td>{r['first']}</td><td>{r['last']}</td>"
+        srows = "".join(f"<tr><td><b>{_h.escape(str(i))}</b></td><td>{int(r.times)}</td><td>{int(r.atz)}</td><td>{r['first']}</td><td>{r['last']}</td>"
                         f"<td>{r.best:.2f}x</td><td>{r.price:.2f}</td><td>{pct(r.day)}</td></tr>" for i, r in summ.iterrows())
         x = x.sort_values(["candle", "multiple"], ascending=[False, False])
-        rows = "".join(f"<tr><td>{r.candle}</td><td><b>{_h.escape(str(r.symbol))}</b></td><td>{r.price:.2f}</td><td>{pct(r.day_chg_pct)}</td>"
-                       f"<td>{pct(r.candle_chg_pct)}</td><td>{int(r.candle_vol):,}</td><td>{int(r.sma_vol):,}</td><td><b>{r.multiple:.2f}x</b></td><td>{int(r.day_vol):,}</td></tr>"
+        rows = "".join(f"<tr{_rowstyle(r.at_zone)}><td>{r.candle}</td><td><b>{_h.escape(str(r.symbol))}</b></td><td>{r.price:.2f}</td><td>{pct(r.day_chg_pct)}</td>"
+                       f"<td>{pct(r.candle_chg_pct)}</td><td>{int(r.candle_vol):,}</td><td>{int(r.sma_vol):,}</td><td><b>{r.multiple:.2f}x</b></td><td>{int(r.day_vol):,}</td>"
+                       f"<td>{_zh(r.support, r.support_dist_pct)}</td><td>{_zh(r.resistance, r.resistance_dist_pct)}</td><td>{_zv(None if r.zone_view != r.zone_view else r.zone_view, None if r.zone_src != r.zone_src else r.zone_src)}</td></tr>"
                        for r in x.itertuples())
         opts = "".join(f'<option value="{_h.escape(v)}"{" selected" if v == d else ""}>{_h.escape(v)}</option>' for v in dates)
         return f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Volume Spurt history</title>
 <style>body{{font-family:Arial,sans-serif;margin:12px;background:#fafafa}}table{{border-collapse:collapse;background:#fff;margin-bottom:24px}}
 th,td{{border:1px solid #ddd;padding:5px 8px;text-align:right;font-size:14px}}th{{background:#222;color:#fff}}td:nth-child(2){{text-align:left}}.m{{color:#555;font-size:13px;margin:6px 0 12px}}</style></head><body>
 <h2>Volume Spurt history &mdash; {_h.escape(d)}</h2>
-<form method="get" class="m">Day <select name="date">{opts}</select> &nbsp; min multiple <input name="min" value="{min_mult:g}" size="4"> &nbsp; stock <input name="sym" value="{_h.escape(sym or '')}" size="10"> <button>Show</button>
+<form method="get" class="m">Day <select name="date">{opts}</select> &nbsp; min multiple <input name="min" value="{min_mult:g}" size="4"> &nbsp; stock <input name="sym" value="{_h.escape(sym or '')}" size="10"> <label><input type="checkbox" name="only" value="zone"{" checked" if only == "zone" else ""}> only rows at a zone</label> <button>Show</button>
  &middot; {len(x)} rows, {len(summ)} stocks &middot; <a href="/spurt10_history.csv">download CSV (all days)</a> &middot; <a href="/spurt10">live /spurt10</a></form>
+<div class="m">{LEGEND}</div>
 <h3>Stocks of the day (how many cycles each was in the top 30)</h3>
-<table><tr><th>Stock</th><th>Times in top 30</th><th>First</th><th>Last</th><th>Best multiple</th><th>Last price</th><th>Day %</th></tr>{srows}</table>
+<table><tr><th>Stock</th><th>Times in top 30</th><th>Times at a zone</th><th>First</th><th>Last</th><th>Best multiple</th><th>Last price</th><th>Day %</th></tr>{srows}</table>
 <h3>Every cycle (newest first)</h3>
-<table><tr><th>Candle</th><th>Symbol</th><th>Price</th><th>Day %</th><th>Candle %</th><th>Candle vol</th><th>50-candle avg</th><th>Multiple</th><th>Day volume</th></tr>{rows}</table>
+<table><tr><th>Candle</th><th>Symbol</th><th>Price</th><th>Day %</th><th>Candle %</th><th>Candle vol</th><th>50-candle avg</th><th>Multiple</th><th>Day volume</th><th>Support zone (10m)</th><th>Resistance zone (10m)</th><th>Zone view</th></tr>{rows}</table>
 </body></html>"""
     except Exception as e:
         return f"<p>History page error: {_h.escape(str(e))}</p>"
