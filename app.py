@@ -701,6 +701,21 @@ def spurt_sell_page():
         return f"Spurt SELL page error: {e}", 200
 
 
+@app.route("/spurt_paper", methods=["GET"])
+def spurt_paper_page():
+    try:
+        import spurt_paper
+        return spurt_paper.page_html()
+    except Exception as e:
+        log.exception("/spurt_paper failed")
+        return f"<p>Paper trading page error: {e}</p>", 500
+
+
+@app.route("/spurt_paper.csv", methods=["GET"])
+def spurt_paper_csv():
+    return _serve_csv("paper_trades.csv", "spurt_paper_trades.csv")
+
+
 @app.route("/spurt_sell.csv", methods=["GET"])
 def spurt_sell_csv():
     return _serve_csv("spurt_sell_history.csv", "spurt_sell_signals_history.csv")

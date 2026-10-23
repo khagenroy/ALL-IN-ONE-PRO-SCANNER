@@ -183,6 +183,11 @@ def process(hits, now_ist):
             HIST_PATH, mode="a", header=new_file, index=False)
         log.info(f"SpurtSell: {len(new)} new SELL signal(s): {[r['symbol'] for r in new]}")
         _alert(new, now_ist)
+        try:                                                            # ADDED: virtual (paper) trades for every new signal - spurt_paper.py
+            import spurt_paper
+            spurt_paper.open_trades(new, now_ist)
+        except Exception as e:
+            log.warning(f"Spurt paper open failed: {e}")
     except Exception as e:
         log.warning(f"SpurtSell process failed: {e}")
 
@@ -228,7 +233,7 @@ def page_html(date=None):
         opts = "".join(f'<option value="{_h.escape(v)}"{" selected" if v == d else ""}>{_h.escape(v)}</option>' for v in dates)
         return (head + f'<h2>Spurt SELL &mdash; {_h.escape(d)}</h2>'
                 f'<form method="get" class="m">Day <select name="date">{opts}</select> <button>Show</button> &middot; {len(x)} signals &middot; '
-                f'click any heading to sort &middot; <a href="/spurt_sell.csv">download CSV (all days)</a> &middot; <a href="/spurt10">live /spurt10</a></form>'
+                f'click any heading to sort &middot; <a href="/spurt_sell.csv">download CSV (all days)</a> &middot; <a href="/spurt_paper">paper trading results</a> &middot; <a href="/spurt10">live /spurt10</a></form>'
                 f'<div class="m">{rule}</div>'
                 '<table class="s"><tr><th>Signal candle</th><th>Symbol</th><th>SELL entry</th><th>Stop loss</th><th>Target 1</th><th>Target 2</th>'
                 '<th>Risk %</th><th>Spurt candle</th><th>Spurt multiple</th><th>Candles after spurt</th><th>Day %</th></tr>'

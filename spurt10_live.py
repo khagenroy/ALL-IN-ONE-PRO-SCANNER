@@ -219,6 +219,19 @@ def _score_symbol(sym, sid):
     }
 
 
+def _paper_fetch5(sym):
+    """ADDED: closed 5-minute candles of one stock for the paper-trading follow-up (2 days is plenty). Returns None on any problem."""
+    try:
+        sid = dict(_load_universe()).get(sym)
+        if not sid:
+            return None
+        as_of = pd.Timestamp(datetime.now(timezone.utc).replace(tzinfo=None))
+        df5 = ls.fetch_intraday_history(sid, "NSE_EQ", 5, 2)
+        return ls.drop_forming_bars(df5, 5, as_of)
+    except Exception:
+        return None
+
+
 def _sell_check(df, sym, day_chg):
     """ADDED: check the 'volume spurt then solid red candle = SELL' rule on candles already downloaded. Never raises."""
     try:
@@ -310,6 +323,11 @@ def run_once():
         spurt_sell_live.process(sell_hits, now_ist)
     except Exception as e:
         log.warning(f"Spurt SELL step failed: {e}")
+    try:                                                            # ADDED: move the open paper trades forward (spurt_paper.py)
+        import spurt_paper
+        spurt_paper.update(now_ist, _paper_fetch5)
+    except Exception as e:
+        log.warning(f"Spurt paper step failed: {e}")
     meta = {
         "run": now_ist.strftime("%Y-%m-%d %H:%M:%S IST"), "took_s": round(time.monotonic() - t0),
         "universe": len(uni), "quoted": len(quotes), "price_ok": n_pass, "shortlisted": len(names),
@@ -462,6 +480,20 @@ def _zv(v, src=None):
     return f'<span style="color:{c}"><b>{v or "-"}</b></span>{lab}'
 
 
+_SORT_JS = r"""<script>
+document.querySelectorAll('table.sp').forEach(function(t){Array.prototype.forEach.call(t.rows[0].cells,function(th){
+th.style.cursor='pointer';th.title='click to sort (high to low / low to high)';
+th.addEventListener('click',function(){var i=th.cellIndex,b=t.tBodies[0],rows=Array.prototype.slice.call(t.rows,1),
+asc=th.dataset.asc!=='1';th.dataset.asc=asc?'1':'0';
+Array.prototype.forEach.call(t.rows[0].cells,function(c){c.textContent=c.textContent.replace(/ [\u25B2\u25BC]$/,'');});
+th.textContent+=asc?' \u25B2':' \u25BC';
+function val(r){var x=r.cells[i].innerText.trim();var m=x.match(/^(\d\d):(\d\d)$/);if(m)return parseInt(m[1])*60+parseInt(m[2]);
+var n=parseFloat(x.replace(/[,%x+]/g,''));return isNaN(n)?x.toLowerCase():n;}
+rows.sort(function(a,c){var p=val(a),q=val(c);if(p<q)return asc?-1:1;if(p>q)return asc?1:-1;return 0;});
+rows.forEach(function(r){b.appendChild(r);});});});});
+</script>"""
+
+
 def _html(top, meta):
     def col(v):
         return "#0a7d33" if (v or 0) > 0 else "#c62828" if (v or 0) < 0 else "#555"
@@ -491,9 +523,9 @@ th,td{{border:1px solid #ddd;padding:6px 8px;text-align:right;font-size:14px}}th
 <div class="m">Run: {meta['run']} (took {meta['took_s']}s) &middot; {meta['universe']} NSE stocks (ETFs left out: {meta.get('etf_excluded', 0)}), {meta['price_ok']} priced &ge; {meta['min_price']:.0f},
 {meta['shortlisted']} shortlisted, {meta['scored']} scored, {meta['failed']} errors &middot; refreshes every 10 min &middot; {LEGEND} &middot; phone alert at {meta.get('alert_mult', 3.0):g}x or more &middot; zones = ALL IN ONE PRO order-block zones on the 10-min chart (same as the indicator on a 10-min chart) &middot;
 <a href="/spurt10.csv">CSV</a> (this cycle) &middot; <a href="/spurt10_history">full-day history page</a> &middot; <a href="/spurt10_history.csv">history CSV</a> &middot; <a href="/spurt_sell">Spurt SELL signals</a> &middot; <a href="/scanner">Scanner</a></div>
-<div class="w"><table><tr><th>#</th><th>Symbol</th><th>Price</th><th>Day %</th><th>Candle</th><th>Candle %</th>
+<div class="w"><table class="sp"><tr><th>#</th><th>Symbol</th><th>Price</th><th>Day %</th><th>Candle</th><th>Candle %</th>
 <th>Candle volume</th><th>{meta['sma_len']}-candle avg vol</th><th>Multiple</th><th>Day volume</th><th>Support zone (10m)</th><th>Resistance zone (10m)</th><th>Zone view</th></tr>{body}</table></div>
-</body></html>"""
+{_SORT_JS}</body></html>"""
 
 
 def history_html(date=None, min_mult=0.0, sym=None, only=None):
@@ -538,11 +570,11 @@ th,td{{border:1px solid #ddd;padding:5px 8px;text-align:right;font-size:14px}}th
 <form method="get" class="m">Day <select name="date">{opts}</select> &nbsp; min multiple <input name="min" value="{min_mult:g}" size="4"> &nbsp; stock <input name="sym" value="{_h.escape(sym or '')}" size="10"> <label><input type="checkbox" name="only" value="zone"{" checked" if only == "zone" else ""}> only rows at a zone</label> <button>Show</button>
  &middot; {len(x)} rows, {len(summ)} stocks &middot; <a href="/spurt10_history.csv">download CSV (all days)</a> &middot; <a href="/spurt10">live /spurt10</a></form>
 <div class="m">{LEGEND}</div>
-<h3>Stocks of the day (how many cycles each was in the top 30)</h3>
-<table><tr><th>Stock</th><th>Times in top 30</th><th>Times at a zone</th><th>First</th><th>Last</th><th>Best multiple</th><th>Last price</th><th>Day %</th></tr>{srows}</table>
-<h3>Every cycle (newest first)</h3>
-<table><tr><th>Candle</th><th>Symbol</th><th>Price</th><th>Day %</th><th>Candle %</th><th>Candle vol</th><th>50-candle avg</th><th>Multiple</th><th>Day volume</th><th>Support zone (10m)</th><th>Resistance zone (10m)</th><th>Zone view</th></tr>{rows}</table>
-</body></html>"""
+<h3>Stocks of the day (how many cycles each was in the top 30) &mdash; click any heading to sort</h3>
+<table class="sp"><tr><th>Stock</th><th>Times in top 30</th><th>Times at a zone</th><th>First</th><th>Last</th><th>Best multiple</th><th>Last price</th><th>Day %</th></tr>{srows}</table>
+<h3>Every cycle (newest first) &mdash; click any heading to sort</h3>
+<table class="sp"><tr><th>Candle</th><th>Symbol</th><th>Price</th><th>Day %</th><th>Candle %</th><th>Candle vol</th><th>50-candle avg</th><th>Multiple</th><th>Day volume</th><th>Support zone (10m)</th><th>Resistance zone (10m)</th><th>Zone view</th></tr>{rows}</table>
+{_SORT_JS}</body></html>"""
     except Exception as e:
         return f"<p>History page error: {_h.escape(str(e))}</p>"
 
