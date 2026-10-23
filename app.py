@@ -691,6 +691,21 @@ def spurt10_history_csv():
     return _serve_csv("spurt10_history.csv", "volume_spurt_10min_history.csv")
 
 
+@app.route("/spurt_sell", methods=["GET"])
+def spurt_sell_page():
+    try:
+        import spurt_sell_live
+        return spurt_sell_live.page_html(request.args.get("date"))
+    except Exception as e:
+        log.exception("/spurt_sell failed")
+        return f"Spurt SELL page error: {e}", 200
+
+
+@app.route("/spurt_sell.csv", methods=["GET"])
+def spurt_sell_csv():
+    return _serve_csv("spurt_sell_history.csv", "spurt_sell_signals_history.csv")
+
+
 @app.route("/oizones.csv", methods=["GET"])
 def oizones_csv():
     return _serve_csv("oizones.csv", "oi_zones_near.csv")

@@ -206,6 +206,7 @@ def _score_symbol(sym, sid):
     close = float(last["close"])
     return {
         "_zones": _secA_zones(df),
+        "_sell": _sell_check(df, sym, round((close / prev_close - 1) * 100, 2) if prev_close == prev_close else None),   # ADDED: spurt -> red candle SELL rule (spurt_sell_live.py)
         "symbol": sym,
         "price": round(close, 2),
         "day_chg_pct": round((close / prev_close - 1) * 100, 2) if prev_close == prev_close else None,
@@ -216,6 +217,15 @@ def _score_symbol(sym, sid):
         "multiple": round(float(vol[-1] / base), 2),
         "day_vol": int(vol[today_mask].sum()),
     }
+
+
+def _sell_check(df, sym, day_chg):
+    """ADDED: check the 'volume spurt then solid red candle = SELL' rule on candles already downloaded. Never raises."""
+    try:
+        import spurt_sell_live
+        return spurt_sell_live.check(df, sym, day_chg)
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------- phone alert
@@ -283,7 +293,11 @@ def run_once():
     rows.sort(key=lambda r: -r["multiple"])
     top = rows[:TOP_N]
     top_ids = {id(x) for x in top}
+    sell_hits = []
     for r in rows:                                                  # ADDED: Section A support / resistance zones of each stock
+        sg = r.pop("_sell", None)
+        if sg:
+            sell_hits.append(sg)
         zs = r.pop("_zones", None)
         if id(r) in top_ids:
             r.update(_zone_fields(zs, r["price"], r.get("candle_chg_pct")))
@@ -291,6 +305,11 @@ def run_once():
         _send_alerts(rows, now_ist)
     except Exception as e:
         log.warning(f"Spurt10 alert step failed: {e}")
+    try:                                                            # ADDED: spurt -> red candle SELL signals (own page, own ntfy topic)
+        import spurt_sell_live
+        spurt_sell_live.process(sell_hits, now_ist)
+    except Exception as e:
+        log.warning(f"Spurt SELL step failed: {e}")
     meta = {
         "run": now_ist.strftime("%Y-%m-%d %H:%M:%S IST"), "took_s": round(time.monotonic() - t0),
         "universe": len(uni), "quoted": len(quotes), "price_ok": n_pass, "shortlisted": len(names),
@@ -471,7 +490,7 @@ th,td{{border:1px solid #ddd;padding:6px 8px;text-align:right;font-size:14px}}th
 <h2>Volume Spurt &mdash; latest 10-min candle vs {meta['sma_len']}-candle volume average (top {len(top)})</h2>
 <div class="m">Run: {meta['run']} (took {meta['took_s']}s) &middot; {meta['universe']} NSE stocks (ETFs left out: {meta.get('etf_excluded', 0)}), {meta['price_ok']} priced &ge; {meta['min_price']:.0f},
 {meta['shortlisted']} shortlisted, {meta['scored']} scored, {meta['failed']} errors &middot; refreshes every 10 min &middot; {LEGEND} &middot; phone alert at {meta.get('alert_mult', 3.0):g}x or more &middot; zones = ALL IN ONE PRO order-block zones on the 10-min chart (same as the indicator on a 10-min chart) &middot;
-<a href="/spurt10.csv">CSV</a> (this cycle) &middot; <a href="/spurt10_history">full-day history page</a> &middot; <a href="/spurt10_history.csv">history CSV</a> &middot; <a href="/scanner">Scanner</a></div>
+<a href="/spurt10.csv">CSV</a> (this cycle) &middot; <a href="/spurt10_history">full-day history page</a> &middot; <a href="/spurt10_history.csv">history CSV</a> &middot; <a href="/spurt_sell">Spurt SELL signals</a> &middot; <a href="/scanner">Scanner</a></div>
 <div class="w"><table><tr><th>#</th><th>Symbol</th><th>Price</th><th>Day %</th><th>Candle</th><th>Candle %</th>
 <th>Candle volume</th><th>{meta['sma_len']}-candle avg vol</th><th>Multiple</th><th>Day volume</th><th>Support zone (10m)</th><th>Resistance zone (10m)</th><th>Zone view</th></tr>{body}</table></div>
 </body></html>"""
