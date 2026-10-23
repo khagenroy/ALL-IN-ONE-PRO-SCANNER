@@ -5,7 +5,7 @@ Same rule as the TradingView indicator "VOLUME SPURT RED CANDLE SELL", on the 10
 scanner already downloads (no extra Dhan calls):
 
   1. SPURT      a green 10-min candle whose volume >= SPURT_SELL_MULT (50) x the average volume of the previous
-                SPURT_SELL_AVG_LEN (50) candles. The 09:15 opening candle is ignored.
+                SPURT_SELL_AVG_LEN (50) candles. The 09:15 opening candle counts too (set SPURT_SELL_SKIP_OPEN=true to ignore it).
   2. RED CANDLE within SPURT_SELL_WAIT (10) candles after the spurt, a SOLID red candle (body >= SPURT_SELL_BODY_PCT
                 (60) % of its high-low range) whose volume is higher than the candle before it.
   3. SELL       entry = close of that red candle, stop loss = its high, targets = 1x and 2x the risk below the entry.
@@ -19,6 +19,7 @@ Only stocks the volume-spurt scan scores in a cycle (the 150 busiest) can be che
 ENV (all optional)
   SPURT_SELL_ENABLED=true
   SPURT_SELL_MULT=50   SPURT_SELL_AVG_LEN=50   SPURT_SELL_WAIT=10   SPURT_SELL_BODY_PCT=60
+  SPURT_SELL_SKIP_OPEN=false   (true = ignore the 09:15 candle as a spurt)
   SPURT_SELL_R1=1      SPURT_SELL_R2=2
   SPURT_SELL_NTFY_TOPIC=<a NEW ntfy topic>     phone alert goes ONLY to this topic (blank = no phone alert)
   SPURT_SELL_NTFY_MAX_PER_DAY=40
@@ -51,6 +52,7 @@ BODY_PCT = _f("SPURT_SELL_BODY_PCT", 60)
 R1 = _f("SPURT_SELL_R1", 1)
 R2 = _f("SPURT_SELL_R2", 2)
 MAX_PER_DAY = int(_f("SPURT_SELL_NTFY_MAX_PER_DAY", 40))
+SKIP_OPEN = os.environ.get("SPURT_SELL_SKIP_OPEN", "false").strip().lower() == "true"     # default: the 09:15 candle COUNTS as a spurt
 
 RESULTS_DIR = os.path.join(os.path.dirname(__file__), "results")
 HIST_PATH = os.path.join(RESULTS_DIR, "spurt_sell_history.csv")
@@ -93,7 +95,7 @@ def check(df, sym, day_chg=None):
                 continue
             m = v[j] / avg
             t = _ist(df.index[j])
-            if m >= MULT and c[j] > o[j] and not (t.hour == 9 and t.minute == 15):
+            if m >= MULT and c[j] > o[j] and not (SKIP_OPEN and t.hour == 9 and t.minute == 15):
                 sj, smult = j, m
                 break
         if sj is None:
@@ -204,7 +206,7 @@ def page_html(date=None):
                 '<style>body{font-family:Arial,sans-serif;margin:12px;background:#fafafa}table{border-collapse:collapse;background:#fff}'
                 'th,td{border:1px solid #ddd;padding:6px 8px;text-align:right;font-size:14px}th{background:#222;color:#fff}'
                 'td:nth-child(2){text-align:left}.m{color:#555;font-size:13px;margin:6px 0 12px}</style></head><body>')
-        rule = (f"Rule: a green 10-min candle with volume &ge; {MULT:g}x the average of the previous {AVG_LEN} candles (09:15 candle ignored), then within "
+        rule = (f"Rule: a green 10-min candle with volume &ge; {MULT:g}x the average of the previous {AVG_LEN} candles (09:15 candle {'ignored' if SKIP_OPEN else 'included'}), then within "
                 f"{WAIT} candles a solid red candle (body &ge; {BODY_PCT:g}% of its range) with higher volume than the candle before it. "
                 f"SELL at that red candle's close, stop loss = its high, targets = {R1:g}x and {R2:g}x the risk. One signal per spurt. "
                 "Paper/information only - the scanner places no orders.")
