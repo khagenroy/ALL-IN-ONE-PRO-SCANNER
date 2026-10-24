@@ -346,11 +346,11 @@ ZONE_AGAINST_PCT = 1.0                                                          
 def _secA_zones(df):
     """Live order-block zones from Section A on this stock's 10-min candles: the same zones the ALL IN ONE PRO indicator draws
     (bullish OB = support, bearish OB = resistance). Runs on candles already downloaded - no extra Dhan call."""
-    try:
-        import all_in_one_scanner as sec_a
-        r = sec_a.compute_section_a(df, with_zones=True)
-        return (r or {}).get("zones") or []
-    except Exception:
+    try:                                   # FIXED: zones now come from spurt_zones.py (the old with_zones option no longer exists in all_in_one_scanner.py)
+        import spurt_zones
+        return spurt_zones.live_zones(df)
+    except Exception as e:
+        log.warning(f"Spurt10 zone calculation failed: {e}")
         return []
 
 
@@ -453,7 +453,9 @@ def _write(top, meta):
 ROW_BG = {"SUPPORT": "#d4f1dc", "RESISTANCE": "#fadad6"}          # row colour: price is AT a support zone (green) / resistance zone (red)
 LEGEND = ('<span style="background:#d4f1dc;padding:2px 8px;border:1px solid #9ccfae">green row = price AT a support zone</span> '
           '<span style="background:#fadad6;padding:2px 8px;border:1px solid #e0a39c">red row = price AT a resistance zone</span> '
-          '<span style="background:#ffe066;padding:2px 8px;border:1px solid #d9b800">yellow multiple = phone-alert strength</span>')
+          '<span style="background:#ffe066;padding:2px 8px;border:1px solid #d9b800">yellow multiple = phone-alert strength</span> '
+          '<span style="background:#6fd68a;padding:2px 8px;border:1px solid #3ea85c">green cell = price at support zone</span> '
+          '<span style="background:#f08d84;padding:2px 8px;border:1px solid #c9564c">red cell = price at resistance zone</span>')
 
 
 def _rowstyle(at):
@@ -472,6 +474,13 @@ def _zh(z, d):
     if not isinstance(z, str) or not z:
         return "-"
     return f"{z}<br><small>{'inside/at' if (d or 0) == 0 else f'{d:.2f}% away'}</small>"
+
+
+def _zbg(at, kind):
+    """Cell highlight: the support cell turns green when price is AT a support zone, the resistance cell red when AT a resistance zone."""
+    if at == kind:
+        return ' style="background:#6fd68a;font-weight:bold"' if kind == "SUPPORT" else ' style="background:#f08d84;font-weight:bold"'
+    return ""
 
 
 def _zv(v, src=None):
@@ -511,7 +520,7 @@ def _html(top, meta):
         f"<tr{hl(r)}><td>{i}</td><td><b>{r['symbol']}</b></td><td>{r['price']:.2f}</td><td>{pct(r['day_chg_pct'])}</td>"
         f"<td>{r['candle']}</td><td>{pct(r['candle_chg_pct'])}</td><td>{r['candle_vol']:,}</td>"
         f"<td>{r['sma_vol']:,}</td><td{mc(r)}><b>{r['multiple']:.2f}x</b></td><td>{r['day_vol']:,}</td>"
-        f"<td>{_zc(r, 'support')}</td><td>{_zc(r, 'resistance')}</td><td>{_zv(r.get('zone_view'), r.get('zone_src'))}</td></tr>"
+        f"<td{_zbg(r.get('at_zone'), 'SUPPORT')}>{_zc(r, 'support')}</td><td{_zbg(r.get('at_zone'), 'RESISTANCE')}>{_zc(r, 'resistance')}</td><td>{_zv(r.get('zone_view'), r.get('zone_src'))}</td></tr>"
         for i, r in enumerate(top, 1)
     ) or '<tr><td colspan="13">No stocks qualified in this cycle.</td></tr>'
     return f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -560,7 +569,7 @@ def history_html(date=None, min_mult=0.0, sym=None, only=None):
         x = x.sort_values(["candle", "multiple"], ascending=[False, False])
         rows = "".join(f"<tr{_rowstyle(r.at_zone)}><td>{r.candle}</td><td><b>{_h.escape(str(r.symbol))}</b></td><td>{r.price:.2f}</td><td>{pct(r.day_chg_pct)}</td>"
                        f"<td>{pct(r.candle_chg_pct)}</td><td>{int(r.candle_vol):,}</td><td>{int(r.sma_vol):,}</td><td><b>{r.multiple:.2f}x</b></td><td>{int(r.day_vol):,}</td>"
-                       f"<td>{_zh(r.support, r.support_dist_pct)}</td><td>{_zh(r.resistance, r.resistance_dist_pct)}</td><td>{_zv(None if r.zone_view != r.zone_view else r.zone_view, None if r.zone_src != r.zone_src else r.zone_src)}</td></tr>"
+                       f"<td{_zbg(r.at_zone, 'SUPPORT')}>{_zh(r.support, r.support_dist_pct)}</td><td{_zbg(r.at_zone, 'RESISTANCE')}>{_zh(r.resistance, r.resistance_dist_pct)}</td><td>{_zv(None if r.zone_view != r.zone_view else r.zone_view, None if r.zone_src != r.zone_src else r.zone_src)}</td></tr>"
                        for r in x.itertuples())
         opts = "".join(f'<option value="{_h.escape(v)}"{" selected" if v == d else ""}>{_h.escape(v)}</option>' for v in dates)
         return f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Volume Spurt history</title>
