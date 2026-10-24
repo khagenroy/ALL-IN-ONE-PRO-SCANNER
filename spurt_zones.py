@@ -113,3 +113,21 @@ def live_zones(df):
         return out
     except Exception:
         return []
+
+
+def resistance_touch(df, start, end, tol_pct=0.5):
+    """Did price touch a live RESISTANCE zone on any candle from index `start` to `end` (inclusive)?
+    The zones are rebuilt as they stood on each of those candles, exactly like the indicator's "touched since the spurt".
+    Returns the touched zone as 'lo-hi' text (the latest one), or None."""
+    try:
+        high = df["high"].to_numpy(dtype=float)
+        low = df["low"].to_numpy(dtype=float)
+        tol = tol_pct / 100.0
+        found = None
+        for k in range(max(start, 0), end + 1):
+            for z in live_zones(df.iloc[:k + 1]):
+                if z["type"] == "RESISTANCE" and low[k] <= z["hi"] * (1 + tol) and high[k] >= z["lo"] * (1 - tol):
+                    found = f"{z['lo']:g}-{z['hi']:g}"
+        return found
+    except Exception:
+        return None

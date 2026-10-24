@@ -10,6 +10,9 @@ scanner already downloads (no extra Dhan calls):
                 (60) % of its high-low range) whose volume is higher than the candle before it.
   3. SELL       entry = close of that red candle, stop loss = its high, targets = 1x and 2x the risk below the entry.
                 One signal per spurt.
+  4. ZONE       (required, same as the indicator checklist point 2) price touched a RESISTANCE order-block zone (ALL IN ONE PRO
+                logic, 10-min chart, see spurt_zones.py) on the spurt candle or on any candle between the spurt and the red candle.
+                Set SPURT_SELL_NEED_ZONE=false to switch this off and get the old 3-point signal.
 
 Read-only: it places no orders, is not connected to Section A / Section B / the bot, and any error here is caught
 and logged without touching any other scan. Signals are logged to results/spurt_sell_history.csv.
@@ -20,6 +23,7 @@ ENV (all optional)
   SPURT_SELL_ENABLED=true
   SPURT_SELL_MULT=50   SPURT_SELL_AVG_LEN=50   SPURT_SELL_WAIT=10   SPURT_SELL_BODY_PCT=60
   SPURT_SELL_SKIP_OPEN=false   (true = ignore the 09:15 candle as a spurt)
+  SPURT_SELL_NEED_ZONE=true    (false = do not require the resistance zone)   SPURT_SELL_ZONE_NEAR_PCT=0.5  ('at zone' tolerance %)
   SPURT_SELL_R1=1      SPURT_SELL_R2=2
   SPURT_SELL_NTFY_TOPIC=<a NEW ntfy topic>     phone alert goes ONLY to this topic (blank = no phone alert)
   SPURT_SELL_NTFY_MAX_PER_DAY=40
@@ -52,12 +56,14 @@ BODY_PCT = _f("SPURT_SELL_BODY_PCT", 60)
 R1 = _f("SPURT_SELL_R1", 1)
 R2 = _f("SPURT_SELL_R2", 2)
 MAX_PER_DAY = int(_f("SPURT_SELL_NTFY_MAX_PER_DAY", 40))
+NEED_ZONE = os.environ.get("SPURT_SELL_NEED_ZONE", "true").strip().lower() == "true"
+ZONE_NEAR_PCT = _f("SPURT_SELL_ZONE_NEAR_PCT", 0.5)
 SKIP_OPEN = os.environ.get("SPURT_SELL_SKIP_OPEN", "false").strip().lower() == "true"     # default: the 09:15 candle COUNTS as a spurt
 
 RESULTS_DIR = os.path.join(os.path.dirname(__file__), "results")
 HIST_PATH = os.path.join(RESULTS_DIR, "spurt_sell_history.csv")
 COLS = ["date", "run", "candle", "symbol", "entry", "sl", "t1", "t2", "risk_pct", "spurt_candle", "spurt_mult",
-        "candles_after_spurt", "red_vol_vs_prev", "day_chg_pct"]
+        "candles_after_spurt", "red_vol_vs_prev", "day_chg_pct", "res_zone"]
 
 _seen = {"date": None, "keys": set(), "count": 0}
 
@@ -107,6 +113,14 @@ def check(df, sym, day_chg=None):
         risk = sl - entry
         if risk <= 0 or entry <= 0:
             return None
+        zone_txt = ""
+        try:                                                             # point 4: resistance zone touched since the spurt
+            import spurt_zones
+            zone_txt = spurt_zones.resistance_touch(df, sj, L, ZONE_NEAR_PCT) or ""
+        except Exception:
+            zone_txt = ""
+        if NEED_ZONE and not zone_txt:
+            return None
         return {
             "symbol": sym,
             "candle": _ist(df.index[L]).strftime("%H:%M"),
@@ -118,6 +132,7 @@ def check(df, sym, day_chg=None):
             "candles_after_spurt": int(L - sj),
             "red_vol_vs_prev": round(float(v[L] / v[L - 1]), 2) if v[L - 1] > 0 else None,
             "day_chg_pct": day_chg,
+            "res_zone": zone_txt,
         }
     except Exception:
         return None
@@ -141,7 +156,7 @@ def _alert(new, now_ist):
         return
     if _seen["count"] >= MAX_PER_DAY:
         return
-    lines = [f"{r['symbol']}  SELL {r['entry']:.2f}  SL {r['sl']:.2f}  T1 {r['t1']:.2f}  T2 {r['t2']:.2f}  (spurt {r['spurt_mult']:g}x at {r['spurt_candle']})"
+    lines = [f"{r['symbol']}  SELL {r['entry']:.2f}  SL {r['sl']:.2f}  T1 {r['t1']:.2f}  T2 {r['t2']:.2f}  (spurt {r['spurt_mult']:g}x at {r['spurt_candle']}; resistance {r.get('res_zone') or '-'})"
              for r in new[:12]]
     extra = f"\n+{len(new) - 12} more on /spurt_sell" if len(new) > 12 else ""
     try:
@@ -179,6 +194,12 @@ def process(hits, now_ist):
         run = now_ist.strftime("%H:%M:%S")
         os.makedirs(RESULTS_DIR, exist_ok=True)
         new_file = not os.path.exists(HIST_PATH)
+        if not new_file:                                                # file written before the zone column existed: upgrade in place
+            with open(HIST_PATH) as fh:
+                first = fh.readline().strip().split(",")
+            if first != COLS:
+                pd.read_csv(HIST_PATH).reindex(columns=COLS).to_csv(HIST_PATH + ".tmp", index=False)
+                os.replace(HIST_PATH + ".tmp", HIST_PATH)
         pd.DataFrame([{"date": today, "run": run, **{c_: r.get(c_) for c_ in COLS[2:]}} for r in new], columns=COLS).to_csv(
             HIST_PATH, mode="a", header=new_file, index=False)
         log.info(f"SpurtSell: {len(new)} new SELL signal(s): {[r['symbol'] for r in new]}")
@@ -214,12 +235,15 @@ def page_html(date=None):
         rule = (f"Rule: a green 10-min candle with volume &ge; {MULT:g}x the average of the previous {AVG_LEN} candles (09:15 candle {'ignored' if SKIP_OPEN else 'included'}), then within "
                 f"{WAIT} candles a solid red candle (body &ge; {BODY_PCT:g}% of its range) with higher volume than the candle before it. "
                 f"SELL at that red candle's close, stop loss = its high, targets = {R1:g}x and {R2:g}x the risk. One signal per spurt. "
+                f"{'The price must also have touched a resistance order-block zone since the spurt (10-min chart, ALL IN ONE PRO logic). ' if NEED_ZONE else ''}"
                 "Paper/information only - the scanner places no orders.")
         if not os.path.exists(HIST_PATH):
             return head + f'<h2>Spurt SELL</h2><div class="m">{rule}</div><p>No signal yet. It fills when a stock matches the rule during market hours.</p></body></html>'
         df = pd.read_csv(HIST_PATH)
         if df.empty:
             return head + f'<h2>Spurt SELL</h2><div class="m">{rule}</div><p>No signal yet.</p></body></html>'
+        if "res_zone" not in df.columns:                              # rows logged before the zone condition existed
+            df["res_zone"] = ""
         dates = sorted(df["date"].unique(), reverse=True)
         d = date if date in dates else dates[0]
         x = df[df["date"] == d].sort_values(["candle", "spurt_mult"], ascending=[False, False])
@@ -228,7 +252,7 @@ def page_html(date=None):
         rows = "".join(
             f"<tr><td>{r.candle}</td><td><b>{_h.escape(str(r.symbol))}</b></td><td>{r.entry:.2f}</td><td style='color:#c62828'>{r.sl:.2f}</td>"
             f"<td style='color:#0a7d33'>{r.t1:.2f}</td><td style='color:#0a7d33'>{r.t2:.2f}</td><td>{r.risk_pct:.2f}%</td>"
-            f"<td>{r.spurt_candle}</td><td><b>{r.spurt_mult:g}x</b></td><td>{int(r.candles_after_spurt)}</td><td>{pct(r.day_chg_pct)}</td></tr>"
+            f"<td>{r.spurt_candle}</td><td><b>{r.spurt_mult:g}x</b></td><td>{int(r.candles_after_spurt)}</td><td>{pct(r.day_chg_pct)}</td><td>{_h.escape(str(r.res_zone)) if r.res_zone == r.res_zone and r.res_zone else '-'}</td></tr>"
             for r in x.itertuples())
         opts = "".join(f'<option value="{_h.escape(v)}"{" selected" if v == d else ""}>{_h.escape(v)}</option>' for v in dates)
         return (head + f'<h2>Spurt SELL &mdash; {_h.escape(d)}</h2>'
@@ -236,7 +260,7 @@ def page_html(date=None):
                 f'click any heading to sort &middot; <a href="/spurt_sell.csv">download CSV (all days)</a> &middot; <a href="/spurt_paper">paper trading results</a> &middot; <a href="/spurt10">live /spurt10</a></form>'
                 f'<div class="m">{rule}</div>'
                 '<table class="s"><tr><th>Signal candle</th><th>Symbol</th><th>SELL entry</th><th>Stop loss</th><th>Target 1</th><th>Target 2</th>'
-                '<th>Risk %</th><th>Spurt candle</th><th>Spurt multiple</th><th>Candles after spurt</th><th>Day %</th></tr>'
+                '<th>Risk %</th><th>Spurt candle</th><th>Spurt multiple</th><th>Candles after spurt</th><th>Day %</th><th>Resistance zone touched</th></tr>'
                 f'{rows}</table>{_SORT_JS}</body></html>')
     except Exception as e:
         return f"<p>Spurt SELL page error: {_h.escape(str(e))}</p>"
