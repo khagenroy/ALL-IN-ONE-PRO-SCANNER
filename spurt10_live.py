@@ -741,8 +741,8 @@ th,td{{border:1px solid #ddd;padding:6px 8px;text-align:right;font-size:14px}}th
 <a href="/spurt10.csv">CSV</a> (this cycle) &middot; <a href="/spurt10_history">full-day history page</a> &middot; <a href="/spurt10_history.csv">history CSV</a> &middot; <a href="/spurt_sell">Spurt SELL signals</a> &middot; <a href="/scanner">Scanner</a></div>
 <div class="w"><table class="sp"><tr><th>#</th><th>Symbol</th><th>Price</th><th>Day %</th><th>Candle</th><th>Candle %</th>
 <th>Candle volume</th><th>{meta['sma_len']}-candle avg vol</th><th>Multiple</th><th>Day volume</th><th>Support zone ({ZONE_TF}m)</th><th>Resistance zone ({ZONE_TF}m)</th><th>Zone view</th></tr>{body}</table></div>
-{_watch_html(meta)}
 {_link_html()}
+{_watch_html(meta)}
 {_SORT_JS}</body></html>"""
 
 
