@@ -504,6 +504,12 @@ def run_once():
                 idle.append(s)                                  # market closed (e.g. gold / silver tokens at the weekend): no fresh candle
                 r = None
             if r:
+                try:                                            # ADDED: 30m order-block support / resistance zones for this coin (crypto_watch.py)
+                    import crypto_watch
+                    _nr, _ag = _buffers(s, zd)
+                    r.update(crypto_watch.zone_fields(crypto_watch.ob_zones(fr.get(SPURT_TF)), r["price"], r.get("candle_chg_pct"), _nr, _ag, SPURT_TF))
+                except Exception as e:
+                    log.warning(f"Crypto zone fields failed for {s}: {e}")
                 spurt.append(r)
                 last_px[s] = r["price"]
             cur_sigs += _signals_for(s, fr)
@@ -515,6 +521,12 @@ def run_once():
         _alert(spurt, now)
     except Exception as e:
         log.warning(f"Crypto alert step failed: {e}")
+    watch = {}
+    try:                                                        # ADDED: watch list of spurt coins + OB mitigation signals on them (crypto_watch.py)
+        import crypto_watch
+        watch = crypto_watch.update(spurt, cur_sigs, now, SPURT_TF)
+    except Exception as e:
+        log.warning(f"Crypto watch step failed: {e}")
     all_sigs = _update_log(cur_sigs, now)
 
     near = []
@@ -550,7 +562,7 @@ def run_once():
             "zones_count": len(zones), "zones_universe": zd.get("universe", len(SYMBOLS))}
     os.makedirs(RESULTS_DIR, exist_ok=True)
     with open(LIVE_JSON + ".tmp", "w") as f:
-        json.dump({"meta": meta, "spurt": spurt, "near": near, "signals": all_sigs}, f, default=str)
+        json.dump({"meta": meta, "spurt": spurt, "near": near, "signals": all_sigs, "watch": watch}, f, default=str)
     os.replace(LIVE_JSON + ".tmp", LIVE_JSON)
     pd.DataFrame(spurt).to_csv(SPURT_CSV, index=False)
     pd.DataFrame([{"symbol": s, **z} for s, zs in zones.items() for z in zs]).to_csv(ZONES_CSV, index=False)
@@ -582,11 +594,27 @@ def _page_html_inner():
     m = d["meta"]
     G, R, M = "#3fb950", "#f85149", "#9aa0a6"
 
-    def tbl(cols, rows, empty):
+    def tbl(cols, rows, empty, styles=None):
         if not rows:
             return f'<p style="color:{M}">{empty}</p>'
+        styles = styles or [""] * len(rows)
         return ('<div style="overflow-x:auto"><table><tr>' + "".join(f"<th>{c}</th>" for c in cols) + "</tr>"
-                + "".join("<tr>" + "".join(f"<td>{c}</td>" for c in r) + "</tr>" for r in rows) + "</table></div>")
+                + "".join(("<tr style='background:" + st + "'>" if st else "<tr>") + "".join(f"<td>{c}</td>" for c in r) + "</tr>"
+                          for r, st in zip(rows, styles)) + "</table></div>")
+
+    def _zcell(x, k, kind):
+        z = x.get(k) or ""
+        if not z:
+            return "-"
+        d_ = x.get(k + "_dist_pct")
+        at = x.get("at_zone") == kind
+        txt = f"{z}<br><small style='color:{M}'>{'inside/at' if (d_ or 0) == 0 else f'{d_:.2f}% away'}</small>"
+        return f"<b style='background:{'rgba(63,185,80,.45)' if kind == 'SUPPORT' else 'rgba(248,81,73,.45)'};padding:2px 4px'>{txt}</b>" if at else txt
+
+    def _zview(x):
+        v = x.get("zone_view") or "-"
+        c = G if v in ("ALIGNED", "at support") else R if v in ("AGAINST", "at resistance") else M
+        return f"<span style='color:{c}'>{v}</span>"
 
     def pct(v):
         return "-" if v is None else f'<span style="color:{G if v > 0 else R if v < 0 else M}">{v:+.2f}%</span>'
@@ -606,12 +634,20 @@ def _page_html_inner():
     # 1 volume spurt
     sp = [[f"<b>{x['symbol']}</b>", f"{x['price']:.2f}", pct(x["day_chg_pct"]), x["candle"], pct(x["candle_chg_pct"]),
            f'<b style="color:{G if x["candle_type"] == "GREEN" else R if x["candle_type"] == "RED" else M}">{x["candle_type"]}</b>',
-           f"{x['candle_vol']:,}", f"{x['sma_vol']:,}", f'<b style="color:{"#d29922" if x["multiple"] >= m["alert_mult"] else "#e6e6e6"}">{x["multiple"]:.2f}x</b>', f"{x['day_vol']:,}"]
+           f"{x['candle_vol']:,}", f"{x['sma_vol']:,}", f'<b style="color:{"#d29922" if x["multiple"] >= m["alert_mult"] else "#e6e6e6"}">{x["multiple"]:.2f}x</b>', f"{x['day_vol']:,}",
+           _zcell(x, "support", "SUPPORT"), _zcell(x, "resistance", "RESISTANCE"), _zview(x)]
           for x in d["spurt"]]
+    sp_styles = ["rgba(63,185,80,.16)" if x.get("at_zone") == "SUPPORT" else "rgba(248,81,73,.16)" if x.get("at_zone") == "RESISTANCE" else "" for x in d["spurt"]]
     out.append(f'<h2>1. Volume spurt &mdash; latest {m["spurt_tf"]} candle vs {m["sma_len"]}-candle average</h2>'
                f'<div class="m">amber = {m["alert_mult"]:g}x or more (phone alert) &middot; <a href="/crypto_spurt.csv">CSV</a></div>'
-               + tbl(["Symbol", "Price", "Day %", "Candle", "Candle %", "Candle type", "Candle volume", f"{m['sma_len']}-candle avg vol", "Multiple", "Day volume"], sp,
-                     "No coin candles scored yet (needs 50+ closed candles)."))
+               + tbl(["Symbol", "Price", "Day %", "Candle", "Candle %", "Candle type", "Candle volume", f"{m['sma_len']}-candle avg vol", "Multiple", "Day volume",
+                      f"Support zone ({m['spurt_tf']})", f"Resistance zone ({m['spurt_tf']})", "Zone view"], sp,
+                     "No coin candles scored yet (needs 50+ closed candles).", sp_styles))
+    try:                                                         # ADDED: OB signals on spurt coins + watch list (crypto_watch.py)
+        import crypto_watch
+        out.append(crypto_watch.html(d.get("watch")))
+    except Exception as e:
+        log.warning(f"Crypto watch block failed: {e}")
 
     sigs = d["signals"]
     al = [x for x in sigs if x["verdict"] in ("ALIGNED", "AGAINST")]
