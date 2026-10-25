@@ -35,6 +35,8 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 
+import mcx_watch
+
 log = logging.getLogger("mcx")
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -427,6 +429,11 @@ def run_once():
             fr = _frames(s, sid)
             r = _score(s, fr.get(SPURT_TF))
             if r:
+                try:
+                    _nr, _ag = _buffers(s, zd)
+                    r.update(mcx_watch.zone_fields(mcx_watch.ob_zones(fr.get(SPURT_TF)), r["price"], r.get("candle_chg_pct"), _nr, _ag, SPURT_TF))
+                except Exception as e:
+                    log.warning(f"MCX zone fields failed for {s}: {e}")
                 spurt.append(r)
                 last_px[s] = r["price"]
             cur_sigs += _signals_for(s, fr)
@@ -438,6 +445,11 @@ def run_once():
         _alert(spurt, now)
     except Exception as e:
         log.warning(f"MCX alert step failed: {e}")
+    watch = None
+    try:
+        watch = mcx_watch.update(spurt, cur_sigs, now, SPURT_TF)
+    except Exception as e:
+        log.warning(f"MCX watch step failed: {e}")
     all_sigs = _update_log(cur_sigs, now)
 
     near = []
@@ -473,7 +485,7 @@ def run_once():
             "zones_count": len(zones), "zones_universe": zd.get("universe", len(SYMBOLS))}
     os.makedirs(RESULTS_DIR, exist_ok=True)
     with open(LIVE_JSON + ".tmp", "w") as f:
-        json.dump({"meta": meta, "spurt": spurt, "near": near, "signals": all_sigs}, f, default=str)
+        json.dump({"meta": meta, "spurt": spurt, "near": near, "signals": all_sigs, "watch": watch}, f, default=str)
     os.replace(LIVE_JSON + ".tmp", LIVE_JSON)
     pd.DataFrame(spurt).to_csv(SPURT_CSV, index=False)
     pd.DataFrame([{"symbol": s, **z} for s, zs in zones.items() for z in zs]).to_csv(ZONES_CSV, index=False)
@@ -506,11 +518,28 @@ def page_html():
     m = d["meta"]
     G, R, M = "#3fb950", "#f85149", "#9aa0a6"
 
-    def tbl(cols, rows, empty):
+    def tbl(cols, rows, empty, styles=None):
         if not rows:
             return f'<p style="color:{M}">{empty}</p>'
-        return ('<div style="overflow-x:auto"><table><tr>' + "".join(f"<th>{c}</th>" for c in cols) + "</tr>"
-                + "".join("<tr>" + "".join(f"<td>{c}</td>" for c in r) + "</tr>" for r in rows) + "</table></div>")
+        body = ""
+        for i, r in enumerate(rows):
+            st = styles[i] if styles else ""
+            body += ("<tr style='background:" + st + "'>" if st else "<tr>") + "".join(f"<td>{c}</td>" for c in r) + "</tr>"
+        return ('<div style="overflow-x:auto"><table><tr>' + "".join(f"<th>{c}</th>" for c in cols) + "</tr>" + body + "</table></div>")
+
+    def _zcell(x, kind):
+        v = x.get("support" if kind == "S" else "resistance") or "-"
+        dist = x.get("support_dist_pct" if kind == "S" else "resistance_dist_pct")
+        if v == "-":
+            return v
+        at = x.get("at_zone") == ("SUPPORT" if kind == "S" else "RESISTANCE")
+        extra = "" if dist is None else f' <span style="color:{M}">({dist:.2f}% away)</span>'
+        return f'<b style="background:{"rgba(63,185,80,.35)" if kind == "S" else "rgba(248,81,73,.35)"};padding:1px 5px;border-radius:3px">{v}</b>{extra}' if at else v + extra
+
+    def _zview(x):
+        v = x.get("zone_view") or "no zone"
+        c = G if v in ("ALIGNED", "at support") else R if v in ("AGAINST", "at resistance") else M
+        return f'<b style="color:{c}">{v}</b>'
 
     def pct(v):
         return "-" if v is None else f'<span style="color:{G if v > 0 else R if v < 0 else M}">{v:+.2f}%</span>'
@@ -531,52 +560,17 @@ def page_html():
            f'<b style="color:{G if x["candle_type"] == "GREEN" else R if x["candle_type"] == "RED" else M}">{x["candle_type"]}</b>',
            f"{x['candle_vol']:,}", f"{x['sma_vol']:,}", f'<b style="color:{"#d29922" if x["multiple"] >= m["alert_mult"] else "#e6e6e6"}">{x["multiple"]:.2f}x</b>', f"{x['day_vol']:,}"]
           for x in d["spurt"]]
+    for row, x in zip(sp, d["spurt"]):
+        row += [_zcell(x, "S"), _zcell(x, "R"), _zview(x)]
+    sp_styles = ["rgba(63,185,80,.16)" if x.get("at_zone") == "SUPPORT" else "rgba(248,81,73,.16)" if x.get("at_zone") == "RESISTANCE" else "" for x in d["spurt"]]
     out.append(f'<h2>1. Volume spurt &mdash; latest {m["spurt_tf"]} candle vs {m["sma_len"]}-candle average</h2>'
                f'<div class="m">amber = {m["alert_mult"]:g}x or more (phone alert) &middot; <a href="/mcx_spurt.csv">CSV</a></div>'
-               + tbl(["Symbol", "Price", "Day %", "Candle", "Candle %", "Candle type", "Candle volume", f"{m['sma_len']}-candle avg vol", "Multiple", "Day volume"], sp,
-                     "No commodity candles scored yet (needs 50+ closed candles)."))
+               + tbl(["Symbol", "Price", "Day %", "Candle", "Candle %", "Candle type", "Candle volume", f"{m['sma_len']}-candle avg vol", "Multiple", "Day volume",
+                      f"Support zone ({m['spurt_tf']})", f"Resistance zone ({m['spurt_tf']})", "Zone view"], sp,
+                     "No commodity candles scored yet (needs 50+ closed candles).", sp_styles))
+    out.append(mcx_watch.html(d.get("watch")))
 
-    sigs = d["signals"]
-    al = [x for x in sigs if x["verdict"] in ("ALIGNED", "AGAINST")]
-    # 2 signals vs OI zones
-    out.append(f'<h2>2. Our signals vs OI zones ({len(al)}) &middot; <a href="/mcx_signals.csv" style="font-size:13px;font-weight:400">CSV</a></h2>'
-               f'<div class="m">Section A / B / RSI Flush signals of the last 24 h; ALIGNED = at an OI zone that supports the trade, AGAINST = at the opposite zone</div>'
-               + tbl(["Bar (IST)", "Symbol", "Sec", "TF", "Signal", "Price", "Verdict", "Why"],
-                     [[x["bar"], f"<b>{x['symbol']}</b>", x["section"], x["tf"], x["signal"], x["price"], verdict_c(x["verdict"]), x["why"]] for x in al],
-                     "No ALIGNED or AGAINST signals in the last 24 h."))
-
-    # 3 OI zones
-    zd = load_zones() or {}
-    zc = lambda t: G if t == "SUPPORT" else R
-    near = [[f"<b>{x['symbol']}</b>", x["price"], f'<span style="color:{zc(x["zone"])}">{x["zone"]}</span>', f"{x['zone_lo']} - {x['zone_hi']}",
-             f"{x['dist_pct']:+.2f}%", f"{x['oi_added_pct']}%", x["zone_date"]] for x in d["near"]]
-    allz = [[f"<b>{s}</b>", f'<span style="color:{zc(z["type"])}">{z["type"]}</span>', f"{z['lo']} - {z['hi']}", f"{z['oi_added_pct']}%", z["date"]]
-            for s, zs in (zd.get("stocks") or {}).items() for z in zs]
-    out.append(f'<h2>3. OI support / resistance zones (MCX futures OI buildup)</h2>'
-               f'<div class="m">Zones built {m["zones_built"] or "-"} &middot; {m["zones_count"]} of {m["zones_universe"]} commodities have zones &middot; <a href="/mcx_oizones.csv">CSV</a>'
-               + (f'<br><i>{m["zones_note"]}</i>' if m.get("zones_note") else "") + "</div>"
-               f"<h3>Zone buffer per commodity</h3>"
-               + tbl(["Symbol", "Daily range (14-day avg)", "At-zone buffer", "AGAINST distance", "Source"],
-                     [[f"<b>{s_}</b>", (f"{(zd.get('vol') or {}).get(s_, {}).get('atr_pct', '-')}%"), f"{_buffers(s_, zd)[0] * 100:.2f}%", f"{_buffers(s_, zd)[1] * 100:.2f}%",
-                       "manual (MCX_NEAR_PCT_" + s_ + ")" if os.environ.get(f"MCX_NEAR_PCT_{s_}", "").strip() else ("volatility" if (zd.get("vol") or {}).get(s_) else "default")]
-                      for s_ in m["symbols"]], "")
-               + f"<h3>Commodities at an OI zone now ({len(near)})</h3>"
-               + tbl(["Symbol", "Price", "Zone", "Zone range", "Dist from edge", "OI added", "Zone day"], near, "None right now.")
-               + f"<h3>All zones ({len(allz)})</h3>" + tbl(["Symbol", "Zone", "Zone range", "OI added", "Zone day"], allz, "No zones built yet."))
-
-    # 4-6 the three signal sections
-    def sec_table(code):
-        rows = [x for x in sigs if x["section"] == code]
-        return rows, tbl(["Bar (IST)", "Symbol", "TF", "Signal", "Side", "Entry", "SL", "T1", "T2"] + (["Status"] if code == "RSI" else []) + ["OI verdict"],
-                         [[x["bar"], f"<b>{x['symbol']}</b>", x["tf"], x["signal"], side_c(x["side"]), x["price"], x["sl"], x.get("t1") or "-", x.get("t2") or "-"]
-                          + ([x.get("status", "")] if code == "RSI" else [])
-                          + [verdict_c(x["verdict"]) if x["verdict"] in ("ALIGNED", "AGAINST") else f'<span style="color:{M}">{x["verdict"]}</span>'] for x in rows],
-                         "No signals in the last 24 h.")
-
-    for n, code, title in ((4, "A", "Section A (Sweep + Order Block)"), (5, "RSI", "RSI Flush"), (6, "B", "Section B (Keltner/SMC + RSI Pattern)")):
-        rows, t = sec_table(code)
-        out.append(f'<h2>{n}. {title} ({len(rows)}) &middot; last 24 h</h2>' + t)
-    out.append(f'<div class="m" style="margin-top:20px"><a href="/mcx_signals_all.csv">CSV of all signals</a> &middot; Signals are computed by the same functions as the stock scanner on 15m / 1H / 4H futures candles.</div>')
+    out.append('<div class="m" style="margin-top:20px"><a href="/mcx_spurt.csv">Spurt CSV</a></div>')
     out.append("</body></html>")
     return "".join(out)
 
