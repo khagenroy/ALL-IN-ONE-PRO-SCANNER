@@ -44,6 +44,7 @@ AUTORUN = os.environ.get("CRYPTO_AUTORUN", "true").strip().lower() == "true"
 SYMBOLS = [s.strip().upper() for s in os.environ.get("CRYPTO_SYMBOLS", "BTCUSD,ETHUSD,SOLUSD,XAUTUSD,SLVONUSD").split(",") if s.strip()]
 TFS = [t.strip() for t in os.environ.get("CRYPTO_TFS", "30m,1H,4H").split(",") if t.strip() in ("15m", "30m", "1H", "4H")] or ["30m"]
 SPURT_TF = os.environ.get("CRYPTO_SPURT_TF", "30m").strip()
+CONF_TF = {"15m": "30m", "30m": "1H", "1H": "4H"}.get(SPURT_TF, "")      # higher time frame whose zones are compared with the spurt time frame (zone confluence)
 SMA_LEN = int(os.environ.get("CRYPTO_SMA_LEN", "50") or "50")
 ALERT_MULT = float(os.environ.get("CRYPTO_ALERT_MULT", "3.0") or "3.0")
 NTFY_ON = os.environ.get("CRYPTO_NTFY", "true").strip().lower() == "true"
@@ -507,7 +508,10 @@ def run_once():
                 try:                                            # ADDED: 30m order-block support / resistance zones for this coin (crypto_watch.py)
                     import crypto_watch
                     _nr, _ag = _buffers(s, zd)
-                    r.update(crypto_watch.zone_fields(crypto_watch.ob_zones(fr.get(SPURT_TF)), r["price"], r.get("candle_chg_pct"), _nr, _ag, SPURT_TF))
+                    _zs = crypto_watch.ob_zones(fr.get(SPURT_TF))
+                    r.update(crypto_watch.zone_fields(_zs, r["price"], r.get("candle_chg_pct"), _nr, _ag, SPURT_TF))
+                    if CONF_TF and fr.get(CONF_TF) is not None:          # ADDED: same zone on the higher time frame?
+                        r.update(crypto_watch.conf_fields(_zs, crypto_watch.ob_zones(fr.get(CONF_TF)), r["price"]))
                 except Exception as e:
                     log.warning(f"Crypto zone fields failed for {s}: {e}")
                 spurt.append(r)
@@ -524,7 +528,7 @@ def run_once():
     watch = {}
     try:                                                        # ADDED: watch list of spurt coins + OB mitigation signals on them (crypto_watch.py)
         import crypto_watch
-        watch = crypto_watch.update(spurt, cur_sigs, now, SPURT_TF)
+        watch = crypto_watch.update(spurt, cur_sigs, now, SPURT_TF, CONF_TF)
     except Exception as e:
         log.warning(f"Crypto watch step failed: {e}")
     all_sigs = _update_log(cur_sigs, now)
@@ -557,7 +561,7 @@ def run_once():
     all_sigs.sort(key=lambda r: r["bar"], reverse=True)
 
     meta = {"run": now.strftime("%Y-%m-%d %H:%M:%S IST"), "symbols": SYMBOLS, "missing": missing, "idle": idle, "oi_source": zd.get("oi_source", {}), "scored": len(spurt), "errors": errors,
-            "alert_mult": ALERT_MULT, "sma_len": SMA_LEN, "tfs": TFS, "spurt_tf": SPURT_TF,
+            "alert_mult": ALERT_MULT, "sma_len": SMA_LEN, "tfs": TFS, "spurt_tf": SPURT_TF, "conf_tf": CONF_TF,
             "zones_built": (zd.get("built") or "")[:16].replace("T", " "), "zones_note": zd.get("note", ""),
             "zones_count": len(zones), "zones_universe": zd.get("universe", len(SYMBOLS))}
     os.makedirs(RESULTS_DIR, exist_ok=True)
@@ -609,6 +613,9 @@ def _page_html_inner():
         d_ = x.get(k + "_dist_pct")
         at = x.get("at_zone") == kind
         txt = f"{z}<br><small style='color:{M}'>{'inside/at' if (d_ or 0) == 0 else f'{d_:.2f}% away'}</small>"
+        cfv = x.get("conf_" + k)
+        if cfv and m.get("conf_tf"):
+            txt += f"<br><small style='color:#c792ea'><b>{m['spurt_tf']}+{m['conf_tf']} zone</b> ({cfv})</small>"
         return f"<b style='background:{'rgba(63,185,80,.45)' if kind == 'SUPPORT' else 'rgba(248,81,73,.45)'};padding:2px 4px'>{txt}</b>" if at else txt
 
     def _zview(x):

@@ -236,6 +236,7 @@ def _score_symbol(sym, sid):
             log.warning(f"Spurt10 {ZONE_TF}m zone candles failed for {sym}, using 10m: {e}")
     return {
         "_zones": _secA_zones(zdf),
+        "_df5": df5, "_as_of": as_of,
         "_zone_tf": (ZONE_TF if zdf is not df else 10),
         "_sell": _sell_check(df, sym, round((close / prev_close - 1) * 100, 2) if prev_close == prev_close else None),   # ADDED: spurt -> red candle SELL rule (spurt_sell_live.py)
         "symbol": sym,
@@ -327,7 +328,8 @@ def _watch_view():
         alerted = any(k[0] == sym for k in _zone_alerted["keys"])
         out.append({"symbol": sym, "since": w.get("since", ""), "mult": w.get("mult", 0), "price": last.get("price"),
                     "support": last.get("support", ""), "resistance": last.get("resistance", ""), "at_zone": at,
-                    "in_table": last.get("in_table", False), "time": last.get("time", ""), "alerted": alerted})
+                    "in_table": last.get("in_table", False), "time": last.get("time", ""), "alerted": alerted,
+                    "conf_support": last.get("conf_support", ""), "conf_resistance": last.get("conf_resistance", "")})
     out.sort(key=lambda x: (0 if x["at_zone"] else 1, -x["mult"]))
     return out
 
@@ -356,6 +358,7 @@ def _watch_rows(top, now_ist, sid_of):
         if r["symbol"] in syms:
             syms[r["symbol"]]["last"] = {"price": r["price"], "support": r.get("support", ""), "resistance": r.get("resistance", ""),
                                          "at_zone": r.get("at_zone", ""), "in_table": True,
+                                         "conf_support": r.get("conf_support", ""), "conf_resistance": r.get("conf_resistance", ""),
                                          "time": now_ist.strftime("%H:%M")}
     todo = [x for x in syms if x not in in_top and x in sid_of]
     if not todo:
@@ -370,11 +373,14 @@ def _watch_rows(top, now_ist, sid_of):
             if zdf is None or len(zdf) < 30 or d5 is None or len(d5) == 0:
                 return None
             price = float(d5["close"].iloc[-1])
-            f = _zone_fields(_secA_zones(zdf), price, None)
+            zs_w = _secA_zones(zdf)
+            f = _zone_fields(zs_w, price, None)
+            f.update(_conf_fields(zs_w, _conf_zones(df5, as_of), price))
             f.update(symbol=sym, price=round(price, 2), multiple=syms[sym]["mult"], candle_chg_pct=None,
                      note=f"spurt {syms[sym]['since']}")
             syms[sym]["last"] = {"price": round(price, 2), "support": f.get("support", ""), "resistance": f.get("resistance", ""),
-                                 "at_zone": f.get("at_zone", ""), "in_table": False, "time": now_ist.strftime("%H:%M")}
+                                 "at_zone": f.get("at_zone", ""), "in_table": False, "time": now_ist.strftime("%H:%M"),
+                                 "conf_support": f.get("conf_support", ""), "conf_resistance": f.get("conf_resistance", "")}
             return f
         except Exception as e:
             log.warning(f"Spurt10 watch check failed for {sym}: {e}")
@@ -420,10 +426,12 @@ def _send_zone_alerts(top, now_ist):
         chg = r.get("candle_chg_pct")
         lines.append(f"{'RESISTANCE' if at == 'RESISTANCE' else 'SUPPORT'}  {r['symbol']}  Rs {r['price']:.2f}  zone {zone}  spurt {r['multiple']:.1f}x"
                      + (f"  candle {chg:+.2f}%" if chg is not None else "") + (f"  ({r['note']})" if r.get("note") else "")
-                     + (f"  [{r['zone_view']}]" if r.get("zone_view") in ("ALIGNED", "AGAINST") else ""))
+                     + (f"  [{r['zone_view']}]" if r.get("zone_view") in ("ALIGNED", "AGAINST") else "")
+                     + (f"  [15m+{CONF_TF}m zone]" if _is_conf(r) else ""))
     extra = f"\n+{len(hits) - 12} more on the scanner page" if len(hits) > 12 else ""
     kinds = {h[1] for h in hits}
-    title = "Spurt stock at " + (" / ".join(sorted(k.lower() for k in kinds))) + f" ({len(hits)})"
+    n_conf = sum(1 for h in hits if _is_conf(h[0]))
+    title = "Spurt stock at " + (" / ".join(sorted(k.lower() for k in kinds))) + f" ({len(hits)})" + (f" - {n_conf} with {ZONE_TF}m+{CONF_TF}m zone" if n_conf else "")
     try:
         import requests
         resp = requests.post(f"https://ntfy.sh/{topic}", data=("\n".join(lines) + extra).encode("utf-8"), timeout=8,
@@ -470,8 +478,10 @@ def run_once():
             sell_hits.append(sg)
         zs = r.pop("_zones", None)
         ztf = r.pop("_zone_tf", 10)
+        d5, asof = r.pop("_df5", None), r.pop("_as_of", None)
         if id(r) in top_ids:
             r.update(_zone_fields(zs, r["price"], r.get("candle_chg_pct")))
+            r.update(_conf_fields(zs, _conf_zones(d5, asof), r["price"]))     # ADDED: 15m + 30m confluence
             if r.get("zone_src"):
                 r["zone_src"] = f"Section A {ztf}m"
     try:
@@ -518,6 +528,8 @@ def run_once():
 
 
 ZONE_NEAR_PCT = float(os.environ.get("SPURT10_ZONE_NEAR_PCT", "0.5") or "0.5")      # "at" a zone = inside it or within this % of it
+CONF_TF = 30                    # the second, higher time frame (minutes) whose zones are compared with the main zone time frame
+CONF_PCT = 0.3                  # two zones count as "the same zone" when they overlap or are within this % of the price of each other
 ZONE_AGAINST_PCT = 1.0                                                                # opposite zone this close ahead = AGAINST
 
 
@@ -530,6 +542,52 @@ def _secA_zones(df):
     except Exception as e:
         log.warning(f"Spurt10 zone calculation failed: {e}")
         return []
+
+
+def _conf_zones(df5, as_of):
+    """Zones on the CONF_TF-minute candles (built from the 5-min candles already downloaded). [] when not available."""
+    try:
+        if CONF_TF == ZONE_TF or df5 is None:
+            return []
+        d = ls.drop_forming_bars(ls.build_merged_bars(df5, CONF_TF // 5), CONF_TF, as_of)
+        if d is None or len(d) < 30:
+            return []
+        return _secA_zones(d)
+    except Exception as e:
+        log.warning(f"Spurt10 {CONF_TF}m zone candles failed: {e}")
+        return []
+
+
+def _conf_fields(zs, zs2, price):
+    """CONFLUENCE: the nearest support / resistance of the main zone time frame (zs) is the same zone as a zone of the
+    CONF_TF time frame (zs2) when they overlap or are within CONF_PCT % of the price. Returns the CONF_TF zone range (else "")."""
+    out = {"conf_support": "", "conf_resistance": ""}
+    try:
+        if not zs or not zs2 or not price:
+            return out
+        gap = CONF_PCT / 100.0 * price
+        for kind, key in (("SUPPORT", "conf_support"), ("RESISTANCE", "conf_resistance")):
+            a = [z for z in zs if z["type"] == kind]
+            b = [z for z in zs2 if z["type"] == kind]
+            if not a or not b:
+                continue
+            z1 = max(a, key=lambda z: z["hi"]) if kind == "SUPPORT" else min(a, key=lambda z: z["lo"])
+            best = None
+            for z2 in b:
+                d = max(z2["lo"] - z1["hi"], z1["lo"] - z2["hi"], 0.0)          # 0 = overlapping
+                if d <= gap and (best is None or d < best[0]):
+                    best = (d, z2)
+            if best:
+                out[key] = f"{best[1]['lo']:g}-{best[1]['hi']:g}"
+    except Exception:
+        pass
+    return out
+
+
+def _is_conf(r):
+    """True when the zone the price is AT right now is a confluence zone (15m + 30m)."""
+    at = r.get("at_zone")
+    return bool(at and r.get("conf_support" if at == "SUPPORT" else "conf_resistance"))
 
 
 def _zone_fields(zs, price, candle_chg):
@@ -576,7 +634,8 @@ def _zone_fields(zs, price, candle_chg):
 
 _hist_seen = {"date": None, "keys": set()}
 HIST_COLS = ["date", "run", "candle", "symbol", "price", "day_chg_pct", "candle_chg_pct", "candle_vol", "sma_vol", "multiple", "day_vol",
-             "support", "support_dist_pct", "resistance", "resistance_dist_pct", "zone_view", "zone_src", "at_zone"]
+             "support", "support_dist_pct", "resistance", "resistance_dist_pct", "zone_view", "zone_src", "at_zone",
+             "conf_support", "conf_resistance"]      # conf_* = the 30-min zone that coincides with the nearest 15-min zone ("" = none)
 
 
 def _append_history(rows, now_ist):
@@ -645,7 +704,9 @@ def _zc(r, k):
     d = r.get(k + "_dist_pct")
     if not z:
         return "-"
-    return f"{z}<br><small>{'inside/at' if (d or 0) == 0 else f'{d:.2f}% away'}</small>"
+    cf = r.get("conf_" + k)
+    tag = f"<br><small style='color:#6a1b9a'><b>{ZONE_TF}m+{CONF_TF}m zone</b> ({cf})</small>" if cf else ""
+    return f"{z}<br><small>{'inside/at' if (d or 0) == 0 else f'{d:.2f}% away'}</small>{tag}"
 
 
 def _zh(z, d):
@@ -689,6 +750,11 @@ def _link_html():
         return ""
 
 
+def _wconf(w, k):
+    cf = w.get("conf_" + k)
+    return f"<br><small style='color:#6a1b9a'><b>+{CONF_TF}m</b> ({cf})</small>" if cf else ""
+
+
 def _watch_html(meta):
     """Watch-list table: every stock that spurted >= watch multiple today, with its latest zone status (read from meta)."""
     wl = meta.get("watch") or []
@@ -704,7 +770,7 @@ def _watch_html(meta):
         status = f"AT {at}" if at else "between zones"
         price = "-" if w.get("price") is None else f"{w['price']:.2f}"
         rows += (f"<tr{_rowstyle(at)}><td>{i}</td><td><b>{w['symbol']}</b></td><td>{w.get('since', '')}</td><td>{w.get('mult', 0):.1f}x</td><td>{price}</td>"
-                 f"<td{_zbg(at, 'SUPPORT')}>{w.get('support') or '-'}</td><td{_zbg(at, 'RESISTANCE')}>{w.get('resistance') or '-'}</td>"
+                 f"<td{_zbg(at, 'SUPPORT')}>{w.get('support') or '-'}{_wconf(w, 'support')}</td><td{_zbg(at, 'RESISTANCE')}>{w.get('resistance') or '-'}{_wconf(w, 'resistance')}</td>"
                  f"<td>{status}</td><td>{'in table' if w.get('in_table') else 'outside table'}</td><td>{'yes' if w.get('alerted') else '-'}</td><td>{w.get('time', '')}</td></tr>")
     return (head + '<div class="w"><table class="sp"><tr><th>#</th><th>Symbol</th><th>Spurt at</th><th>Best spurt</th><th>Price</th>'
             f'<th>Support zone ({ZONE_TF}m)</th><th>Resistance zone ({ZONE_TF}m)</th><th>Status now</th><th>Where</th><th>Alert sent</th><th>Checked</th></tr>{rows}</table></div>')
@@ -737,7 +803,7 @@ th,td{{border:1px solid #ddd;padding:6px 8px;text-align:right;font-size:14px}}th
 .m{{color:#555;font-size:13px;margin:6px 0 12px}}.w{{overflow-x:auto}}</style></head><body>
 <h2>Volume Spurt &mdash; latest 10-min candle vs {meta['sma_len']}-candle volume average (top {len(top)})</h2>
 <div class="m">Run: {meta['run']} (took {meta['took_s']}s) &middot; {meta['universe']} NSE stocks (ETFs left out: {meta.get('etf_excluded', 0)}), {meta['price_ok']} priced &ge; {meta['min_price']:.0f},
-{meta['shortlisted']} shortlisted, {meta['scored']} scored, {meta['failed']} errors &middot; refreshes every 10 min &middot; {LEGEND} &middot; phone alert at {meta.get('alert_mult', 3.0):g}x or more &middot; zones = ALL IN ONE PRO order-block zones on the {ZONE_TF}-min chart (same as the indicator on a {ZONE_TF}-min chart); volume spurt = 10-min candles &middot;
+{meta['shortlisted']} shortlisted, {meta['scored']} scored, {meta['failed']} errors &middot; refreshes every 10 min &middot; {LEGEND} &middot; phone alert at {meta.get('alert_mult', 3.0):g}x or more &middot; zones = ALL IN ONE PRO order-block zones on the {ZONE_TF}-min chart (same as the indicator on a {ZONE_TF}-min chart); purple "{ZONE_TF}m+{CONF_TF}m zone" = the same zone also exists on the {CONF_TF}-min chart (stronger); volume spurt = 10-min candles &middot;
 <a href="/spurt10.csv">CSV</a> (this cycle) &middot; <a href="/spurt10_history">full-day history page</a> &middot; <a href="/spurt10_history.csv">history CSV</a> &middot; <a href="/spurt_sell">Spurt SELL signals</a> &middot; <a href="/scanner">Scanner</a></div>
 <div class="w"><table class="sp"><tr><th>#</th><th>Symbol</th><th>Price</th><th>Day %</th><th>Candle</th><th>Candle %</th>
 <th>Candle volume</th><th>{meta['sma_len']}-candle avg vol</th><th>Multiple</th><th>Day volume</th><th>Support zone ({ZONE_TF}m)</th><th>Resistance zone ({ZONE_TF}m)</th><th>Zone view</th></tr>{body}</table></div>

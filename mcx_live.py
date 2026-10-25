@@ -44,6 +44,7 @@ AUTORUN = os.environ.get("MCX_AUTORUN", "true").strip().lower() == "true"
 SYMBOLS = [s.strip().upper() for s in os.environ.get("MCX_SYMBOLS", "CRUDEOILM,NATURALGASM,GOLDM,SILVERM").split(",") if s.strip()]
 TFS = [t.strip() for t in os.environ.get("MCX_TFS", "15m,1H,4H").split(",") if t.strip() in ("15m", "1H", "4H")] or ["15m"]
 SPURT_TF = os.environ.get("MCX_SPURT_TF", "15m").strip()
+CONF_TF = {"15m": "30m", "30m": "1H"}.get(SPURT_TF, "")      # higher time frame whose zones are compared with the spurt time frame (zone confluence)
 SMA_LEN = int(os.environ.get("MCX_SMA_LEN", "50") or "50")
 ALERT_MULT = float(os.environ.get("MCX_ALERT_MULT", "3.0") or "3.0")
 NTFY_ON = os.environ.get("MCX_NTFY", "true").strip().lower() == "true"
@@ -177,6 +178,21 @@ def _closed(df, minutes, as_of):
     cap = (idx.normalize() + pd.Timedelta(minutes=SESSION_END_UTC_MIN)).to_numpy()
     ends = pd.DatetimeIndex(np.minimum(ends, cap))
     return df[(ends + pd.Timedelta(seconds=BAR_GRACE_S)) <= as_of]
+
+
+def _to_30m(df15):
+    """30-minute candles from closed 15-minute candles (clock aligned: MCX opens on the half hour in UTC). A 30-min candle is kept only
+    when both of its 15-min halves are closed. None when there is not enough data."""
+    try:
+        if df15 is None or df15.empty:
+            return None
+        g = df15.resample("30min")
+        out = g.agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"})
+        out = out[g["close"].count() >= 2].dropna()
+        return out if len(out) >= 30 else None
+    except Exception as e:
+        log.warning(f"MCX 30m candles failed: {e}")
+        return None
 
 
 def _frames(sym, sid):
@@ -431,7 +447,11 @@ def run_once():
             if r:
                 try:
                     _nr, _ag = _buffers(s, zd)
-                    r.update(mcx_watch.zone_fields(mcx_watch.ob_zones(fr.get(SPURT_TF)), r["price"], r.get("candle_chg_pct"), _nr, _ag, SPURT_TF))
+                    _zs = mcx_watch.ob_zones(fr.get(SPURT_TF))
+                    r.update(mcx_watch.zone_fields(_zs, r["price"], r.get("candle_chg_pct"), _nr, _ag, SPURT_TF))
+                    _hf = _to_30m(fr.get("15m")) if CONF_TF == "30m" else (fr.get(CONF_TF) if CONF_TF else None)      # ADDED: same zone on the higher time frame?
+                    if _hf is not None:
+                        r.update(mcx_watch.conf_fields(_zs, mcx_watch.ob_zones(_hf), r["price"]))
                 except Exception as e:
                     log.warning(f"MCX zone fields failed for {s}: {e}")
                 spurt.append(r)
@@ -447,7 +467,7 @@ def run_once():
         log.warning(f"MCX alert step failed: {e}")
     watch = None
     try:
-        watch = mcx_watch.update(spurt, cur_sigs, now, SPURT_TF)
+        watch = mcx_watch.update(spurt, cur_sigs, now, SPURT_TF, CONF_TF)
     except Exception as e:
         log.warning(f"MCX watch step failed: {e}")
     all_sigs = _update_log(cur_sigs, now)
@@ -480,7 +500,7 @@ def run_once():
     all_sigs.sort(key=lambda r: r["bar"], reverse=True)
 
     meta = {"run": now.strftime("%Y-%m-%d %H:%M:%S IST"), "symbols": SYMBOLS, "missing": missing, "scored": len(spurt), "errors": errors,
-            "alert_mult": ALERT_MULT, "sma_len": SMA_LEN, "tfs": TFS, "spurt_tf": SPURT_TF,
+            "alert_mult": ALERT_MULT, "sma_len": SMA_LEN, "tfs": TFS, "spurt_tf": SPURT_TF, "conf_tf": CONF_TF,
             "zones_built": (zd.get("built") or "")[:16].replace("T", " "), "zones_note": zd.get("note", ""),
             "zones_count": len(zones), "zones_universe": zd.get("universe", len(SYMBOLS))}
     os.makedirs(RESULTS_DIR, exist_ok=True)
@@ -534,6 +554,9 @@ def page_html():
             return v
         at = x.get("at_zone") == ("SUPPORT" if kind == "S" else "RESISTANCE")
         extra = "" if dist is None else f' <span style="color:{M}">({dist:.2f}% away)</span>'
+        cfv = x.get("conf_support" if kind == "S" else "conf_resistance")
+        if cfv and m.get("conf_tf"):
+            extra += f"<br><small style='color:#c792ea'><b>{m['spurt_tf']}+{m['conf_tf']} zone</b> ({cfv})</small>"
         return f'<b style="background:{"rgba(63,185,80,.35)" if kind == "S" else "rgba(248,81,73,.35)"};padding:1px 5px;border-radius:3px">{v}</b>{extra}' if at else v + extra
 
     def _zview(x):

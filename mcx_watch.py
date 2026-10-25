@@ -103,6 +103,41 @@ def zone_fields(zs, price, candle_chg, near, against, tf="15m"):
     return out
 
 
+_LABEL = ""        # e.g. "15m+30m", set by update()
+CONF_PCT = 0.3     # two zones count as the same zone when they overlap or are within this % of the price of each other
+
+
+def conf_fields(zs, zs2, price):
+    """CONFLUENCE: the nearest support / resistance of the main zone time frame (zs) is the same zone as a zone of the higher
+    time frame (zs2) when they overlap or are within CONF_PCT % of the price. Returns that higher-time-frame zone range (else "")."""
+    out = {"conf_support": "", "conf_resistance": ""}
+    try:
+        if not zs or not zs2 or not price:
+            return out
+        gap = CONF_PCT / 100.0 * price
+        for kind, key in (("SUPPORT", "conf_support"), ("RESISTANCE", "conf_resistance")):
+            a = [z for z in zs if z["type"] == kind]
+            b = [z for z in zs2 if z["type"] == kind]
+            if not a or not b:
+                continue
+            z1 = max(a, key=lambda z: z["hi"]) if kind == "SUPPORT" else min(a, key=lambda z: z["lo"])
+            best = None
+            for z2 in b:
+                d = max(z2["lo"] - z1["hi"], z1["lo"] - z2["hi"], 0.0)          # 0 = overlapping
+                if d <= gap and (best is None or d < best[0]):
+                    best = (d, z2)
+            if best:
+                out[key] = f"{best[1]['lo']:g}-{best[1]['hi']:g}"
+    except Exception:
+        pass
+    return out
+
+
+def _is_conf(r):
+    at = r.get("at_zone")
+    return bool(at and r.get("conf_support" if at == "SUPPORT" else "conf_resistance"))
+
+
 # ----------------------------------------------------------------------------------------------- state
 def _save():
     try:
@@ -146,10 +181,12 @@ def _ntfy(title, lines, tags):
 
 
 # ----------------------------------------------------------------------------------------------- one cycle
-def update(spurt, cur_sigs, now_ist, tf="15m"):
+def update(spurt, cur_sigs, now_ist, tf="15m", conf_tf=""):
     """spurt = this cycle's scored commodity rows (already carrying the zone fields); cur_sigs = this cycle's Section A/B/RSI signals.
     Returns the dict the page draws. Never raises into the caller (mcx_live catches errors anyway)."""
     day = now_ist.strftime("%Y-%m-%d")
+    global _LABEL
+    _LABEL = f"{tf}+{conf_tf}" if conf_tf else ""
     hhmm = now_ist.strftime("%H:%M")
     late = now_ist.hour * 60 + now_ist.minute > UNTIL_MIN       # after MCX_WATCH_UNTIL: tables keep updating, no more phone alerts
     _roll(day)
@@ -167,11 +204,13 @@ def update(spurt, cur_sigs, now_ist, tf="15m"):
         r = by_sym.get(sym)
         if r is not None:
             w["last"] = {"price": r["price"], "support": r.get("support", ""), "resistance": r.get("resistance", ""),
-                         "at_zone": r.get("at_zone", ""), "time": hhmm}
+                         "at_zone": r.get("at_zone", ""), "time": hhmm,
+                         "conf_support": r.get("conf_support", ""), "conf_resistance": r.get("conf_resistance", "")}
         last = w.get("last") or {}
         watch.append({"symbol": sym, "since": w["at"], "mult": w["mult"], "price": last.get("price"), "support": last.get("support", ""),
                       "resistance": last.get("resistance", ""), "at_zone": last.get("at_zone", ""), "time": last.get("time", ""),
-                      "alerted": any(k[0] == sym for k in _st["zone_done"])})
+                      "alerted": any(k[0] == sym for k in _st["zone_done"]),
+                      "conf_support": last.get("conf_support", ""), "conf_resistance": last.get("conf_resistance", "")})
     watch.sort(key=lambda x: (0 if x["at_zone"] else 1, -x["mult"]))
 
     # 2 phone alert: watched commodity AT a zone (once per commodity + zone per day)
@@ -191,9 +230,10 @@ def update(spurt, cur_sigs, now_ist, tf="15m"):
                 zone = w["support"] if w["at_zone"] == "SUPPORT" else w["resistance"]
                 lines.append(f"{w['at_zone']}  {w['symbol']}  {w['price']:g}  zone {zone}  spurt {w['mult']:.1f}x"
                              + (f"  candle {chg:+.2f}%" if chg is not None else "")
-                             + (f"  [{r['zone_view']}]" if r.get("zone_view") in ("ALIGNED", "AGAINST") else ""))
+                             + (f"  [{r['zone_view']}]" if r.get("zone_view") in ("ALIGNED", "AGAINST") else "")
+                             + ("  [" + _LABEL + " zone]" if (_LABEL and _is_conf(w)) else ""))
             kinds = " / ".join(sorted({w["at_zone"].lower() for w, _k in hits}))
-            _ntfy(f"MCX spurt commodity at {kinds} ({len(hits)})", lines, "bell")
+            _ntfy(f"MCX spurt commodity at {kinds} ({len(hits)})" + (f" - {sum(1 for w2, _k2 in hits if _is_conf(w2))} with " + _LABEL + " zone" if (_LABEL and any(_is_conf(w2) for w2, _k2 in hits)) else ""), lines, "bell")
             for _w, k in hits:
                 _st["zone_done"].append(k)
             _st["zone_n"] += 1
@@ -219,7 +259,7 @@ def update(spurt, cur_sigs, now_ist, tf="15m"):
             _ntfy("MCX OB signal on spurt commodity: " + ", ".join(sorted({n["signal"] for n in new})) + f" ({len(new)})", lines, "zap")
             _st["link_n"] += 1
     _save()
-    return {"day": day, "watch": watch, "links": list(_st["links"]), "watch_mult": WATCH_MULT, "tf": tf, "until": f"{UNTIL_MIN // 60:02d}:{UNTIL_MIN % 60:02d}"}
+    return {"day": day, "watch": watch, "links": list(_st["links"]), "watch_mult": WATCH_MULT, "tf": tf, "conf_label": _LABEL, "until": f"{UNTIL_MIN // 60:02d}:{UNTIL_MIN % 60:02d}"}
 
 
 # ----------------------------------------------------------------------------------------------- page block
@@ -247,6 +287,12 @@ def html(w):
             b += tr + tds + "</tr>"
         return '<div style="overflow-x:auto"><table><tr>' + h + "</tr>" + b + "</table></div>"
 
+    lab = w.get("conf_label", "")
+
+    def cf(x, k):
+        v = x.get("conf_" + k)
+        return ("<br><small style='color:#c792ea'><b>" + lab + " zone</b> (" + str(v) + ")</small>") if (v and lab) else ""
+
     out = []
     links = w.get("links") or []
     out.append(f'<h2>OB mitigation signals on spurt commodities ({len(links)}) &middot; Section A {tf}</h2>'
@@ -264,15 +310,15 @@ def html(w):
     at_now = sum(1 for x in wl if x.get("at_zone"))
     out.append(f'<h2>Watch list &mdash; {len(wl)} spurt commodity(ies) waiting for a support / resistance zone{(" &middot; " + str(at_now) + " at a zone now") if wl else ""}</h2>'
                f'<div class="m">A commodity joins when it reaches {w.get("watch_mult", 3):g}x or more and stays for the rest of the trading day. '
-               f'A phone alert is sent the first time it is at a zone (until {until} IST). Zones = ALL IN ONE PRO order blocks on the {tf} chart. Updated every 15 min.</div>')
+               f'A phone alert is sent the first time it is at a zone (until {until} IST). Zones = ALL IN ONE PRO order blocks on the {tf} chart; a purple tag = the same zone also exists on the higher time frame (stronger). Updated every 15 min.</div>')
     if wl:
         rows = []
         for i, x in enumerate(wl, 1):
             at = x.get("at_zone", "")
             rows.append((SUP if at == "SUPPORT" else RES if at == "RESISTANCE" else "",
                          [i, f"<b>{x['symbol']}</b>", x.get("since", ""), f"{x['mult']:.1f}x", "-" if x.get("price") is None else f"{x['price']:g}",
-                          (x.get("support") or "-", SUPC) if at == "SUPPORT" else (x.get("support") or "-"),
-                          (x.get("resistance") or "-", RESC) if at == "RESISTANCE" else (x.get("resistance") or "-"),
+                          ((x.get("support") or "-") + cf(x, "support"), SUPC) if at == "SUPPORT" else ((x.get("support") or "-") + cf(x, "support")),
+                          ((x.get("resistance") or "-") + cf(x, "resistance"), RESC) if at == "RESISTANCE" else ((x.get("resistance") or "-") + cf(x, "resistance")),
                           f"AT {at}" if at else "between zones", "yes" if x.get("alerted") else "-", x.get("time", "")]))
         out.append(tbl(["#", "Symbol", "Spurt at", "Best spurt", "Price", f"Support zone ({tf})", f"Resistance zone ({tf})", "Status now", "Alert sent", "Checked"], rows))
     else:
