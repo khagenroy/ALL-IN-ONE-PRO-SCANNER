@@ -26,6 +26,12 @@ ENV (all optional)
   SPURT10_ALERT_MULT=3.0    phone alert (ntfy) when a stock's latest 10-min candle volume is >= this many times the 50-candle average
   SPURT10_NTFY=true         switch the phone alert on/off (uses the same NTFY_TOPIC as the other scanner alerts)
   SPURT10_NTFY_MAX_PER_DAY=40   safety cap on phone notifications per day
+  SPURT10_ZONE_TF=15        time frame (minutes: 10, 15, 30...) of the support / resistance zones, the zone columns and the zone alert
+  SPURT10_WATCH_MULT=20     a stock that reaches this spurt multiple in the top-30 is WATCHED for the rest of the day (until SPURT10_WATCH_UNTIL),
+                            even after it leaves the top-30, and you are alerted when it reaches a support / resistance zone
+  SPURT10_WATCH_UNTIL=15:00 stop zone alerts after this IST time        SPURT10_WATCH_MAX=100  most stocks watched at once
+  SPURT10_ZONE_ALERT=true   phone alert when a stock in the top-30 spurt table reaches a support / resistance zone (same NTFY_TOPIC)
+  SPURT10_ZONE_ALERT_MAX=40 safety cap on zone notifications per day
 """
 
 import os
@@ -56,6 +62,22 @@ WORKERS = int(os.environ.get("SPURT10_WORKERS", "4") or "4")
 ALERT_MULT = float(os.environ.get("SPURT10_ALERT_MULT", "3.0") or "3.0")
 NTFY_ON = os.environ.get("SPURT10_NTFY", "true").strip().lower() == "true"
 NTFY_MAX_PER_DAY = int(os.environ.get("SPURT10_NTFY_MAX_PER_DAY", "40") or "40")
+ZONE_TF = max(5, int(os.environ.get("SPURT10_ZONE_TF", "15") or "15") // 5 * 5)     # zone candles, minutes (multiple of 5)
+WATCH_MULT = float(os.environ.get("SPURT10_WATCH_MULT", "20") or "20")
+WATCH_MAX = int(os.environ.get("SPURT10_WATCH_MAX", "100") or "100")
+
+
+def _hhmm(txt, default):
+    try:
+        h, m = str(txt).strip().split(":")
+        return int(h) * 60 + int(m)
+    except Exception:
+        return default
+
+
+WATCH_UNTIL_MIN = _hhmm(os.environ.get("SPURT10_WATCH_UNTIL", "15:00"), 15 * 60)
+ZONE_ALERT_ON = os.environ.get("SPURT10_ZONE_ALERT", "true").strip().lower() == "true"
+ZONE_ALERT_MAX = int(os.environ.get("SPURT10_ZONE_ALERT_MAX", "40") or "40")
 HISTORY_DAYS = 8            # calendar days of 5-min candles: 50 ten-minute candles need ~3 sessions
 
 RESULTS_DIR = os.path.join(os.path.dirname(__file__), "results")
@@ -204,8 +226,17 @@ def _score_symbol(sym, sid):
     today_mask = day == day[-1]
     prev_close = df["close"][~today_mask].iloc[-1] if (~today_mask).any() else np.nan
     close = float(last["close"])
+    zdf = df                                                          # candles the support / resistance zones are built on
+    if ZONE_TF != 10:
+        try:
+            zdf15 = ls.drop_forming_bars(ls.build_merged_bars(df5, ZONE_TF // 5), ZONE_TF, as_of)
+            if zdf15 is not None and len(zdf15) >= 30:
+                zdf = zdf15
+        except Exception as e:
+            log.warning(f"Spurt10 {ZONE_TF}m zone candles failed for {sym}, using 10m: {e}")
     return {
-        "_zones": _secA_zones(df),
+        "_zones": _secA_zones(zdf),
+        "_zone_tf": (ZONE_TF if zdf is not df else 10),
         "_sell": _sell_check(df, sym, round((close / prev_close - 1) * 100, 2) if prev_close == prev_close else None),   # ADDED: spurt -> red candle SELL rule (spurt_sell_live.py)
         "symbol": sym,
         "price": round(close, 2),
@@ -283,6 +314,132 @@ def _send_alerts(rows, now_ist):
     log.info(f"Spurt10 alert sent for {len(hits)} stock(s) at >= {ALERT_MULT:g}x")
 
 
+_zone_alerted = {"date": None, "keys": set(), "count": 0}
+_watch = {"date": None, "syms": {}}
+
+
+def _watch_view():
+    """Rows for the watch-list table on the /spurt10 page (latest known status of every watched stock)."""
+    out = []
+    for sym, w in _watch["syms"].items():
+        last = w.get("last") or {}
+        at = last.get("at_zone", "")
+        alerted = any(k[0] == sym for k in _zone_alerted["keys"])
+        out.append({"symbol": sym, "since": w.get("since", ""), "mult": w.get("mult", 0), "price": last.get("price"),
+                    "support": last.get("support", ""), "resistance": last.get("resistance", ""), "at_zone": at,
+                    "in_table": last.get("in_table", False), "time": last.get("time", ""), "alerted": alerted})
+    out.sort(key=lambda x: (0 if x["at_zone"] else 1, -x["mult"]))
+    return out
+
+
+def _watch_rows(top, now_ist, sid_of):
+    """ADDED: every stock that spurted (>= WATCH_MULT in the top-30) stays on a watch list for the day, even after it drops out of
+    the top-30 table. Each cycle the stocks that are no longer in the table get their 5-min candles downloaded (merged to the zone
+    time frame) so their zones can still be checked against the live price. Read-only; returns rows for _send_zone_alerts."""
+    if not ZONE_ALERT_ON:
+        return []
+    today = now_ist.strftime("%Y-%m-%d")
+    if _watch["date"] != today:
+        _watch.update(date=today, syms={})
+    if now_ist.hour * 60 + now_ist.minute > WATCH_UNTIL_MIN:
+        return []
+    syms = _watch["syms"]
+    for r in top:
+        if r["multiple"] >= WATCH_MULT:
+            cur = syms.get(r["symbol"])
+            if cur is None and len(syms) < WATCH_MAX:
+                syms[r["symbol"]] = {"since": r["candle"], "mult": r["multiple"]}
+            elif cur is not None and r["multiple"] > cur["mult"]:
+                cur["mult"] = r["multiple"]
+    in_top = {r["symbol"] for r in top}
+    for r in top:                                                    # remember the latest zone status of watched stocks that are in the table
+        if r["symbol"] in syms:
+            syms[r["symbol"]]["last"] = {"price": r["price"], "support": r.get("support", ""), "resistance": r.get("resistance", ""),
+                                         "at_zone": r.get("at_zone", ""), "in_table": True,
+                                         "time": now_ist.strftime("%H:%M")}
+    todo = [x for x in syms if x not in in_top and x in sid_of]
+    if not todo:
+        return []
+    as_of = pd.Timestamp(datetime.now(timezone.utc).replace(tzinfo=None))
+
+    def one(sym):
+        try:
+            df5 = ls.fetch_intraday_history(sid_of[sym], "NSE_EQ", 5, HISTORY_DAYS)
+            d5 = ls.drop_forming_bars(df5, 5, as_of)
+            zdf = ls.drop_forming_bars(ls.build_merged_bars(df5, ZONE_TF // 5), ZONE_TF, as_of)
+            if zdf is None or len(zdf) < 30 or d5 is None or len(d5) == 0:
+                return None
+            price = float(d5["close"].iloc[-1])
+            f = _zone_fields(_secA_zones(zdf), price, None)
+            f.update(symbol=sym, price=round(price, 2), multiple=syms[sym]["mult"], candle_chg_pct=None,
+                     note=f"spurt {syms[sym]['since']}")
+            syms[sym]["last"] = {"price": round(price, 2), "support": f.get("support", ""), "resistance": f.get("resistance", ""),
+                                 "at_zone": f.get("at_zone", ""), "in_table": False, "time": now_ist.strftime("%H:%M")}
+            return f
+        except Exception as e:
+            log.warning(f"Spurt10 watch check failed for {sym}: {e}")
+            return None
+    out = []
+    with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+        for f in ex.map(one, todo):
+            if f:
+                out.append(f)
+    log.info(f"Spurt10 watch list: {len(syms)} stock(s), {len(todo)} checked outside the table")
+    return out
+
+
+def _send_zone_alerts(top, now_ist):
+    """ADDED: one phone notification per cycle for every stock of the top-30 spurt table that is AT a support or resistance zone
+    (the same cells that are highlighted on the page). A stock is announced once per day per zone (it is announced again only if
+    its zone changes). Read-only - it only sends a notification and does not touch the spurt ranking or any signal."""
+    topic = os.environ.get("NTFY_TOPIC", "").strip()
+    if not (ZONE_ALERT_ON and topic):
+        return
+    today = now_ist.strftime("%Y-%m-%d")
+    if _zone_alerted["date"] != today:
+        _zone_alerted.update(date=today, keys=set(), count=0)
+    if _zone_alerted["count"] >= ZONE_ALERT_MAX:
+        return
+    if now_ist.hour * 60 + now_ist.minute > WATCH_UNTIL_MIN:        # tracking stops at 15:00 (SPURT10_WATCH_UNTIL)
+        return
+    hits = []
+    for r in top:
+        at = r.get("at_zone")
+        if at not in ("SUPPORT", "RESISTANCE"):
+            continue
+        zone = r.get("support") if at == "SUPPORT" else r.get("resistance")
+        key = (r["symbol"], at, zone)
+        if key in _zone_alerted["keys"]:
+            continue
+        hits.append((r, at, zone, key))
+    if not hits:
+        return
+    hits.sort(key=lambda h: -h[0]["multiple"])
+    lines = []
+    for r, at, zone, _k in hits[:12]:
+        chg = r.get("candle_chg_pct")
+        lines.append(f"{'RESISTANCE' if at == 'RESISTANCE' else 'SUPPORT'}  {r['symbol']}  Rs {r['price']:.2f}  zone {zone}  spurt {r['multiple']:.1f}x"
+                     + (f"  candle {chg:+.2f}%" if chg is not None else "") + (f"  ({r['note']})" if r.get("note") else "")
+                     + (f"  [{r['zone_view']}]" if r.get("zone_view") in ("ALIGNED", "AGAINST") else ""))
+    extra = f"\n+{len(hits) - 12} more on the scanner page" if len(hits) > 12 else ""
+    kinds = {h[1] for h in hits}
+    title = "Spurt stock at " + (" / ".join(sorted(k.lower() for k in kinds))) + f" ({len(hits)})"
+    try:
+        import requests
+        resp = requests.post(f"https://ntfy.sh/{topic}", data=("\n".join(lines) + extra).encode("utf-8"), timeout=8,
+                             headers={"Title": title, "Priority": "high", "Tags": "bell"})
+        if resp.status_code >= 300:
+            log.warning(f"Spurt10 zone ntfy refused: {resp.status_code} {resp.text[:150]}")
+            return
+    except Exception as e:
+        log.warning(f"Spurt10 zone ntfy failed: {e}")
+        return
+    for _r, _a, _z, k in hits:
+        _zone_alerted["keys"].add(k)
+    _zone_alerted["count"] += 1
+    log.info(f"Spurt10 zone alert sent for {len(hits)} stock(s)")
+
+
 # ---------------------------------------------------------------- run + output
 def run_once():
     t0 = time.monotonic()
@@ -312,12 +469,32 @@ def run_once():
         if sg:
             sell_hits.append(sg)
         zs = r.pop("_zones", None)
+        ztf = r.pop("_zone_tf", 10)
         if id(r) in top_ids:
             r.update(_zone_fields(zs, r["price"], r.get("candle_chg_pct")))
+            if r.get("zone_src"):
+                r["zone_src"] = f"Section A {ztf}m"
     try:
         _send_alerts(rows, now_ist)
     except Exception as e:
         log.warning(f"Spurt10 alert step failed: {e}")
+    watch_view = []
+    try:                                                            # ADDED: phone alert when a top-30 spurt stock is at a support / resistance zone
+        try:
+            wrows = _watch_rows(top, now_ist, sid_of)
+        except Exception as e:
+            log.warning(f"Spurt10 watch step failed: {e}")
+            wrows = []
+        _send_zone_alerts(top + wrows, now_ist)
+        watch_view = _watch_view()
+    except Exception as e:
+        log.warning(f"Spurt10 zone alert step failed: {e}")
+    try:                                                            # ADDED: link Section A OB_BUY / OB_SELL signals with spurt stocks (spurt_link.py)
+        import spurt_link
+        spurt_link.note_spurts(top, now_ist)
+        spurt_link.process(now_ist)
+    except Exception as e:
+        log.warning(f"Spurt link step failed: {e}")
     try:                                                            # ADDED: spurt -> red candle SELL signals (own page, own ntfy topic)
         import spurt_sell_live
         spurt_sell_live.process(sell_hits, now_ist)
@@ -332,6 +509,7 @@ def run_once():
         "run": now_ist.strftime("%Y-%m-%d %H:%M:%S IST"), "took_s": round(time.monotonic() - t0),
         "universe": len(uni), "quoted": len(quotes), "price_ok": n_pass, "shortlisted": len(names),
         "scored": len(rows), "failed": failed, "etf_excluded": len(_excluded), "min_price": MIN_PRICE, "sma_len": SMA_LEN, "alert_mult": ALERT_MULT,
+        "watch": watch_view, "watch_until": f"{WATCH_UNTIL_MIN // 60:02d}:{WATCH_UNTIL_MIN % 60:02d}", "watch_mult": WATCH_MULT,
     }
     _write(top, meta)
     _append_history(top, now_ist)      # top 30 of the cycle only
@@ -503,6 +681,35 @@ rows.forEach(function(r){b.appendChild(r);});});});});
 </script>"""
 
 
+def _link_html():
+    try:
+        import spurt_link
+        return spurt_link.section_html()
+    except Exception:
+        return ""
+
+
+def _watch_html(meta):
+    """Watch-list table: every stock that spurted >= watch multiple today, with its latest zone status (read from meta)."""
+    wl = meta.get("watch") or []
+    until = meta.get("watch_until", "15:00")
+    head = (f'<h3 style="margin:22px 0 4px">Watch list &mdash; {len(wl)} spurt stock(s) tracked for support / resistance until {until} IST</h3>'
+            f'<div class="m">A stock joins when it reaches {meta.get("watch_mult", 20):g}x or more in the top-30 and stays all day, even after it leaves the table. '
+            f'You get a phone alert the first time it is at a zone. Red/green row = at a zone now. Updated every 10 min.</div>')
+    if not wl:
+        return head + '<div class="m">Nothing on the watch list yet.</div>'
+    rows = ""
+    for i, w in enumerate(wl, 1):
+        at = w.get("at_zone", "")
+        status = f"AT {at}" if at else "between zones"
+        price = "-" if w.get("price") is None else f"{w['price']:.2f}"
+        rows += (f"<tr{_rowstyle(at)}><td>{i}</td><td><b>{w['symbol']}</b></td><td>{w.get('since', '')}</td><td>{w.get('mult', 0):.1f}x</td><td>{price}</td>"
+                 f"<td{_zbg(at, 'SUPPORT')}>{w.get('support') or '-'}</td><td{_zbg(at, 'RESISTANCE')}>{w.get('resistance') or '-'}</td>"
+                 f"<td>{status}</td><td>{'in table' if w.get('in_table') else 'outside table'}</td><td>{'yes' if w.get('alerted') else '-'}</td><td>{w.get('time', '')}</td></tr>")
+    return (head + '<div class="w"><table class="sp"><tr><th>#</th><th>Symbol</th><th>Spurt at</th><th>Best spurt</th><th>Price</th>'
+            f'<th>Support zone ({ZONE_TF}m)</th><th>Resistance zone ({ZONE_TF}m)</th><th>Status now</th><th>Where</th><th>Alert sent</th><th>Checked</th></tr>{rows}</table></div>')
+
+
 def _html(top, meta):
     def col(v):
         return "#0a7d33" if (v or 0) > 0 else "#c62828" if (v or 0) < 0 else "#555"
@@ -530,10 +737,12 @@ th,td{{border:1px solid #ddd;padding:6px 8px;text-align:right;font-size:14px}}th
 .m{{color:#555;font-size:13px;margin:6px 0 12px}}.w{{overflow-x:auto}}</style></head><body>
 <h2>Volume Spurt &mdash; latest 10-min candle vs {meta['sma_len']}-candle volume average (top {len(top)})</h2>
 <div class="m">Run: {meta['run']} (took {meta['took_s']}s) &middot; {meta['universe']} NSE stocks (ETFs left out: {meta.get('etf_excluded', 0)}), {meta['price_ok']} priced &ge; {meta['min_price']:.0f},
-{meta['shortlisted']} shortlisted, {meta['scored']} scored, {meta['failed']} errors &middot; refreshes every 10 min &middot; {LEGEND} &middot; phone alert at {meta.get('alert_mult', 3.0):g}x or more &middot; zones = ALL IN ONE PRO order-block zones on the 10-min chart (same as the indicator on a 10-min chart) &middot;
+{meta['shortlisted']} shortlisted, {meta['scored']} scored, {meta['failed']} errors &middot; refreshes every 10 min &middot; {LEGEND} &middot; phone alert at {meta.get('alert_mult', 3.0):g}x or more &middot; zones = ALL IN ONE PRO order-block zones on the {ZONE_TF}-min chart (same as the indicator on a {ZONE_TF}-min chart); volume spurt = 10-min candles &middot;
 <a href="/spurt10.csv">CSV</a> (this cycle) &middot; <a href="/spurt10_history">full-day history page</a> &middot; <a href="/spurt10_history.csv">history CSV</a> &middot; <a href="/spurt_sell">Spurt SELL signals</a> &middot; <a href="/scanner">Scanner</a></div>
 <div class="w"><table class="sp"><tr><th>#</th><th>Symbol</th><th>Price</th><th>Day %</th><th>Candle</th><th>Candle %</th>
-<th>Candle volume</th><th>{meta['sma_len']}-candle avg vol</th><th>Multiple</th><th>Day volume</th><th>Support zone (10m)</th><th>Resistance zone (10m)</th><th>Zone view</th></tr>{body}</table></div>
+<th>Candle volume</th><th>{meta['sma_len']}-candle avg vol</th><th>Multiple</th><th>Day volume</th><th>Support zone ({ZONE_TF}m)</th><th>Resistance zone ({ZONE_TF}m)</th><th>Zone view</th></tr>{body}</table></div>
+{_watch_html(meta)}
+{_link_html()}
 {_SORT_JS}</body></html>"""
 
 
@@ -582,10 +791,24 @@ th,td{{border:1px solid #ddd;padding:5px 8px;text-align:right;font-size:14px}}th
 <h3>Stocks of the day (how many cycles each was in the top 30) &mdash; click any heading to sort</h3>
 <table class="sp"><tr><th>Stock</th><th>Times in top 30</th><th>Times at a zone</th><th>First</th><th>Last</th><th>Best multiple</th><th>Last price</th><th>Day %</th></tr>{srows}</table>
 <h3>Every cycle (newest first) &mdash; click any heading to sort</h3>
-<table class="sp"><tr><th>Candle</th><th>Symbol</th><th>Price</th><th>Day %</th><th>Candle %</th><th>Candle vol</th><th>50-candle avg</th><th>Multiple</th><th>Day volume</th><th>Support zone (10m)</th><th>Resistance zone (10m)</th><th>Zone view</th></tr>{rows}</table>
+<table class="sp"><tr><th>Candle</th><th>Symbol</th><th>Price</th><th>Day %</th><th>Candle %</th><th>Candle vol</th><th>50-candle avg</th><th>Multiple</th><th>Day volume</th><th>Support zone ({ZONE_TF}m)</th><th>Resistance zone ({ZONE_TF}m)</th><th>Zone view</th></tr>{rows}</table>
 {_SORT_JS}</body></html>"""
     except Exception as e:
         return f"<p>History page error: {_h.escape(str(e))}</p>"
+
+
+_SECTION_CSS = """<style>
+.spwrap{background:#fafafa;color:#222;border-radius:10px;padding:12px;margin:0 0 28px}
+.spwrap h2,.spwrap h3{color:#111}
+.spwrap table{border-collapse:collapse;width:100%;background:#fff;margin-bottom:8px}
+.spwrap th,.spwrap td{border:1px solid #ddd;padding:6px 8px;text-align:right;font-size:14px;color:#222}
+.spwrap th{background:#222;color:#fff}
+.spwrap td:nth-child(2){text-align:left}
+.spwrap tr:hover{background:#eef3ff}
+.spwrap .m{color:#555;font-size:13px;margin:6px 0 12px}
+.spwrap .w{overflow-x:auto}
+.spwrap a{color:#0645ad}
+</style>"""
 
 
 def section_html():
@@ -596,7 +819,7 @@ def section_html():
         full = _html(d["rows"], d["meta"])
         a = full.index("<h2>")
         b = full.index("</body>")
-        return '<div style="margin-top:28px">' + full[a:b] + "</div>"
+        return _SECTION_CSS + '<div class="spwrap">' + full[a:b] + "</div>"
     except Exception:
         return ""
 

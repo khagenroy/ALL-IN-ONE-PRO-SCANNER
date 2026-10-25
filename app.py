@@ -68,6 +68,12 @@ def _intraday_loop():
                         section_a_bot.run(_sig_a)
                     except Exception as e:
                         log.error(f"Section A bot error: {e}")
+                    # ADDED: link the Section A OB_BUY / OB_SELL signals with volume-spurt stocks (read-only, spurt_link.py)
+                    try:
+                        import spurt_link
+                        spurt_link.process(datetime.now(IST))
+                    except Exception as e:
+                        log.error(f"Spurt link error: {e}")
                 except Exception as e:
                     log.error(f"Error during intraday scan: {e}")
                 # fixed-rate: next scan is due POLL_INTERVAL after this one STARTED
@@ -510,9 +516,14 @@ def _scanner_page():
                 '<h2>Scanner</h2><p>No intraday scan has run yet today - Section A / B / RSI Flush tables fill in at the next market-hours scan.</p>'
                 '</body></html>')
     extra = ""
-    # Page order (Khagen 2026-10-09): 1 opening range, 2 signals vs OI zones, 3 OI zones, then 4 Section A, 5 RSI Flush, 6 Section B.
-    # Volume spurt has its own page (/spurt10) and is no longer repeated here.
-    for flag, mod in ((ORB_AUTORUN, "orb_live"), (OIZONES_AUTORUN, "oi_zones_live")):
+    # Page order (Khagen 2026-10-25): 0 volume spurt (top-30, watch list, OB signals on spurt stocks), 1 opening range,
+    # 2 signals vs OI zones, 3 OI zones, then 4 Section A, 5 RSI Flush, 6 Section B. (/spurt10 still has its own page too.)
+    try:
+        import spurt10_live as _sp10
+        _spurt_on = bool(_sp10.AUTORUN)
+    except Exception:
+        _spurt_on = False
+    for flag, mod in ((_spurt_on, "spurt10_live"), (ORB_AUTORUN, "orb_live"), (OIZONES_AUTORUN, "oi_zones_live")):
         if not flag:
             continue
         try:
