@@ -67,13 +67,204 @@ SKIP_OPEN = os.environ.get("SPURT_SELL_SKIP_OPEN", "false").strip().lower() == "
 RESULTS_DIR = os.path.join(os.path.dirname(__file__), "results")
 HIST_PATH = os.path.join(RESULTS_DIR, "spurt_sell_history.csv")
 COLS = ["date", "run", "candle", "symbol", "entry", "sl", "t1", "t2", "risk_pct", "spurt_candle", "spurt_mult",
-        "candles_after_spurt", "red_vol_vs_prev", "day_chg_pct", "res_zone", "rsi_peak", "htf_zone", "score"]
+        "candles_after_spurt", "red_vol_vs_prev", "day_chg_pct", "res_zone", "rsi_peak", "htf_zone", "score", "sig_ohlc"]
 
 _seen = {"date": None, "keys": set(), "count": 0}
 
 
 def _ist(ts):
     return pd.Timestamp(ts) + pd.Timedelta(minutes=330)
+
+
+# ---------------------------------------------------------------- candle drawing (setup candles on the page)
+def _candle_svg(o, h, l, c, ref=None):
+    """Small Japanese candle (body + wick) with its O/H/L/C written beside it."""
+    try:
+        o, h, l, c = float(o), float(h), float(l), float(c)
+    except Exception:
+        return "-"
+    if not all(v == v for v in (o, h, l, c)):
+        return "-"
+    col = "#089981" if c > o else "#F23645" if c < o else "#888"
+    rng = (h - l) or 1e-9
+    # real size: a candle whose high-low range is 3x the stock's usual candle range (or more) fills the whole box; a normal one is about a third of it
+    try:
+        frac = min(1.0, max(0.12, (h - l) / (3.0 * float(ref)))) if ref and float(ref) > 0 else 1.0
+    except Exception:
+        frac = 1.0
+    hh = 32.0 * frac
+    y0 = 2 + (32.0 - hh) / 2                                  # centred vertically
+    y = lambda v: y0 + (h - v) / rng * hh
+    top, bot = min(y(o), y(c)), max(y(o), y(c))
+    fm = (lambda v: f"{v:.2f}") if h >= 1 else (lambda v: f"{v:.5f}")
+    svg = (f'<svg width="22" height="40" viewBox="0 0 22 36" preserveAspectRatio="none" style="vertical-align:middle">'
+           f'<line x1="11" y1="{y(h):.1f}" x2="11" y2="{y(l):.1f}" stroke="{col}" stroke-width="2"/>'
+           f'<rect x="5" y="{top:.1f}" width="12" height="{max(bot - top, 2):.1f}" fill="{col}" stroke="{col}"/></svg>')
+    return f'<span title="O {fm(o)}  H {fm(h)}  L {fm(l)}  C {fm(c)}" style="white-space:nowrap">{svg}</span>'
+
+
+def _pack(o, h, l, c, i, avg_n=50):
+    """'open|high|low|close|usual range' of candle i, stored in the history CSV so the page can draw it later."""
+    rngs = (h[max(i - avg_n, 0):i] - l[max(i - avg_n, 0):i])
+    ref = float(rngs.mean()) if len(rngs) else 0.0
+    return f"{o[i]:.4f}|{h[i]:.4f}|{l[i]:.4f}|{c[i]:.4f}|{ref:.4f}"
+
+
+def _draw(txt):
+    try:
+        p = [float(x) for x in str(txt).split("|")]
+        return _candle_svg(p[0], p[1], p[2], p[3])
+    except Exception:
+        return "-"
+
+
+# ---------------------------------------------------------------- spurt tracker (every spurt stock of the day, not only the ones with a signal)
+TRACK_MULT = _f("SPURT_SELL_TRACK_MULT", 10)                      # a stock is tracked once any candle today has volume >= this x its average
+TRACK_PATH = os.path.join(RESULTS_DIR, "spurt_track.json")
+
+
+def track(df, sym, day_chg=None, price=None):
+    """Summary of today's latest volume spurt (>= TRACK_MULT x) of one stock and what the candles after it did. None when no spurt today. Never raises."""
+    if not ENABLED:
+        return None
+    try:
+        n = len(df)
+        if n < AVG_LEN + 2:
+            return None
+        o = df["open"].to_numpy(dtype=float)
+        h = df["high"].to_numpy(dtype=float)
+        l = df["low"].to_numpy(dtype=float)
+        c = df["close"].to_numpy(dtype=float)
+        v = df["volume"].to_numpy(dtype=float)
+        L = n - 1
+        ist = [_ist(t) for t in df.index]
+        today = ist[L].date()
+        avg = pd.Series(v).rolling(AVG_LEN).mean().shift(1).to_numpy()
+        with np.errstate(divide="ignore", invalid="ignore"):
+            mult = np.where(avg > 0, v / avg, 0.0)
+        idx = [i for i in range(AVG_LEN, n) if ist[i].date() == today and mult[i] >= TRACK_MULT
+               and not (SKIP_OPEN and ist[i].hour == 9 and ist[i].minute == 15)]
+        if not idx:
+            return None
+        j = idx[-1]                                                    # latest spurt of the day
+        best = float(max(mult[i] for i in idx))
+        colour = lambda i: "GREEN" if c[i] > o[i] else "RED" if c[i] < o[i] else "DOJI"
+        red_solid_vol = False
+        for i in range(j + 1, L + 1):
+            rng = h[i] - l[i]
+            if c[i] < o[i] and rng > 0 and (o[i] - c[i]) / rng * 100.0 >= BODY_PCT and v[i] > v[i - 1]:
+                red_solid_vol = True
+        res_zone = htf_zone = None                                    # zone checks only while the sell window is open (they are slow); older rows keep their last value
+        if colour(j) == "GREEN" and L - j <= WAIT:
+            try:
+                import spurt_zones
+                res_zone = spurt_zones.resistance_touch(df, j, L, ZONE_NEAR_PCT) or ""
+            except Exception:
+                res_zone = None
+            htf_zone = _htf_touch(df, j, L, ZONE_NEAR_PCT)
+        return {
+            "res_zone": res_zone, "htf_zone": htf_zone,
+            "symbol": sym, "price": round(float(c[L]), 2), "day_chg_pct": day_chg,
+            "spurt_at": ist[j].strftime("%H:%M"), "spurt_mult": round(float(mult[j]), 1), "best_mult": round(best, 1),
+            "spurt_colour": colour(j), "since": int(L - j),
+            "first_after": colour(j + 1) if j + 1 <= L else "-",
+            "latest_candle": ist[L].strftime("%H:%M"), "latest_colour": colour(L),
+            "ohlc": f"{o[L]:.4f}|{h[L]:.4f}|{l[L]:.4f}|{c[L]:.4f}",
+            "red_solid_vol": bool(red_solid_vol),
+            "rsi_peak": round(float(np.nanmax(_rsi(c, RSI_LEN)[j:L + 1])), 1),
+        }
+    except Exception:
+        return None
+
+
+def update_tracker(items, now_ist):
+    """Called every volume-spurt cycle with the track() result of each scored stock. Keeps every stock that spurted today (stocks not scored
+    in a later cycle keep their last known row, marked with their last-seen time). Saved to results/spurt_track.json. Never raises."""
+    try:
+        import json
+        today = now_ist.strftime("%Y-%m-%d")
+        data = {"date": today, "rows": {}}
+        try:
+            with open(TRACK_PATH) as fh:
+                old = json.load(fh)
+            if old.get("date") == today:
+                data = old
+        except Exception:
+            pass
+        stamp = now_ist.strftime("%H:%M")
+        for it in items:
+            if it:
+                it["seen"] = stamp
+                prev = data["rows"].get(it["symbol"])
+                if prev and prev.get("spurt_at") == it.get("spurt_at"):      # same spurt: keep the zone results found while the window was open
+                    for k in ("res_zone", "htf_zone"):
+                        if it.get(k) is None and prev.get(k) is not None:
+                            it[k] = prev[k]
+                data["rows"][it["symbol"]] = it
+        data["updated"] = stamp
+        os.makedirs(RESULTS_DIR, exist_ok=True)
+        with open(TRACK_PATH + ".tmp", "w") as fh:
+            json.dump(data, fh)
+        os.replace(TRACK_PATH + ".tmp", TRACK_PATH)
+    except Exception as e:
+        log.warning(f"SpurtSell tracker failed: {e}")
+
+
+def _tv_link(sym):
+    import html as _h
+    import urllib.parse as _up
+    u = "https://www.tradingview.com/chart/b3scGnZI/?symbol=" + _up.quote("NSE:" + str(sym).replace("-", "_"), safe=":_")
+    return f'<a href="{u}" target="_blank" rel="noopener" title="open chart in TradingView" style="color:inherit;text-decoration:none;border-bottom:1px dotted #888"><b>{_h.escape(str(sym))}</b></a>'
+
+
+def _trk_score(r):
+    """Checklist points met so far: 1 green spurt (>= the SELL multiple), 2 resistance zone, 3+4 solid red candle with higher volume, 5 higher-time-frame zone, 6 RSI above the level."""
+    return (1 if (r.get("spurt_colour") == "GREEN" and r.get("spurt_mult", 0) >= MULT) else 0) + (1 if r.get("res_zone") else 0) \
+        + (2 if r.get("red_solid_vol") else 0) + (1 if r.get("htf_zone") else 0) + (1 if r.get("rsi_peak", 0) > RSI_MIN else 0)
+
+
+def tracker_html(signal_syms=()):
+    """The 'all spurt stocks of today' table (from the saved tracker file). '' when there is nothing yet."""
+    try:
+        import json
+        with open(TRACK_PATH) as fh:
+            data = json.load(fh)
+        rows = list(data.get("rows", {}).values())
+        if not rows:
+            return ""
+        rows.sort(key=lambda r: r["spurt_at"], reverse=True)
+        cc = lambda t: "#089981" if t == "GREEN" else "#F23645" if t == "RED" else "#555"
+        out = ""
+        import html as _h
+        zt = lambda z: "-" if z in (None, "") else _h.escape(str(z))
+        for i, r in enumerate(rows, 1):
+            if r["symbol"] in signal_syms:
+                status = "<b style='color:#c62828'>SELL SIGNAL (below)</b>"
+            elif r["spurt_colour"] != "GREEN":
+                status = "red spurt - no sell setup"
+            elif r["since"] > WAIT:
+                status = "window over"
+            elif r["since"] == 0:
+                status = "spurt just happened"
+            else:
+                status = f"waiting for red candle ({r['since']}/{WAIT})"
+            rsi_style = " style='color:#0a7d33'" if r["rsi_peak"] > RSI_MIN else ""
+            out += (f"<tr><td>{i}</td><td>{_tv_link(r['symbol'])}</td><td>{r['spurt_at']}</td><td><b>{r['spurt_mult']:g}x</b></td><td>{r['best_mult']:g}x</td>"
+                    f"<td style='color:{cc(r['spurt_colour'])}'><b>{r['spurt_colour']}</b></td><td>{r['since']}</td>"
+                    f"<td style='color:{cc(r['first_after'])}'><b>{r['first_after']}</b></td>"
+                    f"<td style='white-space:nowrap;text-align:center'>{_draw(r['ohlc'])} <b style='color:{cc(r['latest_colour'])}'>{r['latest_colour']}</b></td>"
+                    f"<td>{'yes' if r['red_solid_vol'] else '-'}</td><td>{zt(r.get('res_zone'))}</td><td>{zt(r.get('htf_zone'))}</td>"
+                    f"<td{rsi_style}>{r['rsi_peak']:g}{' &#10004;' if r['rsi_peak'] > RSI_MIN else ''}</td>"
+                    f"<td><b>{_trk_score(r)}/6</b></td><td>{r['price']:.2f}</td><td>{status}</td><td>{r.get('seen', '')}</td></tr>")
+        return (f'<h3 style="margin:18px 0 4px">All volume-spurt stocks today (&ge; {TRACK_MULT:g}x) &mdash; {len(rows)} stock(s) &middot; updated {data.get("updated", "")}</h3>'
+                '<div class="m">Every stock with a 10-min candle of at least that volume multiple today, newest spurt first. "First candle after" and the latest candle show what the price did after the spurt. '
+                '"Red solid + volume up" = a solid red candle with higher volume than the one before it has come since the spurt (checklist points 3 and 4). Stocks leave nothing out: '
+                'a stock that is no longer in the live top list keeps its last row (see "Seen").</div>'
+                '<table class="s"><tr><th>#</th><th>Symbol</th><th>Spurt at</th><th>Spurt multiple</th><th>Best today</th><th>Spurt candle</th><th>Candles since</th>'
+                '<th>First candle after</th><th>Latest candle</th><th>Red solid + volume up</th><th>Resistance zone touched</th><th>' + str(HTF_MIN) + 'm resistance zone</th><th>RSI peak</th><th>Checklist</th><th>Price</th><th>Status</th><th>Seen</th></tr>'
+                f'{out}</table><br>')
+    except Exception:
+        return ""
 
 
 # ---------------------------------------------------------------- checklist helpers (points 5 and 6)
@@ -183,6 +374,7 @@ def check(df, sym, day_chg=None):
             "day_chg_pct": day_chg,
             "res_zone": zone_txt,
             "rsi_peak": round(rsi_peak, 1), "htf_zone": htf_txt, "score": f"{score}/6",
+            "sig_ohlc": _pack(o, h, l, c, L),
         }
     except Exception:
         return None
@@ -288,12 +480,20 @@ def page_html(date=None):
                 f"Checklist: points 1-4 above plus RSI above {RSI_MIN:g} since the spurt are required; the {HTF_MIN}m resistance zone is shown as a bonus (score 5/6 or 6/6). "
                 f"{'The price must also have touched a resistance order-block zone since the spurt (10-min chart, ALL IN ONE PRO logic). ' if NEED_ZONE else ''}"
                 "Paper/information only - the scanner places no orders.")
+        sig_today = set()
+        try:
+            if os.path.exists(HIST_PATH):
+                _t = pd.read_csv(HIST_PATH, usecols=["date", "symbol"], dtype=str)
+                sig_today = set(_t[_t["date"] == datetime.now(IST).strftime("%Y-%m-%d")]["symbol"])
+        except Exception:
+            pass
+        trk = tracker_html(sig_today) if date in (None, "", datetime.now(IST).strftime("%Y-%m-%d")) else ""
         if not os.path.exists(HIST_PATH):
-            return head + f'<h2>Spurt SELL</h2><div class="m">{rule}</div><p>No signal yet. It fills when a stock matches the rule during market hours.</p></body></html>'
+            return head + f'<h2>Spurt SELL</h2><div class="m">{rule}</div>{trk}<p>No signal yet. It fills when a stock matches the rule during market hours.</p>{_SORT_JS}</body></html>'
         df = pd.read_csv(HIST_PATH)
         if df.empty:
-            return head + f'<h2>Spurt SELL</h2><div class="m">{rule}</div><p>No signal yet.</p></body></html>'
-        for _c in ("rsi_peak", "htf_zone", "score"):                   # rows logged before the checklist columns existed
+            return head + f'<h2>Spurt SELL</h2><div class="m">{rule}</div>{trk}<p>No signal yet.</p>{_SORT_JS}</body></html>'
+        for _c in ("rsi_peak", "htf_zone", "score", "sig_ohlc"):                   # rows logged before the checklist columns existed
             if _c not in df.columns:
                 df[_c] = ""
         if "res_zone" not in df.columns:                              # rows logged before the zone condition existed
@@ -308,15 +508,17 @@ def page_html(date=None):
             f"<tr><td>{r.candle}</td><td><b>{_h.escape(str(r.symbol))}</b></td><td>{r.entry:.2f}</td><td style='color:#c62828'>{r.sl:.2f}</td>"
             f"<td style='color:#0a7d33'>{r.t1:.2f}</td><td style='color:#0a7d33'>{r.t2:.2f}</td><td>{r.risk_pct:.2f}%</td>"
             f"<td>{r.spurt_candle}</td><td><b>{r.spurt_mult:g}x</b></td><td>{int(r.candles_after_spurt)}</td><td>{pct(r.day_chg_pct)}</td><td>{_h.escape(str(r.res_zone)) if r.res_zone == r.res_zone and r.res_zone else '-'}</td>"
+            f"<td style='white-space:nowrap;text-align:center'>{_draw(r.sig_ohlc)}</td>"
             f"<td>{'-' if r.rsi_peak != r.rsi_peak or r.rsi_peak == '' else r.rsi_peak}</td><td>{_h.escape(str(r.htf_zone)) if r.htf_zone == r.htf_zone and r.htf_zone else '-'}</td><td><b>{_h.escape(str(r.score)) if r.score == r.score and r.score else '-'}</b></td></tr>"
             for r in x.itertuples())
         opts = "".join(f'<option value="{_h.escape(v)}"{" selected" if v == d else ""}>{_h.escape(v)}</option>' for v in dates)
         return (head + f'<h2>Spurt SELL &mdash; {_h.escape(d)}</h2>'
                 f'<form method="get" class="m">Day <select name="date">{opts}</select> <button>Show</button> &middot; {len(x)} signals &middot; '
                 f'click any heading to sort &middot; <a href="/spurt_sell.csv">download CSV (all days)</a> &middot; <a href="/spurt_paper">paper trading results</a> &middot; <a href="/spurt10">live /spurt10</a></form>'
-                f'<div class="m">{rule}</div>'
+                f'<div class="m">{rule}</div>{trk}'
+                '<h3 style="margin:18px 0 4px">SELL signals (all checklist points met)</h3>'
                 '<table class="s"><tr><th>Signal candle</th><th>Symbol</th><th>SELL entry</th><th>Stop loss</th><th>Target 1</th><th>Target 2</th>'
-                '<th>Risk %</th><th>Spurt candle</th><th>Spurt multiple</th><th>Candles after spurt</th><th>Day %</th><th>Resistance zone touched</th><th>RSI peak</th><th>30m resistance zone</th><th>Checklist</th></tr>'
+                '<th>Risk %</th><th>Spurt candle</th><th>Spurt multiple</th><th>Candles after spurt</th><th>Day %</th><th>Resistance zone touched</th><th>Signal<br>candle</th><th>RSI peak</th><th>30m resistance zone</th><th>Checklist</th></tr>'
                 f'{rows}</table>{_SORT_JS}</body></html>')
     except Exception as e:
         return f"<p>Spurt SELL page error: {_h.escape(str(e))}</p>"

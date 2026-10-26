@@ -266,6 +266,7 @@ def _score_symbol(sym, sid):
         "_zones": _secA_zones(zdf),
         "_df5": df5, "_as_of": as_of,
         "_zone_tf": (ZONE_TF if zdf is not df else 10),
+        "_trk": _trk_check(df, sym, round((close / prev_close - 1) * 100, 2) if prev_close == prev_close else None),   # ADDED: spurt tracker (spurt_sell_live.py)
         "_sell": _sell_check(df, sym, round((close / prev_close - 1) * 100, 2) if prev_close == prev_close else None),   # ADDED: spurt -> red candle SELL rule (spurt_sell_live.py)
         "symbol": sym,
         "price": round(close, 2),
@@ -289,6 +290,15 @@ def _paper_fetch5(sym):
         as_of = pd.Timestamp(datetime.now(timezone.utc).replace(tzinfo=None))
         df5 = ls.fetch_intraday_history(sid, "NSE_EQ", 5, 2)
         return ls.drop_forming_bars(df5, 5, as_of)
+    except Exception:
+        return None
+
+
+def _trk_check(df, sym, day_chg):
+    """ADDED: summary of today's volume spurt (>= 10x) of this stock for the /spurt_sell tracker table. Never raises."""
+    try:
+        import spurt_sell_live
+        return spurt_sell_live.track(df, sym, day_chg)
     except Exception:
         return None
 
@@ -501,7 +511,11 @@ def run_once():
     top = rows[:TOP_N]
     top_ids = {id(x) for x in top}
     sell_hits = []
+    trk_items = []
     for r in rows:                                                  # ADDED: Section A support / resistance zones of each stock
+        tk = r.pop("_trk", None)
+        if tk:
+            trk_items.append(tk)
         sg = r.pop("_sell", None)
         if sg:
             sell_hits.append(sg)
@@ -536,6 +550,7 @@ def run_once():
         log.warning(f"Spurt link step failed: {e}")
     try:                                                            # ADDED: spurt -> red candle SELL signals (own page, own ntfy topic)
         import spurt_sell_live
+        spurt_sell_live.update_tracker(trk_items, now_ist)
         spurt_sell_live.process(sell_hits, now_ist)
     except Exception as e:
         log.warning(f"Spurt SELL step failed: {e}")

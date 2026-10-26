@@ -525,6 +525,7 @@ def run_once():
     zd = load_zones() or {}
     zones = zd.get("stocks") or {}
     spurt, errors, cur_sigs, last_px, idle = [], 0, [], {}, []
+    trk_items, sell_hits = [], []
     for s in SYMBOLS:
         sid = _ids.get(s)
         if not sid:
@@ -547,11 +548,26 @@ def run_once():
                     log.warning(f"Crypto zone fields failed for {s}: {e}")
                 spurt.append(r)
                 last_px[s] = r["price"]
+                try:                                            # ADDED: spurt tracker + SELL checklist (spurt_sell_x.py, page /crypto_sell)
+                    import spurt_sell_x
+                    _tk = spurt_sell_x.track("crypto", fr.get(SPURT_TF), s, fr.get(CONF_TF) if CONF_TF else None)
+                    if _tk:
+                        trk_items.append(_tk)
+                    _sg = spurt_sell_x.check("crypto", fr.get(SPURT_TF), s, fr.get(CONF_TF) if CONF_TF else None)
+                    if _sg:
+                        sell_hits.append(_sg)
+                except Exception as e:
+                    log.warning(f"Crypto spurt-sell step failed for {s}: {e}")
             cur_sigs += _signals_for(s, fr)
         except Exception as e:
             errors += 1
             log.warning(f"Crypto data failed for {s}: {e}")
     spurt.sort(key=lambda r: -r["multiple"])
+    try:
+        import spurt_sell_x
+        spurt_sell_x.update("crypto", trk_items, sell_hits, now)
+    except Exception as e:
+        log.warning(f"Crypto spurt-sell save failed: {e}")
     try:
         _alert(spurt, now)
     except Exception as e:
@@ -691,48 +707,7 @@ def _page_html_inner():
     except Exception as e:
         log.warning(f"Crypto watch block failed: {e}")
 
-    sigs = d["signals"]
-    al = [x for x in sigs if x["verdict"] in ("ALIGNED", "AGAINST")]
-    # 2 signals vs OI zones
-    out.append(f'<h2>2. Our signals vs OI zones ({len(al)}) &middot; <a href="/crypto_signals.csv" style="font-size:13px;font-weight:400">CSV</a></h2>'
-               f'<div class="m">Section A / B / RSI Flush signals of the last 24 h; ALIGNED = at an OI zone that supports the trade, AGAINST = at the opposite zone</div>'
-               + tbl(["Bar (IST)", "Symbol", "Sec", "TF", "Signal", "Price", "Verdict", "Why"],
-                     [[x["bar"], f"<b>{x['symbol']}</b>", x["section"], x["tf"], x["signal"], x["price"], verdict_c(x["verdict"]), x["why"]] for x in al],
-                     "No ALIGNED or AGAINST signals in the last 24 h."))
-
-    # 3 OI zones
-    zd = load_zones() or {}
-    zc = lambda t: G if t == "SUPPORT" else R
-    near = [[f"<b>{x['symbol']}</b>", x["price"], f'<span style="color:{zc(x["zone"])}">{x["zone"]}</span>', f"{x['zone_lo']} - {x['zone_hi']}",
-             f"{x['dist_pct']:+.2f}%", f"{x['oi_added_pct']}%", x["zone_date"]] for x in d["near"]]
-    allz = [[f"<b>{s}</b>", f'<span style="color:{zc(z["type"])}">{z["type"]}</span>', f"{z['lo']} - {z['hi']}", f"{z['oi_added_pct']}%", z["date"]]
-            for s, zs in (zd.get("stocks") or {}).items() for z in zs]
-    out.append(f'<h2>3. OI support / resistance zones (perpetual OI buildup)</h2>'
-               f'<div class="m">Zones built {m["zones_built"] or "-"} IST &middot; {m["zones_count"]} of {m["zones_universe"]} coins have zones &middot; <a href="/crypto_oizones.csv">CSV</a>'
-               + (f'<br>OI source: {", ".join(f"{k} {v}" for k, v in (m.get("oi_source") or {}).items())}' if m.get("oi_source") else "")
-               + (f'<br><i>{m["zones_note"]}</i>' if m.get("zones_note") else "") + "</div>"
-               f"<h3>Zone buffer per coin</h3>"
-               + tbl(["Symbol", "Daily range (14-day avg)", "At-zone buffer", "AGAINST distance", "Source"],
-                     [[f"<b>{s_}</b>", (f"{(zd.get('vol') or {}).get(s_, {}).get('atr_pct', '-')}%"), f"{_buffers(s_, zd)[0] * 100:.2f}%", f"{_buffers(s_, zd)[1] * 100:.2f}%",
-                       "manual (CRYPTO_NEAR_PCT_" + s_ + ")" if os.environ.get(f"CRYPTO_NEAR_PCT_{s_}", "").strip() else ("volatility" if (zd.get("vol") or {}).get(s_) else "default")]
-                      for s_ in m["symbols"]], "")
-               + f"<h3>Coins at an OI zone now ({len(near)})</h3>"
-               + tbl(["Symbol", "Price", "Zone", "Zone range", "Dist from edge", "OI added", "Zone day"], near, "None right now.")
-               + f"<h3>All zones ({len(allz)})</h3>" + tbl(["Symbol", "Zone", "Zone range", "OI added", "Zone day"], allz, "No zones built yet."))
-
-    # 4-6 the three signal sections
-    def sec_table(code):
-        rows = [x for x in sigs if x["section"] == code]
-        return rows, tbl(["Bar (IST)", "Symbol", "TF", "Signal", "Side", "Entry", "SL", "T1", "T2"] + (["Status"] if code == "RSI" else []) + ["OI verdict"],
-                         [[x["bar"], f"<b>{x['symbol']}</b>", x["tf"], x["signal"], side_c(x["side"]), x["price"], x["sl"], x.get("t1") or "-", x.get("t2") or "-"]
-                          + ([x.get("status", "")] if code == "RSI" else [])
-                          + [verdict_c(x["verdict"]) if x["verdict"] in ("ALIGNED", "AGAINST") else f'<span style="color:{M}">{x["verdict"]}</span>'] for x in rows],
-                         "No signals in the last 24 h.")
-
-    for n, code, title in ((4, "A", "Section A (Sweep + Order Block)"), (5, "RSI", "RSI Flush"), (6, "B", "Section B (Keltner/SMC + RSI Pattern)")):
-        rows, t = sec_table(code)
-        out.append(f'<h2>{n}. {title} ({len(rows)}) &middot; last 24 h</h2>' + t)
-    out.append(f'<div class="m" style="margin-top:20px"><a href="/crypto_signals_all.csv">CSV of all signals</a> &middot; Signals are computed by the same functions as the stock scanner on 30m / 1H / 4H perpetual candles. Day = UTC day.</div>')
+    out.append('<div class="m" style="margin-top:20px"><a href="/crypto_spurt.csv">Spurt CSV</a></div>')
     out.append("</body></html>")
     return "".join(out)
 

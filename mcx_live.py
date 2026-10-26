@@ -245,7 +245,7 @@ def _candle_svg(o, h, l, c):
     return f'<span title="O {fm(o)}  H {fm(h)}  L {fm(l)}  C {fm(c)}" style="white-space:nowrap">{svg}</span>'
 
 
-_TV_MCX = {"CRUDEOILM": "MCX:CRUDEOILM1!", "NATURALGASM": "MCX:NATURALGASM1!", "GOLDM": "MCX:GOLDM1!", "SILVERM": "MCX:SILVERM1!"}
+_TV_MCX = {"CRUDEOILM": "MCX:CRUDEOILM1!", "NATURALGASM": "MCX:NATGASMINI1!", "GOLDM": "MCX:GOLDM1!", "SILVERM": "MCX:SILVERM1!"}
 
 
 def _tvl(sym):
@@ -467,6 +467,7 @@ def run_once():
     zd = load_zones() or {}
     zones = zd.get("stocks") or {}
     spurt, errors, cur_sigs, last_px = [], 0, [], {}
+    trk_items, sell_hits = [], []
     for s in SYMBOLS:
         sid = _ids.get(s)
         if not sid:
@@ -486,11 +487,26 @@ def run_once():
                     log.warning(f"MCX zone fields failed for {s}: {e}")
                 spurt.append(r)
                 last_px[s] = r["price"]
+                try:                                            # ADDED: spurt tracker + SELL checklist (spurt_sell_x.py, page /mcx_sell)
+                    import spurt_sell_x
+                    _tk = spurt_sell_x.track("mcx", fr.get(SPURT_TF), s, _to_30m(fr.get("15m")))
+                    if _tk:
+                        trk_items.append(_tk)
+                    _sg = spurt_sell_x.check("mcx", fr.get(SPURT_TF), s, _to_30m(fr.get("15m")))
+                    if _sg:
+                        sell_hits.append(_sg)
+                except Exception as e:
+                    log.warning(f"MCX spurt-sell step failed for {s}: {e}")
             cur_sigs += _signals_for(s, fr)
         except Exception as e:
             errors += 1
             log.warning(f"MCX data failed for {s}: {e}")
     spurt.sort(key=lambda r: -r["multiple"])
+    try:
+        import spurt_sell_x
+        spurt_sell_x.update("mcx", trk_items, sell_hits, now)
+    except Exception as e:
+        log.warning(f"MCX spurt-sell save failed: {e}")
     try:
         _alert(spurt, now)
     except Exception as e:

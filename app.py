@@ -732,6 +732,36 @@ def spurt_sell_csv():
     return _serve_csv("spurt_sell_history.csv", "spurt_sell_signals_history.csv")
 
 
+@app.route("/mcx_sell", methods=["GET"])
+def mcx_sell_page():
+    try:
+        import spurt_sell_x
+        return spurt_sell_x.page_html("mcx", request.args.get("date"))
+    except Exception as e:
+        log.exception("/mcx_sell failed")
+        return f"Commodity Spurt SELL page error: {e}", 200
+
+
+@app.route("/mcx_sell.csv", methods=["GET"])
+def mcx_sell_csv():
+    return _serve_csv("mcx_sell_history.csv", "commodity_spurt_sell_signals_history.csv")
+
+
+@app.route("/crypto_sell", methods=["GET"])
+def crypto_sell_page():
+    try:
+        import spurt_sell_x
+        return spurt_sell_x.page_html("crypto", request.args.get("date"))
+    except Exception as e:
+        log.exception("/crypto_sell failed")
+        return f"Crypto Spurt SELL page error: {e}", 200
+
+
+@app.route("/crypto_sell.csv", methods=["GET"])
+def crypto_sell_csv():
+    return _serve_csv("crypto_sell_history.csv", "crypto_spurt_sell_signals_history.csv")
+
+
 @app.route("/oizones.csv", methods=["GET"])
 def oizones_csv():
     return _serve_csv("oizones.csv", "oi_zones_near.csv")
