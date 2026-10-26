@@ -254,6 +254,74 @@ def _strip_svg(strip, tag=0):
         return "-"
 
 
+# ----------------------------------------------------------------------------- live price (read when the page is opened, cached 15 s)
+_live_cache = {}
+
+
+def live_prices(key, syms):
+    """{symbol: last traded price} for the symbols of a tracker table, fetched when the page is opened (Dhan marketfeed/ltp for MCX and NSE,
+    Delta public ticker for crypto). Cached 15 seconds. Any failure gives an empty result and the page shows a dash. Never raises."""
+    import time
+    c = _live_cache.get(key)
+    if c and time.time() - c[0] < 15:
+        return c[1]
+    out = {}
+    try:
+        if key == "crypto":
+            import crypto_live as cl
+            for s in syms:
+                try:
+                    r = (cl._get(f"/v2/tickers/{s}", None, f"live {s}") or {}).get("result") or {}
+                    v = r.get("close") or r.get("mark_price")
+                    if v is not None:
+                        out[s] = float(v)
+                except Exception:
+                    pass
+        else:
+            import live_scanner as ls
+            ids, seg = {}, "NSE_EQ"
+            if key == "mcx":
+                import mcx_live as ml
+                seg = "MCX_COMM"
+                try:
+                    ml._resolve_ids()
+                except Exception:
+                    pass
+                ids = {s: str(ml._ids[s]) for s in syms if ml._ids.get(s)}
+            else:
+                import scrip_master as sm
+                for s in syms:
+                    try:
+                        sid, sg = sm.get_security_id_and_segment(s)
+                        if sid and sg == "NSE_EQ":
+                            ids[s] = str(sid)
+                    except Exception:
+                        pass
+            if ids:
+                resp = ls._dhan_post("marketfeed/ltp", {seg: [int(v) for v in ids.values()]}, "live price")
+                data = (resp.json().get("data") or {}).get(seg) or {}
+                by = {v: k for k, v in ids.items()}
+                for sid, q in data.items():
+                    sym = by.get(str(sid))
+                    try:
+                        if sym and isinstance(q, dict):
+                            out[sym] = float(q.get("last_price"))
+                    except (TypeError, ValueError):
+                        pass
+    except Exception as e:
+        log.warning(f"live price fetch failed: {e}")
+    _live_cache[key] = (time.time(), out)
+    return out
+
+
+def _live_cell(lp, sym, close):
+    v = lp.get(sym)
+    if v is None:
+        return "-"
+    c = "#089981" if v > close else "#F23645" if v < close else "#888"
+    return f"<b style='color:{c}'>{v:g}</b>"
+
+
 def _trk_score(key, r):
     """Checklist points met so far: 1 green spurt (>= the SELL multiple), 2 resistance zone, 3+4 solid red candle with higher volume, 5 higher-time-frame zone, 6 RSI above the level."""
     return (1 if (r.get("spurt_colour") == "GREEN" and r.get("spurt_mult", 0) >= CFG[key]["sell_mult"]) else 0) + (1 if r.get("res_zone") else 0) \
@@ -369,6 +437,7 @@ rows.forEach(function(r){b.appendChild(r);});});});
                 rows = sorted(td.get("rows", {}).values(), key=lambda r: r["spurt_at"], reverse=True)
                 sig_today = set(df[df["date"] == td.get("date")]["symbol"].astype(str)) if len(df) else set()
                 body = ""
+                lp = live_prices(key, [r["symbol"] for r in rows])
                 for i, r in enumerate(rows, 1):
                     if r["symbol"] in sig_today:
                         status = f"<b style='color:{R}'>SELL SIGNAL (below)</b>"
@@ -390,12 +459,12 @@ rows.forEach(function(r){b.appendChild(r);});});});
                              f"<td class='st' style='white-space:nowrap'>{_strip_svg(r.get('strip') or [])}</td>"
                              f"<td>{pc(r.get('move_pct'))}</td><td>{pc(r.get('off_high_pct'))}</td><td>{'-' if r.get('vol_vs_spurt') is None else format(r['vol_vs_spurt'], 'g') + 'x'}</td>"
                              f"<td>{'yes' if r['red_solid_vol'] else '-'}</td><td>{zt(r.get('res_zone'))}</td><td>{zt(r.get('htf_zone'))}</td>"
-                             f"<td style='color:{G if rsi_ok else M}'>{r['rsi_peak']:g}{' &#10004;' if rsi_ok else ''}</td><td><b>{_trk_score(key, r)}/6</b></td><td>{r['price']:g}</td><td>{status}</td><td>{r.get('seen', '')}</td></tr>")
+                             f"<td style='color:{G if rsi_ok else M}'>{r['rsi_peak']:g}{' &#10004;' if rsi_ok else ''}</td><td><b>{_trk_score(key, r)}/6</b></td><td>{r['price']:g}</td><td>{_live_cell(lp, r['symbol'], r['price'])}</td><td>{status}</td><td>{r.get('seen', '')}</td></tr>")
                 if rows:
                     trk_html = (f'<h2>All volume-spurt {"commodities" if key == "mcx" else "coins"} today (&ge; {cfg["track_mult"]:g}x) &mdash; {len(rows)} &middot; updated {td.get("updated", "")}</h2>'
                                 '<div class="m">Every candle today with at least that volume multiple, newest first. "First candle after" and the latest candle show what price did after the spurt.</div>'
                                 '<style>table.trk th,table.trk td{padding:4px 5px;font-size:12px;line-height:1.25}table.trk td.st{min-width:152px;padding:2px 4px;text-align:left}table.trk th{font-size:11.5px}</style><table class="s trk"><tr><th>#</th><th>Symbol</th><th>Spurt at</th><th title="volume multiple of the spurt candle">Spurt x</th><th title="best multiple today">Best x</th><th>Spurt candle</th><th title="candles since the spurt">Since</th>'
-                                '<th>1st candle after</th><th>Latest</th><th>Spurt (dot) + next candles</th><th title="change since the spurt candle closed">Move</th><th title="distance from the highest high since the spurt">From high</th><th title="latest candle volume vs the spurt candle volume">Vol vs spurt</th><th title="solid red candle with higher volume has come">Red + vol up</th><th title="resistance zone touched since the spurt">Res. zone</th><th>' + cfg["htf"] + ' zone</th><th>RSI</th><th>Checklist</th><th>Price</th><th>Status</th><th>Seen</th></tr>' + body + '</table>')
+                                '<th>1st candle after</th><th>Latest</th><th>Spurt (dot) + next candles</th><th title="change since the spurt candle closed">Move</th><th title="distance from the highest high since the spurt">From high</th><th title="latest candle volume vs the spurt candle volume">Vol vs spurt</th><th title="solid red candle with higher volume has come">Red + vol up</th><th title="resistance zone touched since the spurt">Res. zone</th><th>' + cfg["htf"] + ' zone</th><th>RSI</th><th>Checklist</th><th title="close of the latest closed candle">Close</th><th title="last traded price now (refreshed when the page is opened)">Live</th><th>Status</th><th>Seen</th></tr>' + body + '</table>')
         except Exception:
             trk_html = ""
         if not trk_html:

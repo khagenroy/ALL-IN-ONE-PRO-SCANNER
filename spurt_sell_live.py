@@ -245,6 +245,14 @@ def _strip_svg(strip, tag=0):
         return "-"
 
 
+def _live_c(lp, sym, close):
+    v = lp.get(sym)
+    if v is None:
+        return "-"
+    c = "#089981" if v > close else "#F23645" if v < close else "#888"
+    return f"<b style='color:{c}'>{v:g}</b>"
+
+
 def _trk_score(r):
     """Checklist points met so far: 1 green spurt (>= the SELL multiple), 2 resistance zone, 3+4 solid red candle with higher volume, 5 higher-time-frame zone, 6 RSI above the level."""
     return (1 if (r.get("spurt_colour") == "GREEN" and r.get("spurt_mult", 0) >= MULT) else 0) + (1 if r.get("res_zone") else 0) \
@@ -261,6 +269,11 @@ def tracker_html(signal_syms=()):
         if not rows:
             return ""
         rows.sort(key=lambda r: r["spurt_at"], reverse=True)
+        try:
+            import spurt_sell_x
+            lp = spurt_sell_x.live_prices("stock", [r["symbol"] for r in rows])
+        except Exception:
+            lp = {}
         cc = lambda t: "#089981" if t == "GREEN" else "#F23645" if t == "RED" else "#555"
         out = ""
         import html as _h
@@ -286,13 +299,13 @@ def tracker_html(signal_syms=()):
                     f"<td>{pc(r.get('move_pct'))}</td><td>{pc(r.get('off_high_pct'))}</td><td>{'-' if r.get('vol_vs_spurt') is None else format(r['vol_vs_spurt'], 'g') + 'x'}</td>"
                     f"<td>{'yes' if r['red_solid_vol'] else '-'}</td><td>{zt(r.get('res_zone'))}</td><td>{zt(r.get('htf_zone'))}</td>"
                     f"<td{rsi_style}>{r['rsi_peak']:g}{' &#10004;' if r['rsi_peak'] > RSI_MIN else ''}</td>"
-                    f"<td><b>{_trk_score(r)}/6</b></td><td>{r['price']:.2f}</td><td>{status}</td><td>{r.get('seen', '')}</td></tr>")
+                    f"<td><b>{_trk_score(r)}/6</b></td><td>{r['price']:.2f}</td><td>{_live_c(lp, r['symbol'], r['price'])}</td><td>{status}</td><td>{r.get('seen', '')}</td></tr>")
         return (f'<h3 style="margin:18px 0 4px">All volume-spurt stocks today (&ge; {TRACK_MULT:g}x) &mdash; {len(rows)} stock(s) &middot; updated {data.get("updated", "")}</h3>'
                 '<div class="m">Every stock with a 10-min candle of at least that volume multiple today, newest spurt first. "First candle after" and the latest candle show what the price did after the spurt. '
                 '"Red solid + volume up" = a solid red candle with higher volume than the one before it has come since the spurt (checklist points 3 and 4). Stocks leave nothing out: '
                 'a stock that is no longer in the live top list keeps its last row (see "Seen").</div>'
                 '<style>table.trk th,table.trk td{padding:4px 5px;font-size:12px;line-height:1.25}table.trk td.st{min-width:152px;padding:2px 4px;text-align:left}table.trk th{font-size:11.5px}</style><table class="s trk"><tr><th>#</th><th>Symbol</th><th>Spurt at</th><th title="volume multiple of the spurt candle">Spurt x</th><th title="best multiple today">Best x</th><th>Spurt candle</th><th title="candles since the spurt">Since</th>'
-                '<th>1st candle after</th><th>Latest</th><th>Spurt (dot) + next candles</th><th title="change since the spurt candle closed">Move</th><th title="distance from the highest high since the spurt">From high</th><th title="latest candle volume vs the spurt candle volume">Vol vs spurt</th><th title="solid red candle with higher volume has come">Red + vol up</th><th title="resistance zone touched since the spurt">Res. zone</th><th>' + str(HTF_MIN) + 'm zone</th><th>RSI</th><th>Checklist</th><th>Price</th><th>Status</th><th>Seen</th></tr>'
+                '<th>1st candle after</th><th>Latest</th><th>Spurt (dot) + next candles</th><th title="change since the spurt candle closed">Move</th><th title="distance from the highest high since the spurt">From high</th><th title="latest candle volume vs the spurt candle volume">Vol vs spurt</th><th title="solid red candle with higher volume has come">Red + vol up</th><th title="resistance zone touched since the spurt">Res. zone</th><th>' + str(HTF_MIN) + 'm zone</th><th>RSI</th><th>Checklist</th><th title="close of the latest closed 10-min candle">Close</th><th title="last traded price now (refreshed when the page is opened)">Live</th><th>Status</th><th>Seen</th></tr>'
                 f'{out}</table><br>')
     except Exception:
         return ""
