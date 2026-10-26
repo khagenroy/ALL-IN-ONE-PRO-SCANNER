@@ -58,18 +58,62 @@ R2 = _f("SPURT_SELL_R2", 2)
 MAX_PER_DAY = int(_f("SPURT_SELL_NTFY_MAX_PER_DAY", 40))
 NEED_ZONE = os.environ.get("SPURT_SELL_NEED_ZONE", "true").strip().lower() == "true"
 ZONE_NEAR_PCT = _f("SPURT_SELL_ZONE_NEAR_PCT", 0.5)
+NEED_RSI = os.environ.get("SPURT_SELL_NEED_RSI", "true").strip().lower() == "true"       # checklist point 6: RSI above RSI_MIN since the spurt
+RSI_LEN = int(_f("SPURT_SELL_RSI_LEN", 14))
+RSI_MIN = _f("SPURT_SELL_RSI_MIN", 70)
+HTF_MIN = int(_f("SPURT_SELL_HTF_MIN", 30))                                               # checklist point 5 (information, not required)
 SKIP_OPEN = os.environ.get("SPURT_SELL_SKIP_OPEN", "false").strip().lower() == "true"     # default: the 09:15 candle COUNTS as a spurt
 
 RESULTS_DIR = os.path.join(os.path.dirname(__file__), "results")
 HIST_PATH = os.path.join(RESULTS_DIR, "spurt_sell_history.csv")
 COLS = ["date", "run", "candle", "symbol", "entry", "sl", "t1", "t2", "risk_pct", "spurt_candle", "spurt_mult",
-        "candles_after_spurt", "red_vol_vs_prev", "day_chg_pct", "res_zone"]
+        "candles_after_spurt", "red_vol_vs_prev", "day_chg_pct", "res_zone", "rsi_peak", "htf_zone", "score"]
 
 _seen = {"date": None, "keys": set(), "count": 0}
 
 
 def _ist(ts):
     return pd.Timestamp(ts) + pd.Timedelta(minutes=330)
+
+
+# ---------------------------------------------------------------- checklist helpers (points 5 and 6)
+def _rsi(close, n):
+    """Wilder RSI (same as TradingView ta.rsi)."""
+    d = pd.Series(close, dtype=float).diff()
+    up = d.clip(lower=0).ewm(alpha=1.0 / n, adjust=False).mean()
+    dn = (-d.clip(upper=0)).ewm(alpha=1.0 / n, adjust=False).mean()
+    rs = up / dn.replace(0, np.nan)
+    return (100 - 100 / (1 + rs)).fillna(100.0).to_numpy()
+
+
+def _htf_touch(df, sj, L, tol_pct):
+    """Point 5: did price touch a live HTF_MIN-minute RESISTANCE zone between the spurt and the red candle? Returns 'lo-hi' or ''.
+    The HTF candles are built from the 10-min candles (only complete ones). Information only - never blocks a signal."""
+    try:
+        import spurt_zones
+        step = HTF_MIN // 10
+        if step < 2:
+            return ""
+        ist = df.index.to_series().map(_ist)
+        key = ist.dt.date.astype(str) + "_" + (((ist.dt.hour * 60 + ist.dt.minute) - 555) // HTF_MIN).astype(str)
+        g = df.groupby(key.to_numpy(), sort=False)
+        d = g.agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"})
+        d = d[g.size().to_numpy() >= step]
+        idx = g.apply(lambda x: x.index[0])
+        d.index = [idx[k] for k in d.index]
+        zs = [z for z in spurt_zones.live_zones(d) if z["type"] == "RESISTANCE"]
+        if not zs:
+            return ""
+        tol = tol_pct / 100.0
+        hi_, lo_ = df["high"].to_numpy(dtype=float), df["low"].to_numpy(dtype=float)
+        hit = ""
+        for k in range(sj, L + 1):
+            for z in zs:
+                if lo_[k] <= z["hi"] * (1 + tol) and hi_[k] >= z["lo"] * (1 - tol):
+                    hit = f"{z['lo']:g}-{z['hi']:g}"
+        return hit
+    except Exception:
+        return ""
 
 
 # ---------------------------------------------------------------- the rule
@@ -121,6 +165,11 @@ def check(df, sym, day_chg=None):
             zone_txt = ""
         if NEED_ZONE and not zone_txt:
             return None
+        rsi_peak = float(np.nanmax(_rsi(c, RSI_LEN)[sj:L + 1]))                  # point 6: highest RSI from the spurt candle to the red candle
+        if NEED_RSI and not rsi_peak > RSI_MIN:
+            return None
+        htf_txt = _htf_touch(df, sj, L, ZONE_NEAR_PCT)                           # point 5 (information)
+        score = 3 + (1 if zone_txt else 0) + (1 if rsi_peak > RSI_MIN else 0) + (1 if htf_txt else 0)   # points 1, 3, 4 are met by construction
         return {
             "symbol": sym,
             "candle": _ist(df.index[L]).strftime("%H:%M"),
@@ -133,6 +182,7 @@ def check(df, sym, day_chg=None):
             "red_vol_vs_prev": round(float(v[L] / v[L - 1]), 2) if v[L - 1] > 0 else None,
             "day_chg_pct": day_chg,
             "res_zone": zone_txt,
+            "rsi_peak": round(rsi_peak, 1), "htf_zone": htf_txt, "score": f"{score}/6",
         }
     except Exception:
         return None
@@ -156,7 +206,7 @@ def _alert(new, now_ist):
         return
     if _seen["count"] >= MAX_PER_DAY:
         return
-    lines = [f"{r['symbol']}  SELL {r['entry']:.2f}  SL {r['sl']:.2f}  T1 {r['t1']:.2f}  T2 {r['t2']:.2f}  (spurt {r['spurt_mult']:g}x at {r['spurt_candle']}; resistance {r.get('res_zone') or '-'})"
+    lines = [f"{r['symbol']}  SELL {r['entry']:.2f}  SL {r['sl']:.2f}  T1 {r['t1']:.2f}  T2 {r['t2']:.2f}  (spurt {r['spurt_mult']:g}x at {r['spurt_candle']}; resistance {r.get('res_zone') or '-'}; RSI {r.get('rsi_peak', '-')}; {HTF_MIN}m zone {r.get('htf_zone') or 'no'}; checklist {r.get('score', '-')})"
              for r in new[:12]]
     extra = f"\n+{len(new) - 12} more on /spurt_sell" if len(new) > 12 else ""
     try:
@@ -235,6 +285,7 @@ def page_html(date=None):
         rule = (f"Rule: a green 10-min candle with volume &ge; {MULT:g}x the average of the previous {AVG_LEN} candles (09:15 candle {'ignored' if SKIP_OPEN else 'included'}), then within "
                 f"{WAIT} candles a solid red candle (body &ge; {BODY_PCT:g}% of its range) with higher volume than the candle before it. "
                 f"SELL at that red candle's close, stop loss = its high, targets = {R1:g}x and {R2:g}x the risk. One signal per spurt. "
+                f"Checklist: points 1-4 above plus RSI above {RSI_MIN:g} since the spurt are required; the {HTF_MIN}m resistance zone is shown as a bonus (score 5/6 or 6/6). "
                 f"{'The price must also have touched a resistance order-block zone since the spurt (10-min chart, ALL IN ONE PRO logic). ' if NEED_ZONE else ''}"
                 "Paper/information only - the scanner places no orders.")
         if not os.path.exists(HIST_PATH):
@@ -242,17 +293,22 @@ def page_html(date=None):
         df = pd.read_csv(HIST_PATH)
         if df.empty:
             return head + f'<h2>Spurt SELL</h2><div class="m">{rule}</div><p>No signal yet.</p></body></html>'
+        for _c in ("rsi_peak", "htf_zone", "score"):                   # rows logged before the checklist columns existed
+            if _c not in df.columns:
+                df[_c] = ""
         if "res_zone" not in df.columns:                              # rows logged before the zone condition existed
             df["res_zone"] = ""
         dates = sorted(df["date"].unique(), reverse=True)
         d = date if date in dates else dates[0]
         x = df[df["date"] == d].sort_values(["candle", "spurt_mult"], ascending=[False, False])
+        x = x.assign(_sc=x["score"].astype(str).str[:1]).sort_values("_sc", ascending=False, kind="stable")
         col = lambda v: "#0a7d33" if (v or 0) > 0 else "#c62828" if (v or 0) < 0 else "#555"
         pct = lambda v: "-" if v != v or v is None else f'<span style="color:{col(v)}">{v:+.2f}%</span>'
         rows = "".join(
             f"<tr><td>{r.candle}</td><td><b>{_h.escape(str(r.symbol))}</b></td><td>{r.entry:.2f}</td><td style='color:#c62828'>{r.sl:.2f}</td>"
             f"<td style='color:#0a7d33'>{r.t1:.2f}</td><td style='color:#0a7d33'>{r.t2:.2f}</td><td>{r.risk_pct:.2f}%</td>"
-            f"<td>{r.spurt_candle}</td><td><b>{r.spurt_mult:g}x</b></td><td>{int(r.candles_after_spurt)}</td><td>{pct(r.day_chg_pct)}</td><td>{_h.escape(str(r.res_zone)) if r.res_zone == r.res_zone and r.res_zone else '-'}</td></tr>"
+            f"<td>{r.spurt_candle}</td><td><b>{r.spurt_mult:g}x</b></td><td>{int(r.candles_after_spurt)}</td><td>{pct(r.day_chg_pct)}</td><td>{_h.escape(str(r.res_zone)) if r.res_zone == r.res_zone and r.res_zone else '-'}</td>"
+            f"<td>{'-' if r.rsi_peak != r.rsi_peak or r.rsi_peak == '' else r.rsi_peak}</td><td>{_h.escape(str(r.htf_zone)) if r.htf_zone == r.htf_zone and r.htf_zone else '-'}</td><td><b>{_h.escape(str(r.score)) if r.score == r.score and r.score else '-'}</b></td></tr>"
             for r in x.itertuples())
         opts = "".join(f'<option value="{_h.escape(v)}"{" selected" if v == d else ""}>{_h.escape(v)}</option>' for v in dates)
         return (head + f'<h2>Spurt SELL &mdash; {_h.escape(d)}</h2>'
@@ -260,7 +316,7 @@ def page_html(date=None):
                 f'click any heading to sort &middot; <a href="/spurt_sell.csv">download CSV (all days)</a> &middot; <a href="/spurt_paper">paper trading results</a> &middot; <a href="/spurt10">live /spurt10</a></form>'
                 f'<div class="m">{rule}</div>'
                 '<table class="s"><tr><th>Signal candle</th><th>Symbol</th><th>SELL entry</th><th>Stop loss</th><th>Target 1</th><th>Target 2</th>'
-                '<th>Risk %</th><th>Spurt candle</th><th>Spurt multiple</th><th>Candles after spurt</th><th>Day %</th><th>Resistance zone touched</th></tr>'
+                '<th>Risk %</th><th>Spurt candle</th><th>Spurt multiple</th><th>Candles after spurt</th><th>Day %</th><th>Resistance zone touched</th><th>RSI peak</th><th>30m resistance zone</th><th>Checklist</th></tr>'
                 f'{rows}</table>{_SORT_JS}</body></html>')
     except Exception as e:
         return f"<p>Spurt SELL page error: {_h.escape(str(e))}</p>"

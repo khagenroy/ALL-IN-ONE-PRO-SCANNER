@@ -211,6 +211,34 @@ def _ist(ts):
     return pd.Timestamp(ts) + pd.Timedelta(minutes=330)
 
 
+def _candle_svg(o, h, l, c):
+    """Small Japanese candle (body + wick) with its O/H/L/C written beside it."""
+    try:
+        o, h, l, c = float(o), float(h), float(l), float(c)
+    except Exception:
+        return "-"
+    if not all(v == v for v in (o, h, l, c)):
+        return "-"
+    col = "#089981" if c > o else "#F23645" if c < o else "#888"
+    rng = (h - l) or 1e-9
+    y = lambda v: 2 + (h - v) / rng * 32
+    top, bot = min(y(o), y(c)), max(y(o), y(c))
+    fm = (lambda v: f"{v:.2f}") if h >= 1 else (lambda v: f"{v:.5f}")
+    svg = (f'<svg width="22" height="40" viewBox="0 0 22 36" preserveAspectRatio="none" style="vertical-align:middle">'
+           f'<line x1="11" y1="{y(h):.1f}" x2="11" y2="{y(l):.1f}" stroke="{col}" stroke-width="2"/>'
+           f'<rect x="5" y="{top:.1f}" width="12" height="{max(bot - top, 2):.1f}" fill="{col}" stroke="{col}"/></svg>')
+    return f'<span title="O {fm(o)}  H {fm(h)}  L {fm(l)}  C {fm(c)}" style="white-space:nowrap">{svg}</span>'
+
+
+def _tvl(sym):
+    """Symbol as a link that opens its chart on TradingView (NSE)."""
+    import urllib.parse as _up
+    import html as _h
+    s = str(sym)
+    u = "https://www.tradingview.com/chart/b3scGnZI/?symbol=" + _up.quote("NSE:" + s.replace("-", "_"), safe=":_")
+    return '<a href="{u}" target="_blank" rel="noopener" title="open chart in TradingView" style="color:inherit;text-decoration:none;border-bottom:1px dotted #888"><b>{t}</b></a>'.format(u=u, t=_h.escape(s))
+
+
 def _score_symbol(sym, sid):
     as_of = pd.Timestamp(datetime.now(timezone.utc).replace(tzinfo=None))
     df5 = ls.fetch_intraday_history(sid, "NSE_EQ", 5, HISTORY_DAYS)
@@ -244,6 +272,7 @@ def _score_symbol(sym, sid):
         "day_chg_pct": round((close / prev_close - 1) * 100, 2) if prev_close == prev_close else None,
         "candle": _ist(df.index[-1]).strftime("%H:%M"),
         "candle_chg_pct": round((close / float(last["open"]) - 1) * 100, 2) if last["open"] else None,
+        "ohlc": (float(last["open"]), float(last["high"]), float(last["low"]), float(last["close"])),
         "candle_vol": int(vol[-1]),
         "sma_vol": int(round(base)),
         "multiple": round(float(vol[-1] / base), 2),
@@ -538,7 +567,9 @@ def _secA_zones(df):
     (bullish OB = support, bearish OB = resistance). Runs on candles already downloaded - no extra Dhan call."""
     try:                                   # FIXED: zones now come from spurt_zones.py (the old with_zones option no longer exists in all_in_one_scanner.py)
         import spurt_zones
-        return spurt_zones.live_zones(df)
+        import math
+        return [z for z in (spurt_zones.live_zones(df) or [])
+                if all(isinstance(z.get(k), (int, float)) and math.isfinite(z[k]) for k in ("lo", "hi"))]      # a zone with a missing edge (nan) is dropped
     except Exception as e:
         log.warning(f"Spurt10 zone calculation failed: {e}")
         return []
@@ -769,7 +800,7 @@ def _watch_html(meta):
         at = w.get("at_zone", "")
         status = f"AT {at}" if at else "between zones"
         price = "-" if w.get("price") is None else f"{w['price']:.2f}"
-        rows += (f"<tr{_rowstyle(at)}><td>{i}</td><td><b>{w['symbol']}</b></td><td>{w.get('since', '')}</td><td>{w.get('mult', 0):.1f}x</td><td>{price}</td>"
+        rows += (f"<tr{_rowstyle(at)}><td>{i}</td><td>{_tvl(w['symbol'])}</td><td>{w.get('since', '')}</td><td>{w.get('mult', 0):.1f}x</td><td>{price}</td>"
                  f"<td{_zbg(at, 'SUPPORT')}>{w.get('support') or '-'}{_wconf(w, 'support')}</td><td{_zbg(at, 'RESISTANCE')}>{w.get('resistance') or '-'}{_wconf(w, 'resistance')}</td>"
                  f"<td>{status}</td><td>{'in table' if w.get('in_table') else 'outside table'}</td><td>{'yes' if w.get('alerted') else '-'}</td><td>{w.get('time', '')}</td></tr>")
     return (head + '<div class="w"><table class="sp"><tr><th>#</th><th>Symbol</th><th>Spurt at</th><th>Best spurt</th><th>Price</th>'
@@ -786,16 +817,28 @@ def _html(top, meta):
     def hl(r):
         return _rowstyle(r.get("at_zone"))
 
+    def ctype(r):
+        v = r.get("candle_chg_pct")
+        if v is None:
+            return "<td>-</td>"
+        oh = r.get("ohlc")
+        svg = _candle_svg(*oh) if oh else ""
+        if v > 0:
+            return '<td style="white-space:nowrap">' + svg + ' <b style="color:#089981">GREEN</b></td>'
+        if v < 0:
+            return '<td style="white-space:nowrap">' + svg + ' <b style="color:#F23645">RED</b></td>'
+        return '<td style="white-space:nowrap">' + svg + ' DOJI</td>'
+
     def mc(r):
         return ' style="background:#ffe066"' if r["multiple"] >= meta.get("alert_mult", 3.0) else ""
 
     body = "".join(
-        f"<tr{hl(r)}><td>{i}</td><td><b>{r['symbol']}</b></td><td>{r['price']:.2f}</td><td>{pct(r['day_chg_pct'])}</td>"
-        f"<td>{r['candle']}</td><td>{pct(r['candle_chg_pct'])}</td><td>{r['candle_vol']:,}</td>"
+        f"<tr{hl(r)}><td>{i}</td><td>{_tvl(r['symbol'])}</td><td>{r['price']:.2f}</td><td>{pct(r['day_chg_pct'])}</td>"
+        f"<td>{r['candle']}</td><td>{pct(r['candle_chg_pct'])}</td>{ctype(r)}<td>{r['candle_vol']:,}</td>"
         f"<td>{r['sma_vol']:,}</td><td{mc(r)}><b>{r['multiple']:.2f}x</b></td><td>{r['day_vol']:,}</td>"
         f"<td{_zbg(r.get('at_zone'), 'SUPPORT')}>{_zc(r, 'support')}</td><td{_zbg(r.get('at_zone'), 'RESISTANCE')}>{_zc(r, 'resistance')}</td><td>{_zv(r.get('zone_view'), r.get('zone_src'))}</td></tr>"
         for i, r in enumerate(top, 1)
-    ) or '<tr><td colspan="13">No stocks qualified in this cycle.</td></tr>'
+    ) or '<tr><td colspan="14">No stocks qualified in this cycle.</td></tr>'
     return f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="refresh" content="60"><title>Volume Spurt 10-min</title>
 <style>body{{font-family:Arial,sans-serif;margin:12px;background:#fafafa}}table{{border-collapse:collapse;width:100%;background:#fff}}
@@ -805,7 +848,7 @@ th,td{{border:1px solid #ddd;padding:6px 8px;text-align:right;font-size:14px}}th
 <div class="m">Run: {meta['run']} (took {meta['took_s']}s) &middot; {meta['universe']} NSE stocks (ETFs left out: {meta.get('etf_excluded', 0)}), {meta['price_ok']} priced &ge; {meta['min_price']:.0f},
 {meta['shortlisted']} shortlisted, {meta['scored']} scored, {meta['failed']} errors &middot; refreshes every 10 min &middot; {LEGEND} &middot; phone alert at {meta.get('alert_mult', 3.0):g}x or more &middot; zones = ALL IN ONE PRO order-block zones on the {ZONE_TF}-min chart (same as the indicator on a {ZONE_TF}-min chart); purple "{ZONE_TF}m+{CONF_TF}m zone" = the same zone also exists on the {CONF_TF}-min chart (stronger); volume spurt = 10-min candles &middot;
 <a href="/spurt10.csv">CSV</a> (this cycle) &middot; <a href="/spurt10_history">full-day history page</a> &middot; <a href="/spurt10_history.csv">history CSV</a> &middot; <a href="/spurt_sell">Spurt SELL signals</a> &middot; <a href="/scanner">Scanner</a></div>
-<div class="w"><table class="sp"><tr><th>#</th><th>Symbol</th><th>Price</th><th>Day %</th><th>Candle</th><th>Candle %</th>
+<div class="w"><table class="sp"><tr><th>#</th><th>Symbol</th><th>Price</th><th>Day %</th><th>Candle</th><th>Candle %</th><th>Candle type</th>
 <th>Candle volume</th><th>{meta['sma_len']}-candle avg vol</th><th>Multiple</th><th>Day volume</th><th>Support zone ({ZONE_TF}m)</th><th>Resistance zone ({ZONE_TF}m)</th><th>Zone view</th></tr>{body}</table></div>
 {_link_html()}
 {_watch_html(meta)}
@@ -842,7 +885,7 @@ def history_html(date=None, min_mult=0.0, sym=None, only=None):
         srows = "".join(f"<tr><td><b>{_h.escape(str(i))}</b></td><td>{int(r.times)}</td><td>{int(r.atz)}</td><td>{r['first']}</td><td>{r['last']}</td>"
                         f"<td>{r.best:.2f}x</td><td>{r.price:.2f}</td><td>{pct(r.day)}</td></tr>" for i, r in summ.iterrows())
         x = x.sort_values(["candle", "multiple"], ascending=[False, False])
-        rows = "".join(f"<tr{_rowstyle(r.at_zone)}><td>{r.candle}</td><td><b>{_h.escape(str(r.symbol))}</b></td><td>{r.price:.2f}</td><td>{pct(r.day_chg_pct)}</td>"
+        rows = "".join(f"<tr{_rowstyle(r.at_zone)}><td>{r.candle}</td><td>{_tvl(r.symbol)}</td><td>{r.price:.2f}</td><td>{pct(r.day_chg_pct)}</td>"
                        f"<td>{pct(r.candle_chg_pct)}</td><td>{int(r.candle_vol):,}</td><td>{int(r.sma_vol):,}</td><td><b>{r.multiple:.2f}x</b></td><td>{int(r.day_vol):,}</td>"
                        f"<td{_zbg(r.at_zone, 'SUPPORT')}>{_zh(r.support, r.support_dist_pct)}</td><td{_zbg(r.at_zone, 'RESISTANCE')}>{_zh(r.resistance, r.resistance_dist_pct)}</td><td>{_zv(None if r.zone_view != r.zone_view else r.zone_view, None if r.zone_src != r.zone_src else r.zone_src)}</td></tr>"
                        for r in x.itertuples())

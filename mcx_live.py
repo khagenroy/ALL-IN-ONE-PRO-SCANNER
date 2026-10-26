@@ -226,6 +226,35 @@ def _frames(sym, sid):
 
 
 # ======================================================================================= volume spurt
+def _candle_svg(o, h, l, c):
+    """Small Japanese candle (body + wick) with its O/H/L/C written beside it."""
+    try:
+        o, h, l, c = float(o), float(h), float(l), float(c)
+    except Exception:
+        return "-"
+    if not all(v == v for v in (o, h, l, c)):
+        return "-"
+    col = "#089981" if c > o else "#F23645" if c < o else "#888"
+    rng = (h - l) or 1e-9
+    y = lambda v: 2 + (h - v) / rng * 32
+    top, bot = min(y(o), y(c)), max(y(o), y(c))
+    fm = (lambda v: f"{v:.2f}") if h >= 1 else (lambda v: f"{v:.5f}")
+    svg = (f'<svg width="22" height="40" viewBox="0 0 22 36" preserveAspectRatio="none" style="vertical-align:middle">'
+           f'<line x1="11" y1="{y(h):.1f}" x2="11" y2="{y(l):.1f}" stroke="{col}" stroke-width="2"/>'
+           f'<rect x="5" y="{top:.1f}" width="12" height="{max(bot - top, 2):.1f}" fill="{col}" stroke="{col}"/></svg>')
+    return f'<span title="O {fm(o)}  H {fm(h)}  L {fm(l)}  C {fm(c)}" style="white-space:nowrap">{svg}</span>'
+
+
+_TV_MCX = {"CRUDEOILM": "MCX:CRUDEOILM1!", "NATURALGASM": "MCX:NATURALGASM1!", "GOLDM": "MCX:GOLDM1!", "SILVERM": "MCX:SILVERM1!"}
+
+
+def _tvl(sym):
+    """Symbol as a link that opens its chart on TradingView."""
+    import urllib.parse as _up
+    t = _TV_MCX.get(sym, "MCX:" + sym + "1!")
+    return '<a href="{u}" target="_blank" rel="noopener" title="open chart in TradingView" style="color:inherit;text-decoration:none;border-bottom:1px dotted #888"><b>{t}</b></a>'.format(u="https://www.tradingview.com/chart/gvpsrNIE/?symbol=" + _up.quote(t, safe=":"), t=sym)
+
+
 def _score(sym, df):
     if df is None or len(df) < SMA_LEN + 1:
         return None
@@ -244,6 +273,7 @@ def _score(sym, df):
         "candle": _ist(df.index[-1]).strftime("%H:%M"),
         "candle_chg_pct": round((close / opn - 1) * 100, 2) if opn else None,
         "candle_type": "GREEN" if close > opn else "RED" if close < opn else "DOJI",
+        "ohlc": (opn, float(last["high"]), float(last["low"]), close),
         "candle_vol": int(vol[-1]), "sma_vol": int(round(base)), "multiple": round(float(vol[-1] / base), 2),
         "day_vol": int(vol[today_mask].sum()),
     }
@@ -538,13 +568,17 @@ def page_html():
     m = d["meta"]
     G, R, M = "#3fb950", "#f85149", "#9aa0a6"
 
+    def _td(c):
+        c = str(c)
+        return f"<td>{c}</td>"
+
     def tbl(cols, rows, empty, styles=None):
         if not rows:
             return f'<p style="color:{M}">{empty}</p>'
         body = ""
         for i, r in enumerate(rows):
             st = styles[i] if styles else ""
-            body += ("<tr style='background:" + st + "'>" if st else "<tr>") + "".join(f"<td>{c}</td>" for c in r) + "</tr>"
+            body += ("<tr style='background:" + st + "'>" if st else "<tr>") + "".join(_td(c) for c in r) + "</tr>"
         return ('<div style="overflow-x:auto"><table><tr>' + "".join(f"<th>{c}</th>" for c in cols) + "</tr>" + body + "</table></div>")
 
     def _zcell(x, kind):
@@ -579,8 +613,8 @@ def page_html():
            f'<a href="/scanner">Stock scanner</a> &middot; <a href="/spurt10">Stock volume spurt</a></div>']
 
     # 1 volume spurt
-    sp = [[f"<b>{x['symbol']}</b>", f"{x['price']:.2f}", pct(x["day_chg_pct"]), x["candle"], pct(x["candle_chg_pct"]),
-           f'<b style="color:{G if x["candle_type"] == "GREEN" else R if x["candle_type"] == "RED" else M}">{x["candle_type"]}</b>',
+    sp = [[_tvl(x['symbol']), f"{x['price']:.2f}", pct(x["day_chg_pct"]), x["candle"], pct(x["candle_chg_pct"]),
+           _candle_svg(*x["ohlc"]) + f' <b style="color:{G if x["candle_type"] == "GREEN" else R if x["candle_type"] == "RED" else M}">{x["candle_type"]}</b>',
            f"{x['candle_vol']:,}", f"{x['sma_vol']:,}", f'<b style="color:{"#d29922" if x["multiple"] >= m["alert_mult"] else "#e6e6e6"}">{x["multiple"]:.2f}x</b>', f"{x['day_vol']:,}"]
           for x in d["spurt"]]
     for row, x in zip(sp, d["spurt"]):
