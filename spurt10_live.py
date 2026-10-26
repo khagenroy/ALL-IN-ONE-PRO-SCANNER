@@ -144,11 +144,54 @@ def _load_universe():
     return _universe
 
 
+# ---------------------------------------------------------------- bid / ask depth -> liquidity (read from the same quote call, no extra request)
+LIQ_SPREAD_OK = 0.10       # best bid-ask spread (% of price) up to this = LIQUID
+LIQ_REMOVE_THIN = True     # True = THIN stocks (wide bid-ask spread) are taken out of the spurt list, the tracker, the SELL signals and the alerts
+THIN_LIST_MIN_MULT = 10.0  # the illiquid list at the bottom of /spurt10 shows thin stocks with a spurt of at least this multiple
+THIN_LIST_MAX = 30
+LIQ_SPREAD_THIN = 0.25     # above this = THIN (wide spread: hard to get in / out at the shown price); in between = OK
+_depth = {}                # {symbol: (spread_pct, buy_qty / sell_qty)} filled by _fetch_quotes every cycle
+
+
+def _parse_depth(q):
+    """(spread %, total buy qty / total sell qty) from one marketfeed/quote row, or None when the depth fields are not there."""
+    try:
+        d = q.get("depth") or {}
+        buy, sell = d.get("buy") or [], d.get("sell") or []
+        bid = float(buy[0].get("price")) if buy else 0.0
+        ask = float(sell[0].get("price")) if sell else 0.0
+        spread = None
+        if bid > 0 and ask > 0 and ask >= bid:
+            spread = round((ask - bid) / ((ask + bid) / 2.0) * 100.0, 3)
+        bq = q.get("buy_quantity")
+        sq = q.get("sell_quantity")
+        if bq is None:
+            bq = sum(float(x.get("quantity") or 0) for x in buy) or None
+        if sq is None:
+            sq = sum(float(x.get("quantity") or 0) for x in sell) or None
+        ratio = round(float(bq) / float(sq), 2) if bq and sq and float(sq) > 0 else None
+        if spread is None and ratio is None:
+            return None
+        return spread, ratio
+    except Exception:
+        return None
+
+
+def _liq_fields(sym):
+    """spread_pct, bs_ratio and the LIQUID / OK / THIN tag of a stock ('' when the quote had no depth)."""
+    v = _depth.get(sym)
+    if not v or v[0] is None:
+        return {"spread_pct": None, "bs_ratio": (v[1] if v else None), "liq": ""}
+    sp = v[0]
+    return {"spread_pct": sp, "bs_ratio": v[1], "liq": "LIQUID" if sp <= LIQ_SPREAD_OK else "THIN" if sp > LIQ_SPREAD_THIN else "OK"}
+
+
 def _fetch_quotes(uni):
     """{symbol: (last_price, day_volume)} via marketfeed/quote, 1000 ids per call, ~1 call/s."""
     by_id = {sid: sym for sym, sid in uni}
     ids = [int(s) for s in by_id]
     out, bad = {}, 0
+    _depth.clear()
     for i in range(0, len(ids), 1000):
         chunk = ids[i:i + 1000]
         resp = ls._dhan_post("marketfeed/quote", {"NSE_EQ": chunk}, f"quote batch {i // 1000 + 1}")
@@ -164,11 +207,15 @@ def _fetch_quotes(uni):
                 bad += 1
                 continue
             out[sym] = (px, vol)
+            dp = _parse_depth(q)
+            if dp:
+                _depth[sym] = dp
         time.sleep(1.1)
     if not out:
         raise RuntimeError("marketfeed/quote returned no usable rows (price/volume fields missing?)")
     if bad:
         log.warning(f"Spurt10: {bad} quote rows had no price/volume")
+    log.info(f"Spurt10: bid/ask depth read for {len(_depth)} of {len(out)} stocks")
     return out
 
 
@@ -507,17 +554,32 @@ def run_once():
                 failed += 1
                 if failed <= 3:
                     log.warning(f"Spurt10 candle fetch failed: {e}")
+    thin_removed = 0
+    thin_list = []
+    if LIQ_REMOVE_THIN and _depth:                                  # ADDED: leave out thin stocks (wide bid-ask spread); a stock with no depth data stays
+        for _r in rows:
+            _r.update(_liq_fields(_r["symbol"]))
+        thin_removed = sum(1 for _r in rows if _r.get("liq") == "THIN")
+        thin_list = sorted(({"symbol": _r["symbol"], "price": _r["price"], "candle": _r["candle"], "multiple": _r["multiple"], "spread_pct": _r["spread_pct"]}
+                            for _r in rows if _r.get("liq") == "THIN" and _r["multiple"] >= THIN_LIST_MIN_MULT), key=lambda t: -t["multiple"])[:THIN_LIST_MAX]
+        rows = [_r for _r in rows if _r.get("liq") != "THIN"]
+        if thin_removed:
+            log.info(f"Spurt10: {thin_removed} thin stock(s) left out (spread above {LIQ_SPREAD_THIN}%)")
     rows.sort(key=lambda r: -r["multiple"])
     top = rows[:TOP_N]
     top_ids = {id(x) for x in top}
     sell_hits = []
     trk_items = []
     for r in rows:                                                  # ADDED: Section A support / resistance zones of each stock
+        _lq = _liq_fields(r["symbol"])
+        r.update(_lq)
         tk = r.pop("_trk", None)
         if tk:
+            tk.update(_lq)
             trk_items.append(tk)
         sg = r.pop("_sell", None)
         if sg:
+            sg.update(_lq)
             sell_hits.append(sg)
         zs = r.pop("_zones", None)
         ztf = r.pop("_zone_tf", 10)
@@ -562,7 +624,7 @@ def run_once():
     meta = {
         "run": now_ist.strftime("%Y-%m-%d %H:%M:%S IST"), "took_s": round(time.monotonic() - t0),
         "universe": len(uni), "quoted": len(quotes), "price_ok": n_pass, "shortlisted": len(names),
-        "scored": len(rows), "failed": failed, "etf_excluded": len(_excluded), "min_price": MIN_PRICE, "sma_len": SMA_LEN, "alert_mult": ALERT_MULT,
+        "scored": len(rows), "failed": failed, "etf_excluded": len(_excluded), "thin_removed": thin_removed, "thin_list": thin_list, "min_price": MIN_PRICE, "sma_len": SMA_LEN, "alert_mult": ALERT_MULT,
         "watch": watch_view, "watch_until": f"{WATCH_UNTIL_MIN // 60:02d}:{WATCH_UNTIL_MIN % 60:02d}", "watch_mult": WATCH_MULT,
     }
     _write(top, meta)
@@ -681,7 +743,7 @@ def _zone_fields(zs, price, candle_chg):
 _hist_seen = {"date": None, "keys": set()}
 HIST_COLS = ["date", "run", "candle", "symbol", "price", "day_chg_pct", "candle_chg_pct", "candle_vol", "sma_vol", "multiple", "day_vol",
              "support", "support_dist_pct", "resistance", "resistance_dist_pct", "zone_view", "zone_src", "at_zone",
-             "conf_support", "conf_resistance"]      # conf_* = the 30-min zone that coincides with the nearest 15-min zone ("" = none)
+             "conf_support", "conf_resistance", "spread_pct", "liq"]      # spread_pct / liq = best bid-ask spread % and LIQUID / OK / THIN;  conf_* = the 30-min zone that coincides with the nearest 15-min zone ("" = none)
 
 
 def _append_history(rows, now_ist):
@@ -822,6 +884,18 @@ def _watch_html(meta):
             f'<th>Support zone ({ZONE_TF}m)</th><th>Resistance zone ({ZONE_TF}m)</th><th>Status now</th><th>Where</th><th>Alert sent</th><th>Checked</th></tr>{rows}</table></div>')
 
 
+def _thin_html(meta):
+    """ADDED: stocks with a volume spurt that were left out of the list because their bid-ask spread is wide (not liquid)."""
+    tl = meta.get("thin_list") or []
+    head = (f'<h3 style="margin:22px 0 4px">Illiquid stocks with a volume spurt (left out of the list above) &mdash; {len(tl)}</h3>'
+            f'<div class="m">Spread above {LIQ_SPREAD_THIN}% of the price (best bid vs best ask), so the spurt is hard to trade at the shown price. Spurts of {THIN_LIST_MIN_MULT:g}x or more, biggest first.</div>')
+    if not tl:
+        return head + '<div class="m">None right now.</div>'
+    rows = "".join(f"<tr><td>{i}</td><td>{_tvl(t['symbol'])}</td><td>{t['price']:.2f}</td><td>{t['candle']}</td><td>{t['multiple']:.2f}x</td><td style='color:#c62828'>{t['spread_pct']:.2f}%</td></tr>"
+                   for i, t in enumerate(tl, 1))
+    return (head + '<div class="w"><table class="sp"><tr><th>#</th><th>Symbol</th><th>Price</th><th>Candle</th><th>Multiple</th><th>Bid-ask spread</th></tr>' + rows + '</table></div>')
+
+
 def _html(top, meta):
     def col(v):
         return "#0a7d33" if (v or 0) > 0 else "#c62828" if (v or 0) < 0 else "#555"
@@ -847,6 +921,7 @@ def _html(top, meta):
     def mc(r):
         return ' style="background:#ffe066"' if r["multiple"] >= meta.get("alert_mult", 3.0) else ""
 
+
     body = "".join(
         f"<tr{hl(r)}><td>{i}</td><td>{_tvl(r['symbol'])}</td><td>{r['price']:.2f}</td><td>{pct(r['day_chg_pct'])}</td>"
         f"<td>{r['candle']}</td><td>{pct(r['candle_chg_pct'])}</td>{ctype(r)}<td>{r['candle_vol']:,}</td>"
@@ -860,13 +935,14 @@ def _html(top, meta):
 th,td{{border:1px solid #ddd;padding:6px 8px;text-align:right;font-size:14px}}th{{background:#222;color:#fff}}td:nth-child(2){{text-align:left}}
 .m{{color:#555;font-size:13px;margin:6px 0 12px}}.w{{overflow-x:auto}}</style></head><body>
 <h2>Volume Spurt &mdash; latest 10-min candle vs {meta['sma_len']}-candle volume average (top {len(top)})</h2>
-<div class="m">Run: {meta['run']} (took {meta['took_s']}s) &middot; {meta['universe']} NSE stocks (ETFs left out: {meta.get('etf_excluded', 0)}), {meta['price_ok']} priced &ge; {meta['min_price']:.0f},
+<div class="m">Run: {meta['run']} (took {meta['took_s']}s) &middot; {meta['universe']} NSE stocks (ETFs left out: {meta.get('etf_excluded', 0)}; thin stocks left out: {meta.get('thin_removed', 0)}), {meta['price_ok']} priced &ge; {meta['min_price']:.0f},
 {meta['shortlisted']} shortlisted, {meta['scored']} scored, {meta['failed']} errors &middot; refreshes every 10 min &middot; {LEGEND} &middot; phone alert at {meta.get('alert_mult', 3.0):g}x or more &middot; zones = ALL IN ONE PRO order-block zones on the {ZONE_TF}-min chart (same as the indicator on a {ZONE_TF}-min chart); purple "{ZONE_TF}m+{CONF_TF}m zone" = the same zone also exists on the {CONF_TF}-min chart (stronger); volume spurt = 10-min candles &middot;
 <a href="/spurt10.csv">CSV</a> (this cycle) &middot; <a href="/spurt10_history">full-day history page</a> &middot; <a href="/spurt10_history.csv">history CSV</a> &middot; <a href="/spurt_sell">Spurt SELL signals</a> &middot; <a href="/scanner">Scanner</a></div>
 <div class="w"><table class="sp"><tr><th>#</th><th>Symbol</th><th>Price</th><th>Day %</th><th>Candle</th><th>Candle %</th><th>Candle type</th>
 <th>Candle volume</th><th>{meta['sma_len']}-candle avg vol</th><th>Multiple</th><th>Day volume</th><th>Support zone ({ZONE_TF}m)</th><th>Resistance zone ({ZONE_TF}m)</th><th>Zone view</th></tr>{body}</table></div>
 {_link_html()}
 {_watch_html(meta)}
+{_thin_html(meta)}
 {_SORT_JS}</body></html>"""
 
 
