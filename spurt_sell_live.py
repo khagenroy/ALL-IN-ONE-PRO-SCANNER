@@ -284,6 +284,11 @@ def _status(r, need_mult, is_signal, red_col):
     return f"waiting for red candle ({r['since']}/{WAIT})"
 
 
+_NO_TRK = (f'<h3 style="margin:18px 0 4px">All volume-spurt stocks today (&ge; {TRACK_MULT:g}x)</h3>'
+           f'<div class="m">No stock has had a 10-min candle of {TRACK_MULT:g}x volume or more yet today. Every stock that reaches it is listed here and followed for {WAIT} candles. '
+           f'The {MULT:g}x in the rule above is only the level needed for a SELL signal.</div>')
+
+
 def tracker_html(signal_syms=()):
     """The 'all spurt stocks of today' table (from the saved tracker file). '' when there is nothing yet."""
     try:
@@ -292,7 +297,7 @@ def tracker_html(signal_syms=()):
             data = json.load(fh)
         rows = list(data.get("rows", {}).values())
         if not rows:
-            return ""
+            return _NO_TRK
         rows.sort(key=lambda r: r["spurt_at"], reverse=True)
         try:
             import spurt_sell_x
@@ -323,6 +328,8 @@ def tracker_html(signal_syms=()):
                 '<style>table.trk th,table.trk td{padding:4px 5px;font-size:12px;line-height:1.25}table.trk td.st{min-width:152px;padding:2px 4px;text-align:left}table.trk th{font-size:11.5px}</style><table class="s trk"><tr><th>#</th><th>Symbol</th><th>Spurt at</th><th title="volume multiple of the spurt candle">Spurt x</th><th title="best multiple today">Best x</th><th>Spurt candle</th><th title="candles since the spurt">Since</th>'
                 '<th>1st candle after</th><th>Latest</th><th>Spurt (dot) + next candles</th><th title="change since the spurt candle closed">Move</th><th title="distance from the highest high since the spurt">From high</th><th title="latest candle volume vs the spurt candle volume">Vol vs spurt</th><th title="solid red candle with higher volume has come">Red + vol up</th><th title="resistance zone touched since the spurt">Res. zone</th><th>' + str(HTF_MIN) + 'm zone</th><th>RSI</th><th>Checklist</th><th title="close of the latest closed 10-min candle">Close</th><th title="last traded price now (refreshed when the page is opened)">Live</th><th>Status</th><th>Seen</th></tr>'
                 f'{out}</table><br>')
+    except FileNotFoundError:
+        return _NO_TRK
     except Exception:
         return ""
 
@@ -527,7 +534,7 @@ rows.forEach(function(r){b.appendChild(r);});});});
 
 
 _RULES_BANNER = ('<style>@keyframes rb{0%,49%{background:#fff176;color:#d50000}50%,100%{background:#d50000;color:#fff}}</style>'
-                 '<div style="animation:rb 1s step-end infinite;background:#fff176;border:3px solid #d50000;border-radius:6px;'
+                 '<div style="animation:rb 1s step-end infinite;position:sticky;top:0;z-index:99999;background:#fff176;border:3px solid #d50000;border-radius:6px;'
                  'padding:10px 14px;margin:0 0 14px;color:#d50000;font-weight:900;font-size:22px;line-height:1.5;text-align:center">'
                  '1. DON\'T RUSH &nbsp;&nbsp;|&nbsp;&nbsp; 2. DON\'T TRADE WITHOUT VALID SET UP &nbsp;&nbsp;|&nbsp;&nbsp; 3. 1 VALID SETUP ENOUGH TO EARN MONEY&nbsp;&nbsp;|&nbsp;&nbsp; 4. DON&#39;T BE EMOTIONAL ATTACHED</div>')
 

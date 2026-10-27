@@ -423,7 +423,7 @@ def _log_signals(key, sells, day, now_ist):
 
 # ----------------------------------------------------------------------------- page
 _RULES_BANNER = ('<style>@keyframes rb{0%,49%{background:#fff176;color:#d50000}50%,100%{background:#d50000;color:#fff}}</style>'
-                 '<div style="animation:rb 1s step-end infinite;background:#fff176;border:3px solid #d50000;border-radius:6px;'
+                 '<div style="animation:rb 1s step-end infinite;position:sticky;top:0;z-index:99999;background:#fff176;border:3px solid #d50000;border-radius:6px;'
                  'padding:10px 14px;margin:0 0 14px;color:#d50000;font-weight:900;font-size:22px;line-height:1.5;text-align:center">'
                  '1. DON\'T RUSH &nbsp;&nbsp;|&nbsp;&nbsp; 2. DON\'T TRADE WITHOUT VALID SET UP &nbsp;&nbsp;|&nbsp;&nbsp; 3. 1 VALID SETUP ENOUGH TO EARN MONEY&nbsp;&nbsp;|&nbsp;&nbsp; 4. DON&#39;T BE EMOTIONAL ATTACHED</div>')
 
@@ -491,7 +491,9 @@ rows.forEach(function(r){b.appendChild(r);});});});
         except Exception:
             trk_html = ""
         if not trk_html:
-            trk_html = '<div class="m">No spurt tracked yet today. It fills when a candle reaches the multiple.</div>'
+            trk_html = (f'<h2>All volume-spurt {"commodities" if key == "mcx" else "coins"} today (&ge; {cfg["track_mult"]:g}x)</h2>'
+                                f'<div class="m">None has had a {cfg["tf"]} candle of {cfg["track_mult"]:g}x volume or more yet today. Every one that reaches it is listed here and followed for {WAIT} candles. '
+                                f'The {cfg["sell_mult"]:g}x in the rule above is only the level needed for a SELL signal.</div>')
         d = date if date in dates else (dates[0] if dates else "")
         x = df[df["date"] == d].sort_values(["candle", "spurt_mult"], ascending=[False, False]) if d else df
         sig_rows = "".join(
