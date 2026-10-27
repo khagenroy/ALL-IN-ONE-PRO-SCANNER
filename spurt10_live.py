@@ -552,7 +552,7 @@ def _candle_reminder(now, step_min, label):
         _remind_last["k"] = k
         import requests
         requests.post(f"https://ntfy.sh/{topic}",
-                      data="1. DON'T RUSH\n2. DON'T TRADE WITHOUT VALID SET UP\n3. 1 VALID SETUP ENOUGH TO EARN MONEY".encode("utf-8"),
+                      data="1. DON'T RUSH\n2. DON'T TRADE WITHOUT VALID SET UP\n3. 1 VALID SETUP ENOUGH TO EARN MONEY\n4. DON'T BE EMOTIONAL ATTACHED".encode("utf-8"),
                       timeout=8, headers={"Title": f"{label} candle closed - read before you trade", "Priority": "urgent", "Tags": "rotating_light"})
     except Exception as e:
         log.warning(f"Candle reminder failed: {e}")
@@ -1039,7 +1039,7 @@ _SECTION_CSS = """<style>
 _RULES_BANNER = ('<style>@keyframes rb{0%,49%{background:#fff176;color:#d50000}50%,100%{background:#d50000;color:#fff}}</style>'
                  '<div style="animation:rb 1s step-end infinite;background:#fff176;border:3px solid #d50000;border-radius:6px;'
                  'padding:10px 14px;margin:0 0 14px;color:#d50000;font-weight:900;font-size:22px;line-height:1.5;text-align:center">'
-                 '1. DON\'T RUSH &nbsp;&nbsp;|&nbsp;&nbsp; 2. DON\'T TRADE WITHOUT VALID SET UP &nbsp;&nbsp;|&nbsp;&nbsp; 3. 1 VALID SETUP ENOUGH TO EARN MONEY</div>')
+                 '1. DON\'T RUSH &nbsp;&nbsp;|&nbsp;&nbsp; 2. DON\'T TRADE WITHOUT VALID SET UP &nbsp;&nbsp;|&nbsp;&nbsp; 3. 1 VALID SETUP ENOUGH TO EARN MONEY&nbsp;&nbsp;|&nbsp;&nbsp; 4. DON&#39;T BE EMOTIONAL ATTACHED</div>')
 
 
 
