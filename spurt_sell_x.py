@@ -206,6 +206,7 @@ def track(key, df, sym, htf_df=None):
         colour = lambda i: "GREEN" if c[i] > o[i] else "RED" if c[i] < o[i] else "DOJI"
         red_solid_vol = any(c[i] < o[i] and h[i] > l[i] and (o[i] - c[i]) / (h[i] - l[i]) * 100.0 >= BODY_PCT and v[i] > v[i - 1]
                             for i in range(j + 1, L + 1))
+        red_any = any(c[i] < o[i] for i in range(j + 1, L + 1))
         res_zone = htf_zone = None                                    # zone checks only while the sell window is open; older rows keep their last value
         if colour(j) == "GREEN" and L - j <= WAIT:
             try:
@@ -215,7 +216,7 @@ def track(key, df, sym, htf_df=None):
                 res_zone = None
             htf_zone = _htf_touch(htf_df, h, l, j, L)
         return {
-            "res_zone": res_zone, "htf_zone": htf_zone,
+            "res_zone": res_zone, "htf_zone": htf_zone, "red_any": bool(red_any),
             "move_pct": round(float((c[L] / c[j] - 1) * 100), 2), "off_high_pct": round(float((c[L] / h[j:L + 1].max() - 1) * 100), 2),
             "vol_vs_spurt": round(float(v[L] / v[j]), 2) if v[j] > 0 else None,
             "strip": [f"{o[i]:.4f}|{h[i]:.4f}|{l[i]:.4f}|{c[i]:.4f}" for i in range(j, min(L, j + WAIT) + 1)],
@@ -322,6 +323,30 @@ def _live_cell(lp, sym, close):
     return f"<b style='color:{c}'>{v:g}</b>"
 
 
+def _status(r, need_mult, is_signal, red_col):
+    """Plain-words status of a tracked spurt. 'Red candle' in the rule means a SOLID red candle (body >= 60% of its range) with higher volume than the candle before it."""
+    if is_signal:
+        return f"<b style='color:{red_col}'>SELL SIGNAL (below)</b>"
+    if r["spurt_colour"] != "GREEN":
+        return "red spurt - no sell setup"
+    if r["since"] == 0:
+        return "spurt just happened"
+    if r.get("red_solid_vol"):
+        miss = []
+        if r.get("spurt_mult", 0) < need_mult:
+            miss.append(f"spurt below {need_mult:g}x")
+        if not r.get("res_zone"):
+            miss.append("resistance zone")
+        if not r.get("rsi_peak", 0) > RSI_MIN:
+            miss.append(f"RSI above {RSI_MIN:g}")
+        return "solid red + volume up seen" + (" - missing: " + ", ".join(miss) if miss else "")
+    if r["since"] > WAIT:
+        return "window over - no solid red candle with higher volume came"
+    if r.get("red_any"):
+        return f"red candle seen but not solid / volume not higher ({r['since']}/{WAIT})"
+    return f"waiting for red candle ({r['since']}/{WAIT})"
+
+
 def _trk_score(key, r):
     """Checklist points met so far: 1 green spurt (>= the SELL multiple), 2 resistance zone, 3+4 solid red candle with higher volume, 5 higher-time-frame zone, 6 RSI above the level."""
     return (1 if (r.get("spurt_colour") == "GREEN" and r.get("spurt_mult", 0) >= CFG[key]["sell_mult"]) else 0) + (1 if r.get("res_zone") else 0) \
@@ -397,6 +422,13 @@ def _log_signals(key, sells, day, now_ist):
 
 
 # ----------------------------------------------------------------------------- page
+_RULES_BANNER = ('<style>@keyframes rb{0%,49%{background:#fff176;color:#d50000}50%,100%{background:#d50000;color:#fff}}</style>'
+                 '<div style="animation:rb 1s step-end infinite;background:#fff176;border:3px solid #d50000;border-radius:6px;'
+                 'padding:10px 14px;margin:0 0 14px;color:#d50000;font-weight:900;font-size:22px;line-height:1.5;text-align:center">'
+                 '1. DON\'T RUSH &nbsp;&nbsp;|&nbsp;&nbsp; 2. DON\'T TRADE WITHOUT VALID SET UP &nbsp;&nbsp;|&nbsp;&nbsp; 3. 1 VALID SETUP ENOUGH TO EARN MONEY</div>')
+
+
+
 def page_html(key, date=None):
     import html as _h
     cfg = CFG[key]
@@ -406,7 +438,7 @@ def page_html(key, date=None):
                 '<style>body{background:#0e1117;color:#e6e6e6;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:0;padding:24px}'
                 'table{border-collapse:collapse;width:100%;font-size:13px;margin-bottom:8px}th,td{padding:8px 10px;text-align:left;border-bottom:1px solid #262b36}'
                 'th{background:#161b22;color:#9aa0a6;font-weight:600;cursor:pointer}tr:hover{background:#161b22}a{color:#58a6ff}.m{color:#9aa0a6;font-size:13px;margin:6px 0 12px}'
-                'h2{margin:24px 0 4px}</style></head><body>')
+                'h2{margin:24px 0 4px}</style></head><body>' + _RULES_BANNER)
         sort_js = """<script>
 document.querySelectorAll('table.s th').forEach(function(th,i){th.title='click to sort';
 th.addEventListener('click',function(){var t=th.closest('table'),b=t.tBodies[0],rows=Array.prototype.slice.call(b.rows),
@@ -439,16 +471,7 @@ rows.forEach(function(r){b.appendChild(r);});});});
                 body = ""
                 lp = live_prices(key, [r["symbol"] for r in rows])
                 for i, r in enumerate(rows, 1):
-                    if r["symbol"] in sig_today:
-                        status = f"<b style='color:{R}'>SELL SIGNAL (below)</b>"
-                    elif r["spurt_colour"] != "GREEN":
-                        status = "red spurt - no sell setup"
-                    elif r["since"] > WAIT:
-                        status = "window over"
-                    elif r["since"] == 0:
-                        status = "spurt just happened"
-                    else:
-                        status = f"waiting for red candle ({r['since']}/{WAIT})"
+                    status = _status(r, cfg["sell_mult"], r["symbol"] in sig_today, R)
                     zt = lambda z: "-" if z in (None, "") else _h.escape(str(z))
                     pc = lambda v: "-" if v is None else f'<span style="color:{G if v > 0 else R if v < 0 else M}">{v:+.2f}%</span>'
                     rsi_ok = r["rsi_peak"] > RSI_MIN

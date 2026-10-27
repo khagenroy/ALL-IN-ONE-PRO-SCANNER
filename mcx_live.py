@@ -570,6 +570,13 @@ def _load():
         return None
 
 
+_RULES_BANNER = ('<style>@keyframes rb{0%,49%{background:#fff176;color:#d50000}50%,100%{background:#d50000;color:#fff}}</style>'
+                 '<div style="animation:rb 1s step-end infinite;background:#fff176;border:3px solid #d50000;border-radius:6px;'
+                 'padding:10px 14px;margin:0 0 14px;color:#d50000;font-weight:900;font-size:22px;line-height:1.5;text-align:center">'
+                 '1. DON\'T RUSH &nbsp;&nbsp;|&nbsp;&nbsp; 2. DON\'T TRADE WITHOUT VALID SET UP &nbsp;&nbsp;|&nbsp;&nbsp; 3. 1 VALID SETUP ENOUGH TO EARN MONEY</div>')
+
+
+
 def page_html():
     d = _load()
     head = ('<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
@@ -577,7 +584,7 @@ def page_html():
             '<style>body{background:#0e1117;color:#e6e6e6;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:0;padding:24px}'
             'table{border-collapse:collapse;width:100%;font-size:13px;margin-bottom:8px}th,td{padding:8px 10px;text-align:left;border-bottom:1px solid #262b36}'
             'th{background:#161b22;color:#9aa0a6;font-weight:600}tr:hover{background:#161b22}a{color:#58a6ff}.m{color:#9aa0a6;font-size:13px;margin:6px 0 12px}'
-            'h2{margin:30px 0 4px}h3{margin:18px 0 6px}</style></head><body>')
+            'h2{margin:30px 0 4px}h3{margin:18px 0 6px}</style></head><body>' + _RULES_BANNER)
     if not d:
         return (head + "<h2>Commodity scanner (MCX)</h2><p>No cycle has run yet. It starts at 09:10 IST on a trading day (Mon-Fri) and refreshes every 15 minutes "
                 "until the MCX session ends.</p></body></html>")
