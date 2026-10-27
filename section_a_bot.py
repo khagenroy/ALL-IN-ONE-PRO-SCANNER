@@ -121,7 +121,7 @@ def _record(cf, action, p, **extra):
     except Exception as e:
         log.warning(f"bot log write failed: {e}")
     log.info(f"[bot] {action} {p.get('symbol')} {p.get('signal')} {extra}")
-    if cf["ntfy"] and action in ("WOULD_SEND", "SENT", "SEND_FAILED", "CONFIRMED_BUT_SKIPPED"):
+    if cf["ntfy"] and cf["live"] and action in ("WOULD_SEND", "SENT", "SEND_FAILED", "CONFIRMED_BUT_SKIPPED"):   # CHANGED: no phone alerts in paper mode
         try:
             requests.post(f"https://ntfy.sh/{cf['ntfy']}", timeout=5,
                           data=f"{row['mode']} {action}: {p.get('symbol')} {p.get('signal')} "
@@ -528,7 +528,7 @@ def run_rsi(rows):
         cf = cfg()
         rc = _rsi_cfg()
         paper_on = cf["enabled"] and rc["paper"]
-        push_on = bool(cf["ntfy"] and rc["ntfy"])
+        push_on = False   # CHANGED: RSI Flush phone alerts switched off (the /scanner table and the paper trades keep working)
         if not paper_on and not push_on:
             return
         cf_quiet = dict(cf, ntfy="")           # RSI Flush decisions are logged without the Section A style urgent push

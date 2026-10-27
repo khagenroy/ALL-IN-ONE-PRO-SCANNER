@@ -530,6 +530,7 @@ asc=th.dataset.asc!=='1';th.dataset.asc=asc?'1':'0';
 function val(r){var x=r.cells[i].innerText.replace(/[,%x]/g,'').trim();var n=parseFloat(x);return isNaN(n)?x.toLowerCase():n;}
 rows.sort(function(a,b2){var p=val(a),q=val(b2);if(p<q)return asc?-1:1;if(p>q)return asc?1:-1;return 0;});
 rows.forEach(function(r){b.appendChild(r);});});});
+(function(){function fx(){var bn=document.querySelector('div[style*="rb 1s"]');var h=bn?bn.offsetHeight:0;document.querySelectorAll('table.s th').forEach(function(th){th.style.position='sticky';th.style.top=(h-3)+'px';th.style.zIndex=5;});}fx();window.addEventListener('resize',fx);})();
 </script>"""
 
 
