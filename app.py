@@ -406,6 +406,22 @@ def _mcx_loop():
 if MCX_AUTORUN:
     threading.Thread(target=_mcx_loop, daemon=True, name="mcx-autorun").start()
 
+OPT_AUTORUN = os.environ.get("OPT_AUTORUN", "true").strip().lower() == "true"
+
+
+def _opt_loop():
+    """Option (CE/PE) volume spurt scanner - indices + F&O stocks (read-only)."""
+    try:
+        import opt_live
+        opt_live.loop()
+    except Exception as e:
+        log.error(f"Option spurt loop could not start: {e}")
+
+
+if OPT_AUTORUN:
+    threading.Thread(target=_opt_loop, daemon=True, name="opt-autorun").start()
+
+
 CRYPTO_AUTORUN = os.environ.get("CRYPTO_AUTORUN", "true").strip().lower() == "true"
 
 
@@ -730,6 +746,50 @@ def spurt_paper_csv():
 @app.route("/spurt_sell.csv", methods=["GET"])
 def spurt_sell_csv():
     return _serve_csv("spurt_sell_history.csv", "spurt_sell_signals_history.csv")
+
+
+@app.route("/opt_sell", methods=["GET"])
+def opt_sell_page():
+    import opt_sell
+    return opt_sell.page_html()
+
+
+@app.route("/opt_sell.csv", methods=["GET"])
+def opt_sell_csv():
+    import opt_sell
+    if not os.path.exists(opt_sell.SIG_PATH):
+        return "No option signals yet.", 200
+    return send_file(opt_sell.SIG_PATH, mimetype="text/csv", as_attachment=True, download_name="opt_sell_history.csv")
+
+
+@app.route("/opt_spurt", methods=["GET"])
+def opt_spurt_page():
+    try:
+        import opt_live
+        return opt_live.page_html()
+    except Exception as e:
+        log.exception("/opt_spurt failed")
+        return f"Option spurt page error: {e}", 200
+
+
+@app.route("/opt_spurt_history.csv", methods=["GET"])
+def opt_spurt_history_csv():
+    import opt_live
+    from flask import send_file
+    if not os.path.exists(opt_live.HIST_PATH):
+        return "No option spurt history yet.", 200
+    return send_file(opt_live.HIST_PATH, mimetype="text/csv", as_attachment=True, download_name="opt_spurt_history.csv")
+
+
+@app.route("/us_probe", methods=["GET"])
+def us_probe_page():
+    """Read-only check: does Dhan's Data API give US stock candles? (us_probe.py - places no orders, stores nothing)"""
+    try:
+        import us_probe
+        return us_probe.page_html()
+    except Exception as e:
+        log.exception("/us_probe failed")
+        return f"US stocks check error: {e}", 200
 
 
 @app.route("/mcx_sell", methods=["GET"])

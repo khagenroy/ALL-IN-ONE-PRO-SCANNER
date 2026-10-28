@@ -958,7 +958,7 @@ def _html(top, meta):
 <style>body{{font-family:Arial,sans-serif;margin:12px;background:#fafafa}}table{{border-collapse:collapse;width:100%;background:#fff}}
 th,td{{border:1px solid #ddd;padding:6px 8px;text-align:right;font-size:14px}}th{{background:#222;color:#fff}}td:nth-child(2){{text-align:left}}
 .m{{color:#555;font-size:13px;margin:6px 0 12px}}.w{{overflow-x:auto}}</style></head><body>
-{_RULES_BANNER}
+{_RULES_BANNER}{_idx()}
 <h2>Volume Spurt &mdash; latest 10-min candle vs {meta['sma_len']}-candle volume average (top {len(top)})</h2>
 <div class="m">Run: {meta['run']} (took {meta['took_s']}s) &middot; {meta['universe']} NSE stocks (ETFs left out: {meta.get('etf_excluded', 0)}; thin stocks left out: {meta.get('thin_removed', 0)}), {meta['price_ok']} priced &ge; {meta['min_price']:.0f},
 {meta['shortlisted']} shortlisted, {meta['scored']} scored, {meta['failed']} errors &middot; refreshes every 10 min &middot; {LEGEND} &middot; phone alert at {meta.get('alert_mult', 3.0):g}x or more &middot; zones = ALL IN ONE PRO order-block zones on the {ZONE_TF}-min chart (same as the indicator on a {ZONE_TF}-min chart); purple "{ZONE_TF}m+{CONF_TF}m zone" = the same zone also exists on the {CONF_TF}-min chart (stronger); volume spurt = 10-min candles &middot;
@@ -1039,8 +1039,17 @@ _SECTION_CSS = """<style>
 _RULES_BANNER = ('<style>@keyframes rb{0%,49%{background:#fff176;color:#d50000}50%,100%{background:#d50000;color:#fff}}</style>'
                  '<div style="animation:rb 1s step-end infinite;position:sticky;top:0;z-index:99999;background:#fff176;border:3px solid #d50000;border-radius:6px;'
                  'padding:10px 14px;margin:0 0 14px;color:#d50000;font-weight:900;font-size:22px;line-height:1.5;text-align:center">'
-                 '1. DON\'T RUSH &nbsp;&nbsp;|&nbsp;&nbsp; 2. DON\'T TRADE WITHOUT VALID SET UP &nbsp;&nbsp;|&nbsp;&nbsp; 3. 1 VALID SETUP ENOUGH TO EARN MONEY&nbsp;&nbsp;|&nbsp;&nbsp; 4. DON&#39;T BE EMOTIONAL ATTACHED</div>')
+                 '1. DON&#39;T RUSH&nbsp;&nbsp;|&nbsp;&nbsp; 2. DON&#39;T TRADE WITHOUT VALID SET UP&nbsp;&nbsp;|&nbsp;&nbsp; 3. 1 VALID SETUP ENOUGH TO EARN MONEY&nbsp;&nbsp;|&nbsp;&nbsp; 4. DON&#39;T BE EMOTIONAL ATTACHED</div>')
 
+
+
+def _idx():
+    """Indices strip under the banner (empty text if Dhan gives nothing)."""
+    try:
+        import indices_strip
+        return indices_strip.strip_html()
+    except Exception:
+        return ""
 
 
 def section_html():
