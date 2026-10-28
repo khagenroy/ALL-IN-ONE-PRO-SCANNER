@@ -537,17 +537,8 @@ rows.forEach(function(r){b.appendChild(r);});});});
 _RULES_BANNER = ('<style>@keyframes rb{0%,49%{background:#fff176;color:#d50000}50%,100%{background:#d50000;color:#fff}}</style>'
                  '<div style="animation:rb 1s step-end infinite;position:sticky;top:0;z-index:99999;background:#fff176;border:3px solid #d50000;border-radius:6px;'
                  'padding:10px 14px;margin:0 0 14px;color:#d50000;font-weight:900;font-size:22px;line-height:1.5;text-align:center">'
-                 '1. DON&#39;T RUSH&nbsp;&nbsp;|&nbsp;&nbsp; 2. DON&#39;T TRADE WITHOUT VALID SET UP&nbsp;&nbsp;|&nbsp;&nbsp; 3. 1 VALID SETUP ENOUGH TO EARN MONEY&nbsp;&nbsp;|&nbsp;&nbsp; 4. DON&#39;T BE EMOTIONAL ATTACHED</div>')
+                 '1. DON\'T RUSH &nbsp;&nbsp;|&nbsp;&nbsp; 2. DON\'T TRADE WITHOUT VALID SET UP &nbsp;&nbsp;|&nbsp;&nbsp; 3. 1 VALID SETUP ENOUGH TO EARN MONEY&nbsp;&nbsp;|&nbsp;&nbsp; 4. DON&#39;T BE EMOTIONAL ATTACHED</div>')
 
-
-
-def _idx():
-    """Indices strip under the banner (empty text if Dhan gives nothing)."""
-    try:
-        import indices_strip
-        return indices_strip.strip_html()
-    except Exception:
-        return ""
 
 
 def page_html(date=None):
@@ -557,7 +548,7 @@ def page_html(date=None):
                 '<meta http-equiv="refresh" content="60"><title>Spurt SELL</title>'
                 '<style>body{font-family:Arial,sans-serif;margin:12px;background:#fafafa}table{border-collapse:collapse;background:#fff}'
                 'th,td{border:1px solid #ddd;padding:6px 8px;text-align:right;font-size:14px}th{background:#222;color:#fff}'
-                'td:nth-child(2){text-align:left}.m{color:#555;font-size:13px;margin:6px 0 12px}</style></head><body>' + _RULES_BANNER + _idx())
+                'td:nth-child(2){text-align:left}.m{color:#555;font-size:13px;margin:6px 0 12px}</style></head><body>' + _RULES_BANNER)
         rule = (f"Rule: a green 10-min candle with volume &ge; {MULT:g}x the average of the previous {AVG_LEN} candles (09:15 candle {'ignored' if SKIP_OPEN else 'included'}), then within "
                 f"{WAIT} candles a solid red candle (body &ge; {BODY_PCT:g}% of its range) with higher volume than the candle before it. "
                 f"SELL at that red candle's close, stop loss = its high, targets = {R1:g}x and {R2:g}x the risk. One signal per spurt. "
