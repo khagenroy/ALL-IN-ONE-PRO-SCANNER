@@ -36,8 +36,21 @@ except Exception:                                   # standalone fallback with t
         return out
 
 
+def _times(df):
+    """Candle open times as float seconds, from the DataFrame's date index. None when the index is not a date index."""
+    try:
+        import pandas as pd
+        if isinstance(df.index, pd.DatetimeIndex) and len(df) > 1:
+            t = df.index.asi8.astype(float) / 1e9
+            if np.all(np.isfinite(t)) and np.all(np.diff(t) > 0):
+                return t
+    except Exception:
+        pass
+    return None
+
+
 def live_zones(df):
-    """df = 10-minute candles (open/high/low/close), oldest first, last row = latest closed candle.
+    """df = candles (open/high/low/close, date index), oldest first, last row = latest closed candle.
     Returns [{"type": "SUPPORT"|"RESISTANCE", "lo": float, "hi": float, "value": float}, ...]  ([] if not enough candles)."""
     try:
         high = df["high"].to_numpy(dtype=float)
@@ -47,6 +60,17 @@ def live_zones(df):
         if n < ZIGZAG_LEN * 2 + ATR_LEN:
             return []
         atr = _atr(high, low, close, ATR_LEN)
+        tt = _times(df)                              # candle open times (None = not available -> count candles)
+
+        def _lookback(i, piv_list):
+            """How many candles back the order block's high/low is searched. The indicator measures it in TIME
+            ((time of previous candle - time of the pivot) / candle length), so weekends / overnight gaps count as if they were
+            candles - this copies that, so the zones are the same as on the TradingView chart."""
+            if not piv_list:
+                return 15
+            if tt is not None and i >= 1 and tt[i] - tt[i - 1] > 0:
+                return max(int((tt[i - 1] - tt[piv_list[-1]]) / (tt[i] - tt[i - 1])), 0)
+            return max(i - piv_list[-1] - 1, 0)      # fallback when the candle times are unknown (same as before)
 
         trend = np.ones(n, dtype=int)
         high_vals, low_vals = [], []
@@ -80,13 +104,13 @@ def live_zones(df):
             if trend[i] != trend[i - 1] and trend[i] == -1:
                 low_idx.append(i - ZIGZAG_LEN)
             if choch_bull[i]:
-                lb = max((i - high_idx[-1] - 1) if high_idx else 15, 0)
+                lb = _lookback(i, high_idx)
                 seg = low[max(i - lb, 0): i + 1]
                 bull.append({"value": float(seg.min()), "atr": float(atr[i])})
                 if len(bull) > 20:
                     bull.pop(0)
             if choch_bear[i]:
-                lb = max((i - low_idx[-1] - 1) if low_idx else 15, 0)
+                lb = _lookback(i, low_idx)
                 seg = high[max(i - lb, 0): i + 1]
                 bear.append({"value": float(seg.max()), "atr": float(atr[i])})
                 if len(bear) > 20:

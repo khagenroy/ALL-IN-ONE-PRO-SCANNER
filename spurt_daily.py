@@ -132,7 +132,9 @@ def _score(sym, sid, q, today):
     raw = _daily_candles(sym, sid, today)
     if raw is None:
         return {"_nodata": True}
-    df = raw[raw["d"] < today][["open", "high", "low", "close", "volume"]].astype(float).reset_index(drop=True)    # earlier days only
+    _oc = ["open", "high", "low", "close", "volume"]
+    df = raw[raw["d"] < today][_oc + ["d"]].reset_index(drop=True)                                              # earlier days only (+ the date, for the zones)
+    df[_oc] = df[_oc].astype(float)
     if q is None:
         t = raw[raw["d"] == today]
         if t.empty:
@@ -161,7 +163,12 @@ def _score(sym, sid, q, today):
     if day_chg is not None and abs(day_chg) > SPLIT_JUMP * 100.0:   # a move this big in one day = ex-date of a split / demerger, not a real spurt
         return {"_skip": True}
     today_bar = pd.DataFrame([{"open": q["open"], "high": q["high"], "low": q["low"], "close": q["px"], "volume": q["vol"]}])
-    zs = [z for z in (spurt_zones.live_zones(pd.concat([df, today_bar], ignore_index=True)) or [])
+    zdf = pd.concat([df[_oc], today_bar], ignore_index=True)
+    try:                                                            # real dates as index: the zones then count weekends / holidays like the indicator does
+        zdf.index = pd.DatetimeIndex(pd.to_datetime(list(df["d"]) + [today]))
+    except Exception:
+        zdf = zdf.reset_index(drop=True)
+    zs = [z for z in (spurt_zones.live_zones(zdf) or [])
           if (z["hi"] - z["lo"]) <= MAX_ZONE_PCT * q["px"]]
     row = {"symbol": sym, "price": round(q["px"], 2), "day_chg_pct": day_chg, "day_vol": int(q["vol"]), "avg_vol": int(avg),
            "multiple": round(mult, 2), "ohlc": (q["open"], q["high"], q["low"], q["px"])}

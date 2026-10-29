@@ -149,6 +149,26 @@ def compute_section_a(df: pd.DataFrame) -> dict:
     atr = _atr(high, low, close, ATR_LEN)
     vol_ma = pd.Series(volume).rolling(VOL_MA_LEN, min_periods=VOL_MA_LEN).mean().to_numpy()
 
+    # Candle open times (seconds). The indicator measures the order block's search window in TIME, not in candles
+    # ((time of previous candle - time of the pivot) / candle length), so overnight gaps / weekends count as if they were
+    # candles. _ob_lookback() copies that so the zones (and OB signals) are the same as on the TradingView chart.
+    # If the index is not a usable date index the old candle counting is used.
+    tt = None
+    try:
+        if isinstance(df.index, pd.DatetimeIndex) and n > 1:
+            _t = df.index.asi8.astype(float) / 1e9
+            if np.all(np.isfinite(_t)) and np.all(np.diff(_t) > 0):
+                tt = _t
+    except Exception:
+        tt = None
+
+    def _ob_lookback(i, piv_list):
+        if not piv_list:
+            return 15
+        if tt is not None and i >= 1 and tt[i] - tt[i - 1] > 0:
+            return max(int((tt[i - 1] - tt[piv_list[-1]]) / (tt[i] - tt[i - 1])), 0)
+        return max(i - piv_list[-1] - 1, 0)
+
     # --- ZigZag / trend / CHoCH (lines 194-223) ---
     # to_up[i]/to_down[i] use ta.highest/ta.lowest over the trailing
     # ZIGZAG_LEN bars INCLUDING the current one, compared against the value
@@ -207,8 +227,7 @@ def compute_section_a(df: pd.DataFrame) -> dict:
             low_val_idx.append(i - ZIGZAG_LEN)
 
         if choch_bull[i]:
-            lookback = (i - high_val_idx[-1] - 1) if high_val_idx else 15
-            lookback = max(lookback, 0)
+            lookback = _ob_lookback(i, high_val_idx)
             start = max(i - lookback, 0)
             seg_low = low[start: i + 1]
             min_idx_rel = int(np.argmin(seg_low))
@@ -219,8 +238,7 @@ def compute_section_a(df: pd.DataFrame) -> dict:
                 bullish_ob.pop(0)
 
         if choch_bear[i]:
-            lookback = (i - low_val_idx[-1] - 1) if low_val_idx else 15
-            lookback = max(lookback, 0)
+            lookback = _ob_lookback(i, low_val_idx)
             start = max(i - lookback, 0)
             seg_high = high[start: i + 1]
             max_idx_rel = int(np.argmax(seg_high))
