@@ -78,6 +78,9 @@ def _hhmm(txt, default):
 WATCH_UNTIL_MIN = _hhmm(os.environ.get("SPURT10_WATCH_UNTIL", "15:00"), 15 * 60)
 ZONE_ALERT_ON = os.environ.get("SPURT10_ZONE_ALERT", "true").strip().lower() == "true"
 ZONE_ALERT_MAX = int(os.environ.get("SPURT10_ZONE_ALERT_MAX", "40") or "40")
+OFFERS_ALERT_ON = True      # ADDED: phone alert when a spurt stock has selling pressure above OFFERS_ALERT_PCT (Dhan depth: total sell qty / (buy + sell qty), the "Offers %" of the depth window)
+OFFERS_ALERT_PCT = 55.0     # Offers % above this = selling pressure alert (raise it, e.g. 60, to get fewer alerts)
+OFFERS_ALERT_MAX = 30       # safety cap on these notifications per day
 HISTORY_DAYS = 8            # calendar days of 5-min candles: 50 ten-minute candles need ~3 sessions
 
 RESULTS_DIR = os.path.join(os.path.dirname(__file__), "results")
@@ -150,7 +153,12 @@ LIQ_REMOVE_THIN = True     # True = THIN stocks (wide bid-ask spread) are taken 
 THIN_LIST_MIN_MULT = 10.0  # the illiquid list at the bottom of /spurt10 shows thin stocks with a spurt of at least this multiple
 THIN_LIST_MAX = 30
 LIQ_SPREAD_THIN = 0.25     # above this = THIN (wide spread: hard to get in / out at the shown price); in between = OK
-_depth = {}                # {symbol: (spread_pct, buy_qty / sell_qty)} filled by _fetch_quotes every cycle
+_dsnap = {}                # {symbol: {px, chg, vol, spread, offers}} - the latest cycle, used by depth_html() (/depth page)
+_dsnap_meta = {"run": None, "spurt": {}}
+DEPTH_MIN_TURNOVER = 1e7   # /depth page: leave out stocks that traded less than Rs 1 crore so far today (dead stocks show random depth)
+DEPTH_LIST_N = 50          # /depth page: stocks shown in each list
+DEPTH_PCT = 55.0           # /depth page: a stock is listed when Bids % or Offers % is above this
+_depth = {}                # {symbol: (spread_pct, buy_qty / sell_qty, offers_pct)} filled by _fetch_quotes every cycle
 
 
 def _parse_depth(q):
@@ -170,9 +178,10 @@ def _parse_depth(q):
         if sq is None:
             sq = sum(float(x.get("quantity") or 0) for x in sell) or None
         ratio = round(float(bq) / float(sq), 2) if bq and sq and float(sq) > 0 else None
+        offers = round(float(sq) / (float(bq) + float(sq)) * 100.0, 2) if bq and sq and (float(bq) + float(sq)) > 0 else None   # ADDED: Offers % of the depth window
         if spread is None and ratio is None:
             return None
-        return spread, ratio
+        return spread, ratio, offers
     except Exception:
         return None
 
@@ -181,9 +190,9 @@ def _liq_fields(sym):
     """spread_pct, bs_ratio and the LIQUID / OK / THIN tag of a stock ('' when the quote had no depth)."""
     v = _depth.get(sym)
     if not v or v[0] is None:
-        return {"spread_pct": None, "bs_ratio": (v[1] if v else None), "liq": ""}
+        return {"spread_pct": None, "bs_ratio": (v[1] if v else None), "offers_pct": (v[2] if v and len(v) > 2 else None), "liq": ""}
     sp = v[0]
-    return {"spread_pct": sp, "bs_ratio": v[1], "liq": "LIQUID" if sp <= LIQ_SPREAD_OK else "THIN" if sp > LIQ_SPREAD_THIN else "OK"}
+    return {"spread_pct": sp, "bs_ratio": v[1], "offers_pct": (v[2] if len(v) > 2 else None), "liq": "LIQUID" if sp <= LIQ_SPREAD_OK else "THIN" if sp > LIQ_SPREAD_THIN else "OK"}
 
 
 def _fetch_quotes(uni):
@@ -192,6 +201,7 @@ def _fetch_quotes(uni):
     ids = [int(s) for s in by_id]
     out, bad = {}, 0
     _depth.clear()
+    _dsnap.clear()
     for i in range(0, len(ids), 1000):
         chunk = ids[i:i + 1000]
         resp = ls._dhan_post("marketfeed/quote", {"NSE_EQ": chunk}, f"quote batch {i // 1000 + 1}")
@@ -210,6 +220,12 @@ def _fetch_quotes(uni):
             dp = _parse_depth(q)
             if dp:
                 _depth[sym] = dp
+                try:                                                # ADDED: snapshot for the /depth page (Bids % / Offers % of every liquid stock)
+                    nc = q.get("net_change")
+                    chg = round(float(nc) / (px - float(nc)) * 100.0, 2) if nc is not None and (px - float(nc)) > 0 else None
+                    _dsnap[sym] = {"px": px, "chg": chg, "vol": vol, "spread": dp[0], "offers": dp[2]}
+                except Exception:
+                    pass
         time.sleep(1.1)
     if not out:
         raise RuntimeError("marketfeed/quote returned no usable rows (price/volume fields missing?)")
@@ -558,6 +574,47 @@ def _candle_reminder(now, step_min, label):
         log.warning(f"Candle reminder failed: {e}")
 
 
+_offers_alerted = {"date": None, "keys": set(), "count": 0}
+
+
+def _send_offers_alerts(top, now_ist):
+    """ADDED: phone notification when a stock of the top-30 spurt table has selling pressure above OFFERS_ALERT_PCT
+    (Offers % = total sell qty / (total buy qty + total sell qty) in the Dhan depth window). A stock is announced once per day.
+    Read-only - it only sends a notification and does not touch the spurt ranking or any signal."""
+    topic = os.environ.get("NTFY_TOPIC", "").strip()
+    if not (OFFERS_ALERT_ON and NTFY_ON and topic):
+        return
+    today = now_ist.strftime("%Y-%m-%d")
+    if _offers_alerted["date"] != today:
+        _offers_alerted.update(date=today, keys=set(), count=0)
+    if _offers_alerted["count"] >= OFFERS_ALERT_MAX:
+        return
+    hits = [r for r in top if (r.get("offers_pct") or 0) > OFFERS_ALERT_PCT and r["symbol"] not in _offers_alerted["keys"]]
+    if not hits:
+        return
+    hits.sort(key=lambda r: -(r.get("offers_pct") or 0))
+    lines = []
+    for r in hits[:12]:
+        chg = r.get("candle_chg_pct")
+        lines.append(f"{r['symbol']}  Offers {r['offers_pct']:.1f}%  Bids {100 - r['offers_pct']:.1f}%  Rs {r['price']:.2f}  spurt {r['multiple']:.1f}x"
+                     + (f"  candle {chg:+.2f}%" if chg is not None else ""))
+    extra = f"\n+{len(hits) - 12} more on the scanner page" if len(hits) > 12 else ""
+    try:
+        import requests
+        resp = requests.post(f"https://ntfy.sh/{topic}", data=("\n".join(lines) + extra).encode("utf-8"), timeout=8,
+                             headers={"Title": f"Selling pressure above {OFFERS_ALERT_PCT:g}% (spurt stocks)", "Priority": "high",
+                                      "Tags": "chart_with_downwards_trend"})
+        if resp.status_code >= 300:
+            log.warning(f"Spurt10 offers ntfy refused: {resp.status_code} {resp.text[:150]}")
+            return
+    except Exception as e:
+        log.warning(f"Spurt10 offers ntfy failed: {e}")
+        return
+    for r in hits:
+        _offers_alerted["keys"].add(r["symbol"])
+    _offers_alerted["count"] += 1
+
+
 def run_once():
     _candle_reminder(datetime.now(IST), 10, "Stock 10-min")
     t0 = time.monotonic()
@@ -617,6 +674,15 @@ def run_once():
         _send_alerts(rows, now_ist)
     except Exception as e:
         log.warning(f"Spurt10 alert step failed: {e}")
+    try:
+        _dsnap_meta["run"] = now_ist.strftime("%Y-%m-%d %H:%M:%S IST")
+        _dsnap_meta["spurt"] = {r["symbol"]: r["multiple"] for r in top}
+    except Exception:
+        pass
+    try:
+        _send_offers_alerts(top, now_ist)
+    except Exception as e:
+        log.warning(f"Spurt10 offers alert step failed: {e}")
     watch_view = []
     try:                                                            # ADDED: phone alert when a top-30 spurt stock is at a support / resistance zone
         try:
@@ -824,7 +890,8 @@ LEGEND = ('<span style="background:#d4f1dc;padding:2px 8px;border:1px solid #9cc
           '<span style="background:#fadad6;padding:2px 8px;border:1px solid #e0a39c">red row = price AT a resistance zone</span> '
           '<span style="background:#ffe066;padding:2px 8px;border:1px solid #d9b800">yellow multiple = phone-alert strength</span> '
           '<span style="background:#6fd68a;padding:2px 8px;border:1px solid #3ea85c">green cell = price at support zone</span> '
-          '<span style="background:#f08d84;padding:2px 8px;border:1px solid #c9564c">red cell = price at resistance zone</span>')
+          '<span style="background:#f08d84;padding:2px 8px;border:1px solid #c9564c">red cell = price at resistance zone</span> '
+          '<span style="background:#f08d84;padding:2px 8px;border:1px solid #c9564c">Offers % red = selling pressure above the limit (sell qty share of the depth window)</span>')
 
 
 def _rowstyle(at):
@@ -863,10 +930,10 @@ def _zv(v, src=None):
 _SORT_JS = r"""<script>
 document.querySelectorAll('table.sp').forEach(function(t){Array.prototype.forEach.call(t.rows[0].cells,function(th){
 th.style.cursor='pointer';th.title='click to sort (high to low / low to high)';
-th.addEventListener('click',function(){var i=th.cellIndex,b=t.tBodies[0],rows=Array.prototype.slice.call(t.rows,1),
+th.addEventListener('click',function(e){if(e.target&&e.target.tagName==='A')return;var i=th.cellIndex,b=t.tBodies[0],rows=Array.prototype.slice.call(t.rows,1),
 asc=th.dataset.asc!=='1';th.dataset.asc=asc?'1':'0';
-Array.prototype.forEach.call(t.rows[0].cells,function(c){c.textContent=c.textContent.replace(/ [\u25B2\u25BC]$/,'');});
-th.textContent+=asc?' \u25B2':' \u25BC';
+Array.prototype.forEach.call(t.rows[0].cells,function(c){var q=c.querySelector('.ar');if(q)q.remove();});
+var ar=document.createElement('span');ar.className='ar';ar.textContent=asc?' \u25B2':' \u25BC';th.appendChild(ar);
 function val(r){var x=r.cells[i].innerText.trim();var m=x.match(/^(\d\d):(\d\d)$/);if(m)return parseInt(m[1])*60+parseInt(m[2]);
 var n=parseFloat(x.replace(/[,%x+]/g,''));return isNaN(n)?x.toLowerCase():n;}
 rows.sort(function(a,c){var p=val(a),q=val(c);if(p<q)return asc?-1:1;if(p>q)return asc?1:-1;return 0;});
@@ -945,14 +1012,24 @@ def _html(top, meta):
     def mc(r):
         return ' style="background:#ffe066"' if r["multiple"] >= meta.get("alert_mult", 3.0) else ""
 
+    def offc(r):
+        v = r.get("offers_pct")
+        if v is None:
+            return "<td>-</td><td>-</td>"
+        lk = lambda t: f'<a href="/depth/{r["symbol"]}" target="_blank" rel="noopener" title="open the Bids / Offers depth of this stock" style="color:inherit;text-decoration:none;border-bottom:1px dotted #888">{t}</a>'
+        bid = f'<td style="color:#0a7d33">{lk(format(100.0 - v, ".1f") + "%")}</td>'
+        if v > OFFERS_ALERT_PCT:
+            return bid + f'<td style="background:#f08d84"><b>{lk(format(v, ".1f") + "%")}</b></td>'
+        return bid + f'<td style="color:#c62828">{lk(format(v, ".1f") + "%")}</td>'
+
 
     body = "".join(
         f"<tr{hl(r)}><td>{i}</td><td>{_tvl(r['symbol'])}</td><td>{r['price']:.2f}</td><td>{pct(r['day_chg_pct'])}</td>"
         f"<td>{r['candle']}</td><td>{pct(r['candle_chg_pct'])}</td>{ctype(r)}<td>{r['candle_vol']:,}</td>"
-        f"<td>{r['sma_vol']:,}</td><td{mc(r)}><b>{r['multiple']:.2f}x</b></td><td>{r['day_vol']:,}</td>"
+        f"<td>{r['sma_vol']:,}</td><td{mc(r)}><b>{r['multiple']:.2f}x</b></td>{offc(r)}<td>{r['day_vol']:,}</td>"
         f"<td{_zbg(r.get('at_zone'), 'SUPPORT')}>{_zc(r, 'support')}</td><td{_zbg(r.get('at_zone'), 'RESISTANCE')}>{_zc(r, 'resistance')}</td><td>{_zv(r.get('zone_view'), r.get('zone_src'))}</td></tr>"
         for i, r in enumerate(top, 1)
-    ) or '<tr><td colspan="14">No stocks qualified in this cycle.</td></tr>'
+    ) or '<tr><td colspan="16">No stocks qualified in this cycle.</td></tr>'
     return f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="refresh" content="60"><title>Volume Spurt 10-min</title>
 <style>body{{font-family:Arial,sans-serif;margin:12px;background:#fafafa}}table{{border-collapse:collapse;width:100%;background:#fff}}
@@ -962,13 +1039,156 @@ th,td{{border:1px solid #ddd;padding:6px 8px;text-align:right;font-size:14px}}th
 <h2>Volume Spurt &mdash; latest 10-min candle vs {meta['sma_len']}-candle volume average (top {len(top)})</h2>
 <div class="m">Run: {meta['run']} (took {meta['took_s']}s) &middot; {meta['universe']} NSE stocks (ETFs left out: {meta.get('etf_excluded', 0)}; thin stocks left out: {meta.get('thin_removed', 0)}), {meta['price_ok']} priced &ge; {meta['min_price']:.0f},
 {meta['shortlisted']} shortlisted, {meta['scored']} scored, {meta['failed']} errors &middot; refreshes every 10 min &middot; {LEGEND} &middot; phone alert at {meta.get('alert_mult', 3.0):g}x or more &middot; zones = ALL IN ONE PRO order-block zones on the {ZONE_TF}-min chart (same as the indicator on a {ZONE_TF}-min chart); purple "{ZONE_TF}m+{CONF_TF}m zone" = the same zone also exists on the {CONF_TF}-min chart (stronger); volume spurt = 10-min candles &middot;
-<a href="/spurt10.csv">CSV</a> (this cycle) &middot; <a href="/spurt10_history">full-day history page</a> &middot; <a href="/spurt10_history.csv">history CSV</a> &middot; <a href="/spurt_sell">Spurt SELL signals</a> &middot; <a href="/scanner">Scanner</a></div>
+<a href="/spurt10.csv">CSV</a> (this cycle) &middot; <a href="/spurt10_history">full-day history page</a> &middot; <a href="/spurt10_history.csv">history CSV</a> &middot; <a href="/spurt_sell">Spurt SELL signals</a> &middot; <a href="/spurt_daily">Daily volume spurt</a> &middot; <a href="/scanner">Scanner</a></div>
 <div class="w"><table class="sp"><tr><th>#</th><th>Symbol</th><th>Price</th><th>Day %</th><th>Candle</th><th>Candle %</th><th>Candle type</th>
-<th>Candle volume</th><th>{meta['sma_len']}-candle avg vol</th><th>Multiple</th><th>Day volume</th><th>Support zone ({ZONE_TF}m)</th><th>Resistance zone ({ZONE_TF}m)</th><th>Zone view</th></tr>{body}</table></div>
+<th>Candle volume</th><th>{meta['sma_len']}-candle avg vol</th><th>Multiple</th><th><a href="/depth" target="_blank" rel="noopener" title="open the Bids / Offers page" style="color:#fff;text-decoration:underline">Bids %</a></th><th><a href="/depth" target="_blank" rel="noopener" title="open the Bids / Offers page" style="color:#fff;text-decoration:underline">Offers %</a></th><th>Day volume</th><th>Support zone ({ZONE_TF}m)</th><th>Resistance zone ({ZONE_TF}m)</th><th>Zone view</th></tr>{body}</table></div>
 {_link_html()}
 {_watch_html(meta)}
 {_thin_html(meta)}
 {_SORT_JS}</body></html>"""
+
+
+def _inr(n):
+    """Indian digit grouping (18,55,355)."""
+    try:
+        n = int(round(float(n)))
+    except Exception:
+        return "-"
+    s_ = str(abs(n))
+    if len(s_) > 3:
+        s_ = (",".join([s_[:-3][::-1][i:i + 2][::-1] for i in range(0, len(s_[:-3]), 2)][::-1]) + "," + s_[-3:])
+    return ("-" if n < 0 else "") + s_
+
+
+def stock_depth_html(sym):
+    """ADDED: /depth/<SYMBOL> page - the 5-level bid / ask window of ONE stock (orders, quantity, price, totals, Bids % / Offers %),
+    read live from Dhan marketfeed/quote (one small request per page load). Never raises."""
+    import html as _h
+    sym = str(sym or "").strip().upper()
+    head = ('<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+            '<meta http-equiv="refresh" content="10"><title>' + _h.escape(sym) + ' depth</title>'
+            '<style>body{font-family:Arial,sans-serif;margin:12px;background:#fafafa;max-width:760px}table{border-collapse:collapse;width:100%;background:#fff}'
+            'th,td{padding:6px 8px;text-align:right;font-size:14px;border-bottom:1px solid #eee}th{color:#555;font-weight:600}.g{color:#0a7d33}.r{color:#c62828}'
+            '.h{display:flex;gap:16px}.h>div{flex:1}.m{color:#555;font-size:13px;margin:6px 0 12px}'
+            '.bar{display:flex;height:9px;border-radius:5px;overflow:hidden;margin-top:4px}</style></head><body>')
+    try:
+        import re as _re
+        if not _re.fullmatch(r"[A-Z0-9&_\-]{1,20}", sym):
+            return head + "<p>Unknown stock symbol.</p></body></html>"
+        sid = None
+        for s_, i_ in (_universe or []):
+            if s_ == sym:
+                sid = str(i_)
+                break
+        if sid is None:
+            sid_seg = get_security_id_and_segment(sym)
+            if sid_seg and sid_seg[0] and sid_seg[1] == "NSE_EQ":
+                sid = str(sid_seg[0])
+        if sid is None:
+            return head + f"<p>{_h.escape(sym)} was not found in the NSE equity list.</p></body></html>"
+        resp = ls._dhan_post("marketfeed/quote", {"NSE_EQ": [int(sid)]}, f"depth {sym}")
+        q = ((resp.json().get("data") or {}).get("NSE_EQ") or {}).get(str(sid)) or {}
+        d = q.get("depth") or {}
+        buy, sell = (d.get("buy") or [])[:5], (d.get("sell") or [])[:5]
+        if not buy and not sell:
+            return head + f"<h3>{_tvl(sym)}</h3><p>Dhan sent no bid / ask depth for this stock right now (market closed or no quote).</p><p><a href='/depth'>Back to the Bids / Offers list</a></p></body></html>"
+        bq = q.get("buy_quantity")
+        sq = q.get("sell_quantity")
+        if bq is None:
+            bq = sum(float(x.get("quantity") or 0) for x in buy)
+        if sq is None:
+            sq = sum(float(x.get("quantity") or 0) for x in sell)
+        bq, sq = float(bq or 0), float(sq or 0)
+        tot = bq + sq
+        bp = (bq / tot * 100.0) if tot > 0 else 0.0
+        op = 100.0 - bp if tot > 0 else 0.0
+        px = q.get("last_price")
+        nc = q.get("net_change")
+        try:
+            chg = float(nc) / (float(px) - float(nc)) * 100.0
+            chg_s = f' <span class="{"g" if chg >= 0 else "r"}">{chg:+.2f}%</span>'
+        except Exception:
+            chg_s = ""
+        mq = max([float(x.get("quantity") or 0) for x in buy + sell] + [1.0])
+
+        def cell_bar(qty, col, to="left"):
+            w = min(100.0, float(qty or 0) / mq * 100.0)
+            return f'<td style="background:linear-gradient(to {to},{col} {w:.0f}%,transparent {w:.0f}%)">{_inr(qty)}</td>'
+
+        n = max(len(buy), len(sell))
+        brow, srow = "", ""
+        for i in range(n):
+            b = buy[i] if i < len(buy) else {}
+            a = sell[i] if i < len(sell) else {}
+            brow += (f"<tr><td>{_inr(b.get('orders'))}</td>{cell_bar(b.get('quantity'), '#dff3e4')}<td class='g'>{float(b['price']):.2f}</td></tr>" if b else "<tr><td colspan='3'>&nbsp;</td></tr>")
+            srow += (f"<tr><td class='r'>{float(a['price']):.2f}</td>{cell_bar(a.get('quantity'), '#fbe1de', 'right')}<td>{_inr(a.get('orders'))}</td></tr>" if a else "<tr><td colspan='3'>&nbsp;</td></tr>")
+        return (head + f'<h2>{_tvl(sym)} &mdash; Bids / Offers</h2>'
+                f'<div class="m">Price {float(px):.2f}{chg_s} &middot; read live from Dhan (5 best bids / offers) &middot; refreshes every 10 s &middot; <a href="/depth">Bids / Offers list</a> &middot; <a href="/spurt10">Volume spurt</a></div>'
+                f'<div class="h"><div><b>Buy Orders</b><table><tr><th>Orders</th><th>Quantity</th><th>Bid</th></tr>{brow}'
+                f'<tr><td colspan="3" style="text-align:center"><b>{_inr(bq)}</b> Total</td></tr></table></div>'
+                f'<div><b>Sell Orders</b><table><tr><th>Ask</th><th>Quantity</th><th>Orders</th></tr>{srow}'
+                f'<tr><td colspan="3" style="text-align:center">Total <b>{_inr(sq)}</b></td></tr></table></div></div>'
+                f'<div style="display:flex;justify-content:space-between;margin-top:14px"><b class="g">Bids: {bp:.2f}%</b><b class="r">Offers: {op:.2f}%</b></div>'
+                f'<div class="bar"><div style="width:{bp:.2f}%;background:#2e9e4f"></div><div style="width:{op:.2f}%;background:#d9534f"></div></div>'
+                '</body></html>')
+    except Exception as e:
+        log.warning(f"Spurt10 /depth/{sym} failed: {e}")
+        return head + f"<p>Could not read the depth of {_h.escape(sym)} right now. Please refresh in a few seconds.</p><p><a href='/depth'>Back to the Bids / Offers list</a></p></body></html>"
+
+
+def depth_html():
+    """ADDED: /depth page - Bids % and Offers % (Dhan depth window: total buy / sell quantity) of every liquid stock, two lists:
+    selling pressure (Offers % above DEPTH_PCT) and buying pressure (Bids % above DEPTH_PCT). In memory, refreshed every 10-min cycle. Never raises."""
+    import html as _h
+    try:
+        snap = dict(_dsnap)
+        run = _dsnap_meta.get("run")
+        spurt = dict(_dsnap_meta.get("spurt") or {})
+        head = ('<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+                '<meta http-equiv="refresh" content="60"><title>Bids / Offers</title>'
+                '<style>body{font-family:Arial,sans-serif;margin:12px;background:#fafafa}table{border-collapse:collapse;width:100%;background:#fff;margin-bottom:18px}'
+                'th,td{border:1px solid #ddd;padding:6px 8px;text-align:right;font-size:14px}th{background:#222;color:#fff}td:nth-child(2){text-align:left}'
+                '.m{color:#555;font-size:13px;margin:6px 0 12px}.w{overflow-x:auto}</style></head><body>')
+        if not snap or not run:
+            return head + "<h2>Bids / Offers</h2><p>No scan has run yet. It fills at the first 10-min cycle after 09:25 IST on a trading day.</p></body></html>"
+        rows = []
+        for sym, d in snap.items():
+            if d["offers"] is None or d["px"] < MIN_PRICE or d["px"] * d["vol"] < DEPTH_MIN_TURNOVER:
+                continue
+            if d["spread"] is not None and d["spread"] > LIQ_SPREAD_THIN:
+                continue
+            rows.append((sym, d))
+
+        def table(sel, key):
+            body = ""
+            for i, (sym, d) in enumerate(sel, 1):
+                off = d["offers"]
+                chg = d["chg"]
+                chg_s = "-" if chg is None else f'<span style="color:{"#0a7d33" if chg > 0 else "#c62828" if chg < 0 else "#555"}">{chg:+.2f}%</span>'
+                sp = spurt.get(sym)
+                sp_s = f"{sp:.2f}x" if sp else "-"
+                bg_b = ' style="background:#6fd68a"' if (100.0 - off) > DEPTH_PCT else ""
+                bg_o = ' style="background:#f08d84"' if off > DEPTH_PCT else ""
+                dl = f'<a href="/depth/{sym}" target="_blank" rel="noopener" title="open the Bids / Offers depth of this stock" style="color:inherit;text-decoration:none;border-bottom:1px dotted #888">'
+                body += (f"<tr><td>{i}</td><td>{_tvl(sym)}</td><td>{d['px']:.2f}</td><td>{chg_s}</td>"
+                         f"<td{bg_b}><b>{dl}{100.0 - off:.1f}%</a></b></td><td{bg_o}><b>{dl}{off:.1f}%</a></b></td>"
+                         f"<td>{'-' if d['spread'] is None else format(d['spread'], '.2f') + '%'}</td><td>{sp_s}</td></tr>")
+            body = body or '<tr><td colspan="8">None right now.</td></tr>'
+            return ('<div class="w"><table class="sp"><tr><th>#</th><th>Symbol</th><th>Price</th><th>Day %</th><th>Bids %</th><th>Offers %</th>'
+                    '<th>Bid-ask spread</th><th>Spurt (10-min)</th></tr>' + body + '</table></div>')
+
+        sell = sorted((x for x in rows if x[1]["offers"] > DEPTH_PCT), key=lambda x: -x[1]["offers"])
+        buy = sorted((x for x in rows if (100.0 - x[1]["offers"]) > DEPTH_PCT), key=lambda x: x[1]["offers"])
+        return (head + f'<h2>Bids / Offers &mdash; selling and buying pressure</h2>'
+                f'<div class="m">Run: {run} &middot; {len(rows)} liquid stocks (price &ge; {MIN_PRICE:.0f}, traded &ge; Rs {DEPTH_MIN_TURNOVER / 1e7:g} crore today, spread &le; {LIQ_SPREAD_THIN}%) &middot; '
+                f'Bids % / Offers % = total buy / sell quantity in the Dhan depth window &middot; listed above {DEPTH_PCT:g}% &middot; top {DEPTH_LIST_N} each &middot; refreshes every 10 min &middot; '
+                f'<a href="/spurt10">Volume spurt</a> &middot; <a href="/spurt_sell">Spurt SELL signals</a></div>'
+                f'<h3 style="color:#c62828">Selling pressure &mdash; Offers above {DEPTH_PCT:g}% ({len(sell)} stocks)</h3>' + table(sell[:DEPTH_LIST_N], "s") +
+                f'<h3 style="color:#0a7d33">Buying pressure &mdash; Bids above {DEPTH_PCT:g}% ({len(buy)} stocks)</h3>' + table(buy[:DEPTH_LIST_N], "b") +
+                _SORT_JS + "</body></html>")
+    except Exception as e:
+        log.warning(f"Spurt10 /depth page failed: {e}")
+        return "<p>Bids / Offers page could not be built. Please try again after the next cycle.</p>"
 
 
 def history_html(date=None, min_mult=0.0, sym=None, only=None):

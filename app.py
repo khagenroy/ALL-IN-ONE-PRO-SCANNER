@@ -351,6 +351,16 @@ def _confluence_loop():
 
 SPURT10_AUTORUN = os.environ.get("SPURT10_AUTORUN", "true").strip().lower() == "true"
 
+SPURT_DAILY_AUTORUN = os.environ.get("SPURT_DAILY_AUTORUN", "true").strip().lower() == "true"
+
+
+def _spurt_daily_loop():
+    try:
+        import spurt_daily
+        spurt_daily.loop()
+    except Exception as e:
+        log.error(f"Spurt daily loop could not start: {e}")
+
 
 def _spurt10_loop():
     try:
@@ -390,6 +400,9 @@ if ORB_AUTORUN:
 
 if SPURT10_AUTORUN:
     threading.Thread(target=_spurt10_loop, daemon=True, name="spurt10-autorun").start()
+
+if SPURT_DAILY_AUTORUN:
+    threading.Thread(target=_spurt_daily_loop, daemon=True, name="spurt-daily-autorun").start()
 
 MCX_AUTORUN = os.environ.get("MCX_AUTORUN", "true").strip().lower() == "true"
 
@@ -557,6 +570,46 @@ def scanner_rsi_flush_csv():
 @app.route("/spurt10", methods=["GET"])
 def spurt10_page():
     return _serve_html("spurt10.html")
+
+
+@app.route("/spurt_daily", methods=["GET"])
+def spurt_daily_page():
+    try:
+        import spurt_daily
+        return spurt_daily.page_html()
+    except Exception:
+        log.exception("/spurt_daily failed")
+        return "<p>Daily spurt page failed - see the logs.</p>", 500
+
+
+@app.route("/spurt_daily.csv", methods=["GET"])
+def spurt_daily_csv():
+    return _serve_csv("spurt_daily.csv", "volume_spurt_daily.csv")
+
+
+@app.route("/spurt_daily_history.csv", methods=["GET"])
+def spurt_daily_history_csv():
+    return _serve_csv("spurt_daily_history.csv", "volume_spurt_daily_history.csv")
+
+
+@app.route("/depth/<sym>", methods=["GET"])
+def depth_stock_page(sym):
+    try:
+        import spurt10_live
+        return spurt10_live.stock_depth_html(sym)
+    except Exception:
+        log.exception("/depth/<sym> failed")
+        return "<p>Stock depth page failed - see the logs.</p>", 500
+
+
+@app.route("/depth", methods=["GET"])
+def depth_page():
+    try:
+        import spurt10_live
+        return spurt10_live.depth_html()
+    except Exception:
+        log.exception("/depth failed")
+        return "<p>Bids / Offers page failed - see the logs.</p>", 500
 
 
 @app.route("/commodity", methods=["GET"])
