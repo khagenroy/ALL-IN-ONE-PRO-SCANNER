@@ -157,7 +157,7 @@ _dsnap = {}                # {symbol: {px, chg, vol, spread, offers}} - the late
 _dsnap_meta = {"run": None, "spurt": {}}
 DEPTH_MIN_TURNOVER = 1e7   # /depth page: leave out stocks that traded less than Rs 1 crore so far today (dead stocks show random depth)
 DEPTH_LIST_N = 50          # /depth page: stocks shown in each list
-DEPTH_PCT = 55.0           # /depth page: a stock is listed when Bids % or Offers % is above this
+DEPTH_PCT = 55.0           # /depth page: Bids % / Offers % cells turn green / red above this
 _depth = {}                # {symbol: (spread_pct, buy_qty / sell_qty, offers_pct)} filled by _fetch_quotes every cycle
 
 
@@ -615,6 +615,137 @@ def _send_offers_alerts(top, now_ist):
     _offers_alerted["count"] += 1
 
 
+# ---------------------------------------------------------------- spurt stock rejected at resistance (long upper wick)
+WICK_ON = True               # ADDED: phone alert + table when a spurt stock's closed 10-min candle is rejected at a resistance zone with a long upper wick
+WICK_SPURT_MULT = 10.0       # a "spurt stock" = reached this multiple (x the 50-candle volume average) at any time today
+WICK_PCT = 60.0              # upper wick of the 10-min candle >= this % of its high-low range
+WICK_UNTIL_MIN = 15 * 60 + 15  # no wick alerts after 15:15 IST
+WICK_WATCH_MAX = 100         # most spurt stocks followed at once
+WICK_ALERT_MAX = 40          # safety cap on these notifications per day
+_wick = {"date": None, "syms": {}, "keys": set(), "count": 0, "hits": []}
+
+
+def _wick_eval(o, h, l, c, res):
+    """Wick % of the candle when it touched the resistance zone `res` ("lo-hi"), has an upper wick >= WICK_PCT and closed at / below the zone top; else None."""
+    try:
+        rng = h - l
+        if rng <= 0 or not res:
+            return None
+        lo, hi = (float(x) for x in str(res).split("-"))
+        wick = (h - max(o, c)) / rng * 100.0
+        near = ZONE_NEAR_PCT / 100.0
+        if wick >= WICK_PCT and h >= lo * (1 - near) and c <= hi:
+            return round(wick, 1)
+    except Exception:
+        pass
+    return None
+
+
+def _wick_alerts(top, now_ist, sid_of):
+    """ADDED: stocks that reached WICK_SPURT_MULT x today are followed until 15:15. When the latest CLOSED 10-min candle of such a stock touched its
+    resistance zone (the same zones as the zone columns), has an upper wick of WICK_PCT % or more of its range and closed at / below the zone top,
+    one phone alert is sent (once per stock per candle) and the stock is listed in the table on /spurt10. Read-only - it changes no signal."""
+    if not WICK_ON:
+        return
+    today = now_ist.strftime("%Y-%m-%d")
+    if _wick["date"] != today:
+        _wick.update(date=today, syms={}, keys=set(), count=0, hits=[])
+    if now_ist.hour * 60 + now_ist.minute > WICK_UNTIL_MIN:
+        return
+    syms = _wick["syms"]
+    for r in top:
+        if r["multiple"] >= WICK_SPURT_MULT:
+            cur = syms.get(r["symbol"])
+            if cur is None and len(syms) < WICK_WATCH_MAX:
+                syms[r["symbol"]] = {"since": r["candle"], "mult": r["multiple"]}
+            elif cur is not None and r["multiple"] > cur["mult"]:
+                cur["mult"] = r["multiple"]
+    if not syms:
+        return
+    in_top = {r["symbol"]: r for r in top}
+    cands, todo = [], []
+    for sym in syms:
+        r = in_top.get(sym)
+        if r is not None:
+            oh = r.get("ohlc")
+            if oh and r.get("resistance"):
+                cands.append((sym, r["candle"], oh[0], oh[1], oh[2], oh[3], r["price"], r["resistance"]))
+        elif sym in sid_of:
+            todo.append(sym)
+    if todo:
+        as_of = pd.Timestamp(datetime.now(timezone.utc).replace(tzinfo=None))
+
+        def one(sym):
+            try:
+                df5 = ls.fetch_intraday_history(sid_of[sym], "NSE_EQ", 5, HISTORY_DAYS)
+                d10 = ls.drop_forming_bars(ls.build_merged_bars(df5, 2), 10, as_of)
+                zdf = ls.drop_forming_bars(ls.build_merged_bars(df5, ZONE_TF // 5), ZONE_TF, as_of)
+                if zdf is None or len(zdf) < 30 or d10 is None or len(d10) == 0:
+                    return None
+                last = d10.iloc[-1]
+                px = float(last["close"])
+                f = _zone_fields(_secA_zones(zdf), px, None)
+                return (sym, _ist(d10.index[-1]).strftime("%H:%M"), float(last["open"]), float(last["high"]), float(last["low"]), px, round(px, 2), f.get("resistance", ""))
+            except Exception as e:
+                log.warning(f"Spurt10 wick check failed for {sym}: {e}")
+                return None
+        with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+            for c_ in ex.map(one, todo):
+                if c_:
+                    cands.append(c_)
+    hits = []
+    for sym, cndl, o, h, l, c, price, res in cands:
+        key = (sym, cndl)
+        if key in _wick["keys"]:
+            continue
+        w = _wick_eval(o, h, l, c, res)
+        if w is None:
+            continue
+        _wick["keys"].add(key)
+        hit = {"candle": cndl, "symbol": sym, "price": price, "wick": w, "resistance": res, "mult": syms[sym]["mult"], "since": syms[sym]["since"],
+               "alert": now_ist.strftime("%H:%M")}
+        hits.append(hit)
+        _wick["hits"].append(hit)
+    if not hits:
+        return
+    log.info(f"Spurt10 wick: {len(hits)} spurt stock(s) rejected at resistance: {[h['symbol'] for h in hits]}")
+    topic = os.environ.get("NTFY_TOPIC", "").strip()
+    if not (NTFY_ON and topic) or _wick["count"] >= WICK_ALERT_MAX:
+        return
+    hits.sort(key=lambda x: -x["mult"])
+    lines = [f"{x['symbol']}  Rs {x['price']:.2f}  wick {x['wick']:.0f}%  resistance {x['resistance']}  spurt {x['mult']:.1f}x (since {x['since']})  candle {x['candle']}" for x in hits[:12]]
+    extra = f"\n+{len(hits) - 12} more on the scanner page" if len(hits) > 12 else ""
+    try:
+        import requests
+        resp = requests.post(f"https://ntfy.sh/{topic}", data=("\n".join(lines) + extra).encode("utf-8"), timeout=8,
+                             headers={"Title": f"Spurt stock rejected at resistance - wick >= {WICK_PCT:g}% ({len(hits)})", "Priority": "high",
+                                      "Tags": "chart_with_downwards_trend"})
+        if resp.status_code >= 300:
+            log.warning(f"Spurt10 wick ntfy refused: {resp.status_code} {resp.text[:150]}")
+            return
+    except Exception as e:
+        log.warning(f"Spurt10 wick ntfy failed: {e}")
+        return
+    _wick["count"] += 1
+
+
+def _wick_html():
+    """Table of today's wick rejections (kept in memory; empty after a restart). Never raises."""
+    try:
+        rows = list(_wick["hits"])
+        head = (f'<h2>Spurt stocks rejected at resistance &mdash; upper wick &ge; {WICK_PCT:g}% &middot; spurt &ge; {WICK_SPURT_MULT:g}x ({len(rows)})</h2>'
+                f'<div class="m">A stock that reached {WICK_SPURT_MULT:g}x today, whose closed 10-min candle touched its resistance zone ({ZONE_TF}m zones), has an upper wick of '
+                f'{WICK_PCT:g}% or more of the candle and closed at / below the zone top. A phone alert is sent for each (until 15:15 IST). Information only.</div>')
+        if not rows:
+            return head + '<div class="m">None yet today.</div>'
+        body = "".join(f"<tr><td>{x['candle']}</td><td>{_tvl(x['symbol'])}</td><td>{x['price']:.2f}</td><td><b>{x['wick']:.0f}%</b></td><td>{x['resistance']}</td>"
+                       f"<td>{x['mult']:.1f}x</td><td>{x['since']}</td><td>{x['alert']}</td></tr>" for x in reversed(rows))
+        return (head + '<div class="w"><table class="sp"><tr><th>Candle</th><th>Symbol</th><th>Price</th><th>Upper wick</th><th>Resistance zone</th>'
+                '<th>Best spurt</th><th>Spurt at</th><th>Alert</th></tr>' + body + '</table></div>')
+    except Exception:
+        return ""
+
+
 def run_once():
     _candle_reminder(datetime.now(IST), 10, "Stock 10-min")
     t0 = time.monotonic()
@@ -694,6 +825,10 @@ def run_once():
         watch_view = _watch_view()
     except Exception as e:
         log.warning(f"Spurt10 zone alert step failed: {e}")
+    try:
+        _wick_alerts(top, now_ist, sid_of)
+    except Exception as e:
+        log.warning(f"Spurt10 wick step failed: {e}")
     try:                                                            # ADDED: link Section A OB_BUY / OB_SELL signals with spurt stocks (spurt_link.py)
         import spurt_link
         spurt_link.note_spurts(top, now_ist)
@@ -1043,6 +1178,7 @@ th,td{{border:1px solid #ddd;padding:6px 8px;text-align:right;font-size:14px}}th
 <div class="w"><table class="sp"><tr><th>#</th><th>Symbol</th><th>Price</th><th>Day %</th><th>Candle</th><th>Candle %</th><th>Candle type</th>
 <th>Candle volume</th><th>{meta['sma_len']}-candle avg vol</th><th>Multiple</th><th><a href="/depth" target="_blank" rel="noopener" title="open the Bids / Offers page" style="color:#fff;text-decoration:underline">Bids %</a></th><th><a href="/depth" target="_blank" rel="noopener" title="open the Bids / Offers page" style="color:#fff;text-decoration:underline">Offers %</a></th><th>Day volume</th><th>Support zone ({ZONE_TF}m)</th><th>Resistance zone ({ZONE_TF}m)</th><th>Zone view</th></tr>{body}</table></div>
 {_link_html()}
+{_wick_html()}
 {_watch_html(meta)}
 {_thin_html(meta)}
 {_SORT_JS}</body></html>"""
@@ -1137,55 +1273,42 @@ def stock_depth_html(sym):
 
 
 def depth_html():
-    """ADDED: /depth page - Bids % and Offers % (Dhan depth window: total buy / sell quantity) of every liquid stock, two lists:
-    selling pressure (Offers % above DEPTH_PCT) and buying pressure (Bids % above DEPTH_PCT). In memory, refreshed every 10-min cycle. Never raises."""
-    import html as _h
+    """ADDED: /depth page - Bids % and Offers % (Dhan depth window: total buy / sell quantity) of the stocks that HAVE A VOLUME SPURT now
+    (the top-30 spurt table of the latest 10-min cycle), biggest spurt first. Click a Bids % / Offers % value for that stock's 5-level depth.
+    In memory, refreshed every 10-min cycle. Never raises."""
     try:
         snap = dict(_dsnap)
         run = _dsnap_meta.get("run")
         spurt = dict(_dsnap_meta.get("spurt") or {})
         head = ('<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
-                '<meta http-equiv="refresh" content="60"><title>Bids / Offers</title>'
+                '<meta http-equiv="refresh" content="60"><title>Spurt stocks - Bids / Offers</title>'
                 '<style>body{font-family:Arial,sans-serif;margin:12px;background:#fafafa}table{border-collapse:collapse;width:100%;background:#fff;margin-bottom:18px}'
                 'th,td{border:1px solid #ddd;padding:6px 8px;text-align:right;font-size:14px}th{background:#222;color:#fff}td:nth-child(2){text-align:left}'
                 '.m{color:#555;font-size:13px;margin:6px 0 12px}.w{overflow-x:auto}</style></head><body>')
-        if not snap or not run:
-            return head + "<h2>Bids / Offers</h2><p>No scan has run yet. It fills at the first 10-min cycle after 09:25 IST on a trading day.</p></body></html>"
-        rows = []
-        for sym, d in snap.items():
-            if d["offers"] is None or d["px"] < MIN_PRICE or d["px"] * d["vol"] < DEPTH_MIN_TURNOVER:
+        if not run or not spurt:
+            return head + "<h2>Volume-spurt stocks &mdash; Bids / Offers</h2><p>No scan has run yet. It fills at the first 10-min cycle after 09:25 IST on a trading day.</p></body></html>"
+        rows = sorted(((sym, mult) for sym, mult in spurt.items()), key=lambda x: -x[1])
+        body = ""
+        for i, (sym, mult) in enumerate(rows, 1):
+            d = snap.get(sym)
+            if not d or d.get("offers") is None:
+                body += f"<tr><td>{i}</td><td>{_tvl(sym)}</td><td>-</td><td>-</td><td><b>{mult:.2f}x</b></td><td>-</td><td>-</td><td>-</td></tr>"
                 continue
-            if d["spread"] is not None and d["spread"] > LIQ_SPREAD_THIN:
-                continue
-            rows.append((sym, d))
-
-        def table(sel, key):
-            body = ""
-            for i, (sym, d) in enumerate(sel, 1):
-                off = d["offers"]
-                chg = d["chg"]
-                chg_s = "-" if chg is None else f'<span style="color:{"#0a7d33" if chg > 0 else "#c62828" if chg < 0 else "#555"}">{chg:+.2f}%</span>'
-                sp = spurt.get(sym)
-                sp_s = f"{sp:.2f}x" if sp else "-"
-                bg_b = ' style="background:#6fd68a"' if (100.0 - off) > DEPTH_PCT else ""
-                bg_o = ' style="background:#f08d84"' if off > DEPTH_PCT else ""
-                dl = f'<a href="/depth/{sym}" target="_blank" rel="noopener" title="open the Bids / Offers depth of this stock" style="color:inherit;text-decoration:none;border-bottom:1px dotted #888">'
-                body += (f"<tr><td>{i}</td><td>{_tvl(sym)}</td><td>{d['px']:.2f}</td><td>{chg_s}</td>"
-                         f"<td{bg_b}><b>{dl}{100.0 - off:.1f}%</a></b></td><td{bg_o}><b>{dl}{off:.1f}%</a></b></td>"
-                         f"<td>{'-' if d['spread'] is None else format(d['spread'], '.2f') + '%'}</td><td>{sp_s}</td></tr>")
-            body = body or '<tr><td colspan="8">None right now.</td></tr>'
-            return ('<div class="w"><table class="sp"><tr><th>#</th><th>Symbol</th><th>Price</th><th>Day %</th><th>Bids %</th><th>Offers %</th>'
-                    '<th>Bid-ask spread</th><th>Spurt (10-min)</th></tr>' + body + '</table></div>')
-
-        sell = sorted((x for x in rows if x[1]["offers"] > DEPTH_PCT), key=lambda x: -x[1]["offers"])
-        buy = sorted((x for x in rows if (100.0 - x[1]["offers"]) > DEPTH_PCT), key=lambda x: x[1]["offers"])
-        return (head + f'<h2>Bids / Offers &mdash; selling and buying pressure</h2>'
-                f'<div class="m">Run: {run} &middot; {len(rows)} liquid stocks (price &ge; {MIN_PRICE:.0f}, traded &ge; Rs {DEPTH_MIN_TURNOVER / 1e7:g} crore today, spread &le; {LIQ_SPREAD_THIN}%) &middot; '
-                f'Bids % / Offers % = total buy / sell quantity in the Dhan depth window &middot; listed above {DEPTH_PCT:g}% &middot; top {DEPTH_LIST_N} each &middot; refreshes every 10 min &middot; '
-                f'<a href="/spurt10">Volume spurt</a> &middot; <a href="/spurt_sell">Spurt SELL signals</a></div>'
-                f'<h3 style="color:#c62828">Selling pressure &mdash; Offers above {DEPTH_PCT:g}% ({len(sell)} stocks)</h3>' + table(sell[:DEPTH_LIST_N], "s") +
-                f'<h3 style="color:#0a7d33">Buying pressure &mdash; Bids above {DEPTH_PCT:g}% ({len(buy)} stocks)</h3>' + table(buy[:DEPTH_LIST_N], "b") +
-                _SORT_JS + "</body></html>")
+            off = d["offers"]
+            chg = d["chg"]
+            chg_s = "-" if chg is None else f'<span style="color:{"#0a7d33" if chg > 0 else "#c62828" if chg < 0 else "#555"}">{chg:+.2f}%</span>'
+            bg_b = ' style="background:#6fd68a"' if (100.0 - off) > DEPTH_PCT else ""
+            bg_o = ' style="background:#f08d84"' if off > DEPTH_PCT else ""
+            dl = f'<a href="/depth/{sym}" target="_blank" rel="noopener" title="open the Bids / Offers depth of this stock" style="color:inherit;text-decoration:none;border-bottom:1px dotted #888">'
+            body += (f"<tr><td>{i}</td><td>{_tvl(sym)}</td><td>{d['px']:.2f}</td><td>{chg_s}</td><td><b>{mult:.2f}x</b></td>"
+                     f"<td{bg_b}><b>{dl}{100.0 - off:.1f}%</a></b></td><td{bg_o}><b>{dl}{off:.1f}%</a></b></td>"
+                     f"<td>{'-' if d['spread'] is None else format(d['spread'], '.2f') + '%'}</td></tr>")
+        return (head + '<h2>Volume-spurt stocks &mdash; Bids / Offers</h2>'
+                f'<div class="m">Run: {run} &middot; the {len(rows)} stocks of the 10-min volume-spurt table, biggest spurt first &middot; '
+                f'Bids % / Offers % = total buy / sell quantity in the Dhan depth window (green / red cell = above {DEPTH_PCT:g}%) &middot; click a value for that stock\'s 5-level depth &middot; '
+                'refreshes every 10 min &middot; <a href="/spurt10">Volume spurt</a> &middot; <a href="/spurt_sell">Spurt SELL signals</a></div>'
+                '<div class="w"><table class="sp"><tr><th>#</th><th>Symbol</th><th>Price</th><th>Day %</th><th>Spurt (10-min)</th><th>Bids %</th><th>Offers %</th><th>Bid-ask spread</th></tr>'
+                + body + '</table></div>' + _SORT_JS + "</body></html>")
     except Exception as e:
         log.warning(f"Spurt10 /depth page failed: {e}")
         return "<p>Bids / Offers page could not be built. Please try again after the next cycle.</p>"

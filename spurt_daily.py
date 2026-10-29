@@ -103,7 +103,7 @@ def _to_date(ts):
 
 
 def _daily_candles(sym, sid, today):
-    """Daily candles BEFORE today (oldest first) as a DataFrame, or None. Today's candle is built from the quote instead."""
+    """Daily candles up to and including today (oldest first, with a date column 'd'), or None. Never raises."""
     frm = (today - timedelta(days=HIST_DAYS)).strftime("%Y-%m-%d")
     j = None
     for to in ((today + timedelta(days=1)), today):
@@ -121,13 +121,25 @@ def _daily_candles(sym, sid, today):
     df = pd.DataFrame({k: j.get(k) for k in ("open", "high", "low", "close", "volume", "timestamp")})
     df = df.dropna()
     df["d"] = [_to_date(t) for t in df["timestamp"]]
-    df = df[df["d"] < today].sort_values("d").reset_index(drop=True)      # drop today's candle if Dhan sent it
-    return df[["open", "high", "low", "close", "volume"]].astype(float) if len(df) else None
+    df = df.sort_values("d").reset_index(drop=True)
+    return df if len(df) else None
 
 
 def _score(sym, sid, q, today):
-    df = _daily_candles(sym, sid, today)
-    if df is None or len(df) < MIN_HISTORY:
+    """q = the stock's quote (price / volume of today), or None = quote step unavailable: today's candle from the daily candles is used instead."""
+    raw = _daily_candles(sym, sid, today)
+    if raw is None:
+        return {"_nodata": True}
+    df = raw[raw["d"] < today][["open", "high", "low", "close", "volume"]].astype(float).reset_index(drop=True)    # earlier days only
+    if q is None:
+        t = raw[raw["d"] == today]
+        if t.empty:
+            return {"_nodata": True}
+        t = t.iloc[-1]
+        q = {"px": float(t["close"]), "vol": float(t["volume"]), "open": float(t["open"]), "high": float(t["high"]), "low": float(t["low"]), "spread": None}
+        if q["px"] < sp.MIN_PRICE or q["px"] * q["vol"] < MIN_TURNOVER:
+            return {"_skip": True, "_illiq": True}                  # not liquid
+    if len(df) < MIN_HISTORY:
         return None
     avg = float(df["volume"].tail(AVG_LEN).mean())
     if avg < MIN_AVG_VOL:
@@ -153,15 +165,20 @@ def run_once():
     today = now.date()
     uni = sp._load_universe()
     sid_of = dict(uni)
-    quotes = _fetch_quotes(uni)
-    names = _liquid(quotes)
-    if len(names) < 50:                                   # holiday / no data: do not overwrite anything
-        log.info(f"Spurt daily: only {len(names)} liquid stocks have traded today - nothing to scan (market holiday?)")
-        return False
-    rows, failed, scanned = [], 0, 0
+    try:
+        quotes = _fetch_quotes(uni)
+        names = _liquid(quotes)
+        if len(names) < 50:                               # holiday / no data: do not overwrite anything
+            log.info(f"Spurt daily: only {len(names)} liquid stocks have traded today - nothing to scan (market holiday?)")
+            return False
+        mode = "quote"
+    except Exception as e:                                # e.g. Dhan answers HTTP 401 to the quote call after hours: use the daily candles only
+        log.warning(f"Spurt daily: quote step not available ({e}) - using today's daily candle instead (slower: every stock's candles are read)")
+        quotes, names, mode = None, [s_ for s_, _i in uni], "candle"
+    rows, failed, scanned, nodata, illiq = [], 0, 0, 0, 0
     for sym in names:
         try:
-            r = _score(sym, sid_of[sym], quotes[sym], today)
+            r = _score(sym, sid_of[sym], (quotes[sym] if quotes else None), today)
         except Exception as e:
             failed += 1
             if failed <= 3:
@@ -170,12 +187,21 @@ def run_once():
                 raise RuntimeError("too many daily-candle failures - Dhan problem?")
             continue
         scanned += 1
-        if r and not r.get("_skip"):
+        if r and r.get("_nodata"):
+            nodata += 1
+        elif r and r.get("_illiq"):
+            illiq += 1
+        elif r and not r.get("_skip"):
             rows.append(r)
         time.sleep(0.15)
+        if scanned == 60 and nodata >= 54:                # Dhan sends no candles: stop early, nothing is written
+            raise RuntimeError("Dhan sent no daily candles (HTTP / token problem?)")
+    if mode == "candle" and nodata > 0.9 * max(scanned, 1):
+        log.info("Spurt daily: no stock has a daily candle for today - market holiday? Nothing written.")
+        return False
     rows.sort(key=lambda r: -r["multiple"])
     meta = {"run": now.strftime("%Y-%m-%d %H:%M:%S IST"), "date": today.strftime("%Y-%m-%d"), "took_s": round(time.monotonic() - t0),
-            "universe": len(uni), "liquid": len(names), "scored": scanned, "failed": failed, "listed": len(rows),
+            "universe": len(uni), "liquid": (len(names) if mode == "quote" else scanned - nodata - illiq), "scored": scanned, "failed": failed, "listed": len(rows),
             "min_mult": MIN_MULT, "alert_mult": ALERT_MULT, "avg_len": AVG_LEN}
     _write(rows, meta)
     try:
