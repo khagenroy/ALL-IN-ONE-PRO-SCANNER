@@ -41,6 +41,8 @@ MIN_MULT = 2.0               # listed from this multiple of the 50-day average
 ALERT_MULT = 3.0             # phone alert (when also at a zone) from this multiple
 MIN_AVG_VOL = 1000           # ignore stocks whose 50-day average volume is below this many shares
 MIN_TURNOVER = 1e7           # liquid: traded at least Rs 1 crore today
+SPLIT_JUMP = 0.30            # a day-to-day close change above this (30%) in the history = split / bonus / demerger (Dhan's daily history is not adjusted): older candles are ignored
+MAX_ZONE_PCT = 0.25          # a zone wider than this share of the price is a data glitch and is dropped
 HIST_DAYS = 420              # calendar days of daily candles to read (about 280 trading days)
 RUN_AT_MIN = 16 * 60 + 45    # 16:45 IST (the swing scan runs at 16:00, so this stays clear of it)
 TOP_N = 100
@@ -139,6 +141,13 @@ def _score(sym, sid, q, today):
         q = {"px": float(t["close"]), "vol": float(t["volume"]), "open": float(t["open"]), "high": float(t["high"]), "low": float(t["low"]), "spread": None}
         if q["px"] < sp.MIN_PRICE or q["px"] * q["vol"] < MIN_TURNOVER:
             return {"_skip": True, "_illiq": True}                  # not liquid
+    cl = df["close"].to_numpy(dtype=float)
+    if len(cl) > 1:                                                 # corporate action in the history: use only the candles after the last jump
+        with np.errstate(divide="ignore", invalid="ignore"):
+            chg = np.abs(cl[1:] / cl[:-1] - 1.0)
+        jumps = np.where(np.isfinite(chg) & (chg > SPLIT_JUMP))[0]
+        if len(jumps):
+            df = df.iloc[jumps[-1] + 1:].reset_index(drop=True)
     if len(df) < MIN_HISTORY:
         return None
     avg = float(df["volume"].tail(AVG_LEN).mean())
@@ -149,8 +158,11 @@ def _score(sym, sid, q, today):
         return {"_skip": True}
     prev_close = float(df["close"].iloc[-1])
     day_chg = round((q["px"] - prev_close) / prev_close * 100.0, 2) if prev_close > 0 else None
+    if day_chg is not None and abs(day_chg) > SPLIT_JUMP * 100.0:   # a move this big in one day = ex-date of a split / demerger, not a real spurt
+        return {"_skip": True}
     today_bar = pd.DataFrame([{"open": q["open"], "high": q["high"], "low": q["low"], "close": q["px"], "volume": q["vol"]}])
-    zs = spurt_zones.live_zones(pd.concat([df, today_bar], ignore_index=True))
+    zs = [z for z in (spurt_zones.live_zones(pd.concat([df, today_bar], ignore_index=True)) or [])
+          if (z["hi"] - z["lo"]) <= MAX_ZONE_PCT * q["px"]]
     row = {"symbol": sym, "price": round(q["px"], 2), "day_chg_pct": day_chg, "day_vol": int(q["vol"]), "avg_vol": int(avg),
            "multiple": round(mult, 2), "ohlc": (q["open"], q["high"], q["low"], q["px"])}
     row.update(sp._zone_fields(zs, q["px"], day_chg))
@@ -254,10 +266,18 @@ def _send_alert(rows, meta):
                      + (f"  day {r['day_chg_pct']:+.2f}%" if r.get("day_chg_pct") is not None else ""))
     extra = f"\n+{len(hits) - ALERT_MAX_LINES} more on /spurt_daily" if len(hits) > ALERT_MAX_LINES else ""
     import requests
-    resp = requests.post(f"https://ntfy.sh/{topic}", data=("\n".join(lines) + extra).encode("utf-8"), timeout=8,
-                         headers={"Title": f"Daily volume spurt at a daily zone ({len(hits)})", "Priority": "high", "Tags": "bar_chart"})
-    if resp.status_code >= 300:
-        log.warning(f"Spurt daily ntfy refused: {resp.status_code} {resp.text[:150]}")
+    last = None
+    for attempt in range(4):                                  # the alert is sent only once a day: retry a short network problem (e.g. "Network is unreachable")
+        try:
+            resp = requests.post(f"https://ntfy.sh/{topic}", data=("\n".join(lines) + extra).encode("utf-8"), timeout=8,
+                                 headers={"Title": f"Daily volume spurt at a daily zone ({len(hits)})", "Priority": "high", "Tags": "bar_chart"})
+            if resp.status_code >= 300:
+                log.warning(f"Spurt daily ntfy refused: {resp.status_code} {resp.text[:150]}")
+            return
+        except Exception as e:
+            last = e
+            time.sleep(30)
+    raise RuntimeError(f"ntfy not reachable after 4 tries: {last}")
 
 
 # ---------------------------------------------------------------- page
@@ -269,7 +289,7 @@ def page_html():
             '<meta http-equiv="refresh" content="300"><title>Daily Volume Spurt</title>'
             '<style>body{font-family:Arial,sans-serif;margin:12px;background:#fafafa}table{border-collapse:collapse;width:100%;background:#fff}'
             'th,td{border:1px solid #ddd;padding:6px 8px;text-align:right;font-size:14px}th{background:#222;color:#fff}td:nth-child(2){text-align:left}'
-            '.m{color:#555;font-size:13px;margin:6px 0 12px}.w{overflow-x:auto}</style></head><body>')
+            '.m{color:#555;font-size:13px;margin:6px 0 12px}th{position:sticky;top:0;z-index:5;box-shadow:0 1px 0 #555}</style></head><body>')      # no overflow wrapper: it would stop the heading row from freezing
     try:
         if not os.path.exists(JSON_PATH):
             return (head + "<h2>Daily Volume Spurt</h2><p>No daily scan has run yet. It runs once a day after the market closes (16:45 IST, Mon-Fri) "

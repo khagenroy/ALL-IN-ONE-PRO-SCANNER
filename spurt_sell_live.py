@@ -167,7 +167,8 @@ def track(df, sym, day_chg=None, price=None):
             "res_zone": res_zone, "htf_zone": htf_zone, "red_any": bool(red_any),
             "move_pct": round(float((c[L] / c[j] - 1) * 100), 2), "off_high_pct": round(float((c[L] / h[j:L + 1].max() - 1) * 100), 2),
             "vol_vs_spurt": round(float(v[L] / v[j]), 2) if v[j] > 0 else None,
-            "strip": [f"{o[i]:.4f}|{h[i]:.4f}|{l[i]:.4f}|{c[i]:.4f}" for i in range(j, min(L, j + WAIT) + 1)],
+            "strip": [f"{o[i]:.4f}|{h[i]:.4f}|{l[i]:.4f}|{c[i]:.4f}" for i in range(max(j - PRE_CANDLES, 0), min(L, j + WAIT) + 1)],
+            "pre": int(j - max(j - PRE_CANDLES, 0)),
             "symbol": sym, "price": round(float(c[L]), 2), "day_chg_pct": day_chg,
             "spurt_at": ist[j].strftime("%H:%M"), "spurt_mult": round(float(mult[j]), 1), "best_mult": round(best, 1),
             "spurt_colour": colour(j), "since": int(L - j),
@@ -221,8 +222,11 @@ def _tv_link(sym):
     return f'<a href="{u}" target="_blank" rel="noopener" title="open chart in TradingView" style="color:inherit;text-decoration:none;border-bottom:1px dotted #888"><b>{_h.escape(str(sym))}</b></a>'
 
 
-def _strip_svg(strip, tag=0):
-    """The spurt candle and the candles after it (up to 10) side by side on one shared price scale, so sizes can be compared. A dot marks the spurt candle."""
+PRE_CANDLES = 10      # candles BEFORE the spurt candle shown in the strip (dimmed), so the strip is 10 before + the spurt + up to 10 after
+
+
+def _strip_svg(strip, tag=0, pre=0):
+    """The 10 candles before the spurt (dimmed), the spurt candle and the candles after it (up to 10) side by side on one shared price scale, so sizes can be compared. A dot marks the spurt candle."""
     try:
         cs = [[float(x) for x in str(t).split("|")[:4]] for t in strip]
         if not cs:
@@ -236,11 +240,12 @@ def _strip_svg(strip, tag=0):
         for i, (o, h, l, c) in enumerate(cs):
             col = "#089981" if c > o else "#F23645" if c < o else "#888"
             x = i * w + w / 2
+            op = ' opacity="0.55"' if i < pre else ""
             top, bot = min(y(o), y(c)), max(y(o), y(c))
-            parts.append(f'<line x1="{x:.1f}" y1="{y(h):.1f}" x2="{x:.1f}" y2="{y(l):.1f}" stroke="{col}" stroke-width="1.5"/>'
-                         f'<rect x="{x - 4:.1f}" y="{top:.1f}" width="8" height="{max(bot - top, 1.5):.1f}" fill="{col}"/>')
-        parts.append(f'<circle cx="{w / 2:.1f}" cy="68" r="2.4" fill="#d29922"/>')
-        title = "spurt candle (dot) and the candles after it"
+            parts.append(f'<line x1="{x:.1f}" y1="{y(h):.1f}" x2="{x:.1f}" y2="{y(l):.1f}" stroke="{col}" stroke-width="1.5"{op}/>'
+                         f'<rect x="{x - 4:.1f}" y="{top:.1f}" width="8" height="{max(bot - top, 1.5):.1f}" fill="{col}"{op}/>')
+        parts.append(f'<circle cx="{pre * w + w / 2:.1f}" cy="68" r="2.4" fill="#d29922"/>')
+        title = "10 candles before the spurt (dim), the spurt candle (dot) and the candles after it"
         return f'<svg width="{len(cs) * w}" height="72" viewBox="0 0 {len(cs) * w} 72" style="vertical-align:middle"><title>{title}</title>' + "".join(parts) + "</svg>"
     except Exception:
         return "-"
@@ -316,7 +321,7 @@ def tracker_html(signal_syms=()):
                     f"<td style='color:{cc(r['spurt_colour'])}'><b>{r['spurt_colour']}</b></td><td>{r['since']}</td>"
                     f"<td style='color:{cc(r['first_after'])}'><b>{r['first_after']}</b></td>"
                     f"<td style='white-space:nowrap;text-align:center'>{_draw(r['ohlc'])} <b style='color:{cc(r['latest_colour'])}'>{r['latest_colour']}</b></td>"
-                    f"<td class='st' style='white-space:nowrap'>{_strip_svg(r.get('strip') or [])}</td>"
+                    f"<td class='st' style='white-space:nowrap'>{_strip_svg(r.get('strip') or [], 0, int(r.get('pre') or 0))}</td>"
                     f"<td>{pc(r.get('move_pct'))}</td><td>{pc(r.get('off_high_pct'))}</td><td>{'-' if r.get('vol_vs_spurt') is None else format(r['vol_vs_spurt'], 'g') + 'x'}</td>"
                     f"<td>{'yes' if r['red_solid_vol'] else '-'}</td><td>{zt(r.get('res_zone'))}</td><td>{zt(r.get('htf_zone'))}</td>"
                     f"<td{rsi_style}>{r['rsi_peak']:g}{' &#10004;' if r['rsi_peak'] > RSI_MIN else ''}</td>"
@@ -326,7 +331,7 @@ def tracker_html(signal_syms=()):
                 '"Red solid + volume up" = a solid red candle with higher volume than the one before it has come since the spurt (checklist points 3 and 4). Stocks leave nothing out: '
                 'a stock that is no longer in the live top list keeps its last row (see "Seen").</div>'
                 '<style>table.trk th,table.trk td{padding:4px 5px;font-size:12px;line-height:1.25}table.trk td.st{min-width:152px;padding:2px 4px;text-align:left}table.trk th{font-size:11.5px}</style><table class="s trk"><tr><th>#</th><th>Symbol</th><th>Spurt at</th><th title="volume multiple of the spurt candle">Spurt x</th><th title="best multiple today">Best x</th><th>Spurt candle</th><th title="candles since the spurt">Since</th>'
-                '<th>1st candle after</th><th>Latest</th><th>Spurt (dot) + next candles</th><th title="change since the spurt candle closed">Move</th><th title="distance from the highest high since the spurt">From high</th><th title="latest candle volume vs the spurt candle volume">Vol vs spurt</th><th title="solid red candle with higher volume has come">Red + vol up</th><th title="resistance zone touched since the spurt">Res. zone</th><th>' + str(HTF_MIN) + 'm zone</th><th>RSI</th><th>Checklist</th><th title="close of the latest closed 10-min candle">Close</th><th title="last traded price now (refreshed when the page is opened)">Live</th><th>Status</th><th>Seen</th></tr>'
+                '<th>1st candle after</th><th>Latest</th><th title="10 candles before the spurt (dim), the spurt candle (dot) and the candles after it">10 before + spurt (dot) + next</th><th title="change since the spurt candle closed">Move</th><th title="distance from the highest high since the spurt">From high</th><th title="latest candle volume vs the spurt candle volume">Vol vs spurt</th><th title="solid red candle with higher volume has come">Red + vol up</th><th title="resistance zone touched since the spurt">Res. zone</th><th>' + str(HTF_MIN) + 'm zone</th><th>RSI</th><th>Checklist</th><th title="close of the latest closed 10-min candle">Close</th><th title="last traded price now (refreshed when the page is opened)">Live</th><th>Status</th><th>Seen</th></tr>'
                 f'{out}</table><br>')
     except FileNotFoundError:
         return _NO_TRK
