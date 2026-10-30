@@ -25,6 +25,40 @@ from zoneinfo import ZoneInfo
 
 from flask import Flask, send_file, request, redirect
 
+
+def _link_results_to_disk(disks=("/var/data", "/data")):
+    """If a Render persistent disk is attached (mount path /var/data), the whole results folder - spurt history, SELL tracker,
+    news list, depth snapshot, scanner results, every CSV - lives on the disk, so an update no longer wipes it. Every module keeps
+    using its normal <app folder>/results path: that path becomes a link to the disk folder. No disk -> nothing changes."""
+    try:
+        import shutil
+        disk = next((d for d in disks if os.path.isdir(d) and os.access(d, os.W_OK)), None)
+        if not disk:
+            return
+        here = os.path.dirname(os.path.abspath(__file__))
+        link = os.path.join(here, "results")
+        target = os.path.join(disk, "results")
+        os.makedirs(target, exist_ok=True)
+        if os.path.islink(link):
+            if os.path.realpath(link) == os.path.realpath(target):
+                return
+            os.remove(link)
+        elif os.path.isdir(link):
+            for name in os.listdir(link):
+                dst = os.path.join(target, name)
+                if not os.path.exists(dst):
+                    shutil.move(os.path.join(link, name), dst)
+            shutil.rmtree(link, ignore_errors=True)
+        elif os.path.exists(link):
+            os.remove(link)
+        os.symlink(target, link)
+        print(f"RESULTS_ON_DISK {link} -> {target}", flush=True)
+    except Exception as e:
+        print(f"RESULTS_ON_DISK_FAILED {e}", flush=True)
+
+
+_link_results_to_disk()
+
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("all-in-one-pro-live")
