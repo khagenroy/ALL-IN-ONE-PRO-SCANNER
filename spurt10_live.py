@@ -776,6 +776,100 @@ def _wick_html():
         return ""
 
 
+# ---------------------------------------------------------------- stocks with news (NSE corporate announcements) are left out
+NEWS_FILTER_ON = True        # ADDED: spurt stocks with an important NSE corporate announcement since the previous close are taken out of the list / alerts / /depth and shown in a list at the bottom. False = off
+NEWS_REFRESH_SEC = 600       # the announcements are read again after this many seconds (one request per refresh)
+NEWS_KEEP_WORDS = ("result", "outcome of board", "board meeting", "acquisition", "acquire", "order", "contract", "award", "bagging", "fund raising", "fundraising",
+                   "preferential", "qip", "rights issue", "bonus", "split", "dividend", "buy back", "buyback", "merger", "demerger", "amalgamation",
+                   "scheme of arrangement", "rating", "press release", "joint venture", "agreement", "usfda", "patent", "capacity", "expansion",
+                   "default", "fraud", "raid", "penalty", "insolvency", "takeover", "open offer", "delisting", "stake")
+NEWS_SKIP_WORDS = ("trading window", "loss of share", "duplicate share", "certificate under regulation 74", "shareholding pattern", "investor complaints",
+                   "newspaper", "voting results", "scrutinizer", "record date for", "analysts", "institutional investor", "change in registrar")
+_news = {"at": 0.0, "syms": {}, "err": "", "ok_at": "", "n_all": 0}
+
+
+def _news_cutoff(now_ist):
+    """Previous trading day 15:30 IST (yesterday after the close; Monday looks back to Friday)."""
+    d = now_ist - timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d.replace(hour=15, minute=30, second=0, microsecond=0)
+
+
+def _news_fetch(now_ist):
+    """{symbol: title} of important announcements since the previous close. Raises on any problem (the caller keeps the old result)."""
+    import requests
+    sess = requests.Session()
+    sess.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+                         "Accept": "application/json, text/plain, */*", "Accept-Language": "en-US,en;q=0.9", "Referer": "https://www.nseindia.com/"})
+    sess.get("https://www.nseindia.com/", timeout=12)                               # cookies
+    cut = _news_cutoff(now_ist)
+    fd, td = cut.strftime("%d-%m-%Y"), now_ist.strftime("%d-%m-%Y")
+    resp = sess.get(f"https://www.nseindia.com/api/corporate-announcements?index=equities&from_date={fd}&to_date={td}", timeout=20)
+    if resp.status_code != 200:
+        raise RuntimeError(f"NSE answered {resp.status_code}")
+    data = resp.json()
+    if not isinstance(data, list):
+        raise RuntimeError("NSE answer was not a list")
+    out = {}
+    for a in data:
+        try:
+            sym = str(a.get("symbol") or "").strip().upper()
+            if not sym:
+                continue
+            txt = f"{a.get('desc') or ''} {a.get('attchmntText') or ''}".lower()
+            if any(w in txt for w in NEWS_SKIP_WORDS) or not any(w in txt for w in NEWS_KEEP_WORDS):
+                continue
+            dt = datetime.strptime(str(a.get("an_dt") or "")[:20].strip(), "%d-%b-%Y %H:%M:%S").replace(tzinfo=IST) if a.get("an_dt") else None
+            if dt is not None and dt < cut:
+                continue
+            title = str(a.get("desc") or a.get("attchmntText") or "announcement").strip()[:90]
+            if sym not in out:
+                out[sym] = title
+        except Exception:
+            continue
+    _news["n_all"] = len(data)
+    return out
+
+
+def _news_get(now_ist):
+    """The {symbol: title} set to leave out. Refreshed every NEWS_REFRESH_SEC; if NSE cannot be read the last good set is kept (or nothing is left out). Never raises."""
+    if not NEWS_FILTER_ON:
+        return {}
+    try:
+        if time.time() - _news["at"] >= NEWS_REFRESH_SEC:
+            _news["at"] = time.time()
+            try:
+                _news["syms"] = _news_fetch(now_ist)
+                _news["err"] = ""
+                _news["ok_at"] = now_ist.strftime("%H:%M")
+                log.info(f"Spurt10 news: {len(_news['syms'])} stocks with an important announcement ({_news['n_all']} announcements read)")
+            except Exception as e:
+                _news["err"] = str(e)[:120]
+                log.warning(f"Spurt10 news feed failed (nothing is left out for news): {e}")
+        return dict(_news["syms"])
+    except Exception:
+        return {}
+
+
+def _news_html(meta):
+    """List of the spurt stocks left out because of news, plus the status of the news feed. Never raises."""
+    try:
+        if not NEWS_FILTER_ON:
+            return ""
+        nl = meta.get("news_list") or []
+        status = meta.get("news_status") or ""
+        head = (f'<h3 style="margin:22px 0 4px">Spurt stocks left out because of news &mdash; {len(nl)}</h3>'
+                f'<div class="m">Important NSE corporate announcement since the previous close (results, board meeting, orders, deals, fund raising, dividend, rating ...). {status}</div>')
+        if not nl:
+            return head + '<div class="m">None right now.</div>'
+        rows = "".join(f"<tr><td>{i}</td><td>{_tvl(t['symbol'])}</td><td>{t['price']:.2f}</td><td>{t['candle']}</td><td>{t['multiple']:.2f}x</td><td style='text-align:left'>{t['title']}</td></tr>"
+                       for i, t in enumerate(nl, 1))
+        return (head + '<div class="w"><table class="sp"><tr><th>#</th><th>Symbol</th><th>Price</th><th>Candle</th><th>Multiple</th><th>Announcement</th></tr>' + rows + '</table></div>')
+    except Exception:
+        return ""
+
+
 def run_once():
     _candle_reminder(datetime.now(IST), 10, "Stock 10-min")
     t0 = time.monotonic()
@@ -807,6 +901,17 @@ def run_once():
         rows = [_r for _r in rows if _r.get("liq") != "THIN"]
         if thin_removed:
             log.info(f"Spurt10: {thin_removed} thin stock(s) left out (spread above {LIQ_SPREAD_THIN}%)")
+    news_list, news_status = [], ""
+    if NEWS_FILTER_ON:                                              # ADDED: leave out stocks with an important announcement (fails open: nothing is left out when the news feed cannot be read)
+        _nsyms = _news_get(now_ist)
+        if _news["err"]:
+            news_status = (f'<span style="color:#c62828">News feed problem: {_news["err"]} &mdash; ' + ("using the last good read." if _nsyms else "nothing is being left out for news.") + '</span>')
+        elif _news["ok_at"]:
+            news_status = f'News feed OK (read {_news["ok_at"]} IST, {len(_nsyms)} stocks with news).'
+        if _nsyms:
+            news_list = sorted(({"symbol": _r["symbol"], "price": _r["price"], "candle": _r["candle"], "multiple": _r["multiple"], "title": _nsyms[_r["symbol"]]}
+                                for _r in rows if _r["symbol"] in _nsyms), key=lambda t: -t["multiple"])[:60]
+            rows = [_r for _r in rows if _r["symbol"] not in _nsyms]
     rows.sort(key=lambda r: -r["multiple"])
     top = rows[:TOP_N]
     top_ids = {id(x) for x in top}
@@ -881,7 +986,7 @@ def run_once():
     meta = {
         "run": now_ist.strftime("%Y-%m-%d %H:%M:%S IST"), "took_s": round(time.monotonic() - t0),
         "universe": len(uni), "quoted": len(quotes), "price_ok": n_pass, "shortlisted": len(names),
-        "scored": len(rows), "failed": failed, "etf_excluded": len(_excluded), "thin_removed": thin_removed, "thin_list": thin_list, "min_price": MIN_PRICE, "sma_len": SMA_LEN, "alert_mult": ALERT_MULT,
+        "scored": len(rows), "failed": failed, "etf_excluded": len(_excluded), "thin_removed": thin_removed, "thin_list": thin_list, "news_list": news_list, "news_status": news_status, "min_price": MIN_PRICE, "sma_len": SMA_LEN, "alert_mult": ALERT_MULT,
         "watch": watch_view, "watch_until": f"{WATCH_UNTIL_MIN // 60:02d}:{WATCH_UNTIL_MIN % 60:02d}", "watch_mult": WATCH_MULT,
     }
     _write(top, meta)
@@ -1212,6 +1317,7 @@ th,td{{border:1px solid #ddd;padding:6px 8px;text-align:right;font-size:14px}}th
 {_link_html()}
 {_wick_html()}
 {_watch_html(meta)}
+{_news_html(meta)}
 {_thin_html(meta)}
 {_SORT_JS}</body></html>"""
 
