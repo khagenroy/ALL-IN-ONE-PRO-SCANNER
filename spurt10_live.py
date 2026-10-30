@@ -80,6 +80,7 @@ ZONE_ALERT_ON = os.environ.get("SPURT10_ZONE_ALERT", "true").strip().lower() == 
 ZONE_ALERT_MAX = int(os.environ.get("SPURT10_ZONE_ALERT_MAX", "40") or "40")
 OFFERS_ALERT_ON = True      # ADDED: phone alert when a spurt stock has selling pressure above OFFERS_ALERT_PCT (Dhan depth: total sell qty / (buy + sell qty), the "Offers %" of the depth window)
 OFFERS_ALERT_PCT = 55.0     # Offers % above this = selling pressure alert (raise it, e.g. 60, to get fewer alerts)
+OFFERS_ONLY_AT_ZONE = True  # ADDED: the selling-pressure alert is sent only while the stock is AT a support / resistance zone (between zones the depth means little); False = old behaviour
 OFFERS_ALERT_MAX = 30       # safety cap on these notifications per day
 HISTORY_DAYS = 8            # calendar days of 5-min candles: 50 ten-minute candles need ~3 sessions
 
@@ -159,6 +160,32 @@ DEPTH_MIN_TURNOVER = 1e7   # /depth page: leave out stocks that traded less than
 DEPTH_LIST_N = 50          # /depth page: stocks shown in each list
 DEPTH_PCT = 55.0           # /depth page: Bids % / Offers % cells turn green / red above this
 _depth = {}                # {symbol: (spread_pct, buy_qty / sell_qty, offers_pct)} filled by _fetch_quotes every cycle
+DEPTH_PATH = os.path.join(os.path.dirname(__file__), "results", "depth_snapshot.json")   # ADDED: the /depth page data, saved to disk every cycle so it shows whichever worker / thread serves the page and survives a restart
+
+
+def _save_depth_snapshot(run, spurt):
+    """ADDED: save the /depth page data (run time, spurt multiples, depth of those stocks) to disk. Never raises."""
+    try:
+        snap = {sym: _dsnap[sym] for sym in spurt if sym in _dsnap}
+        os.makedirs(os.path.dirname(DEPTH_PATH), exist_ok=True)
+        tmp = DEPTH_PATH + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"run": run, "spurt": spurt, "snap": snap}, f)
+        os.replace(tmp, DEPTH_PATH)
+    except Exception as e:
+        log.warning(f"Spurt10: could not save the /depth snapshot: {e}")
+
+
+def _load_depth_snapshot():
+    """ADDED: (run, spurt, snap) from the saved file, or None when there is no usable file."""
+    try:
+        with open(DEPTH_PATH, "r") as f:
+            d = json.load(f)
+        if d.get("run") and d.get("spurt"):
+            return d["run"], dict(d["spurt"]), dict(d.get("snap") or {})
+    except Exception:
+        pass
+    return None
 
 
 def _parse_depth(q):
@@ -589,7 +616,8 @@ def _send_offers_alerts(top, now_ist):
         _offers_alerted.update(date=today, keys=set(), count=0)
     if _offers_alerted["count"] >= OFFERS_ALERT_MAX:
         return
-    hits = [r for r in top if (r.get("offers_pct") or 0) > OFFERS_ALERT_PCT and r["symbol"] not in _offers_alerted["keys"]]
+    hits = [r for r in top if (r.get("offers_pct") or 0) > OFFERS_ALERT_PCT and r["symbol"] not in _offers_alerted["keys"]
+            and (not OFFERS_ONLY_AT_ZONE or r.get("at_zone") in ("SUPPORT", "RESISTANCE"))]   # ADDED: only at a zone; a stock that is not at one yet is not used up for the day
     if not hits:
         return
     hits.sort(key=lambda r: -(r.get("offers_pct") or 0))
@@ -597,12 +625,13 @@ def _send_offers_alerts(top, now_ist):
     for r in hits[:12]:
         chg = r.get("candle_chg_pct")
         lines.append(f"{r['symbol']}  Offers {r['offers_pct']:.1f}%  Bids {100 - r['offers_pct']:.1f}%  Rs {r['price']:.2f}  spurt {r['multiple']:.1f}x"
-                     + (f"  candle {chg:+.2f}%" if chg is not None else ""))
+                     + (f"  candle {chg:+.2f}%" if chg is not None else "")
+                     + (f"  AT {r['at_zone']} {r.get('support') if r.get('at_zone') == 'SUPPORT' else r.get('resistance')}" if r.get("at_zone") in ("SUPPORT", "RESISTANCE") else ""))
     extra = f"\n+{len(hits) - 12} more on the scanner page" if len(hits) > 12 else ""
     try:
         import requests
         resp = requests.post(f"https://ntfy.sh/{topic}", data=("\n".join(lines) + extra).encode("utf-8"), timeout=8,
-                             headers={"Title": f"Selling pressure above {OFFERS_ALERT_PCT:g}% (spurt stocks)", "Priority": "high",
+                             headers={"Title": f"Selling pressure above {OFFERS_ALERT_PCT:g}% at a zone (spurt stocks)" if OFFERS_ONLY_AT_ZONE else f"Selling pressure above {OFFERS_ALERT_PCT:g}% (spurt stocks)", "Priority": "high",
                                       "Tags": "chart_with_downwards_trend"})
         if resp.status_code >= 300:
             log.warning(f"Spurt10 offers ntfy refused: {resp.status_code} {resp.text[:150]}")
@@ -808,6 +837,7 @@ def run_once():
     try:
         _dsnap_meta["run"] = now_ist.strftime("%Y-%m-%d %H:%M:%S IST")
         _dsnap_meta["spurt"] = {r["symbol"]: r["multiple"] for r in top}
+        _save_depth_snapshot(_dsnap_meta["run"], _dsnap_meta["spurt"])
     except Exception:
         pass
     try:
@@ -1280,6 +1310,9 @@ def depth_html():
         snap = dict(_dsnap)
         run = _dsnap_meta.get("run")
         spurt = dict(_dsnap_meta.get("spurt") or {})
+        _saved = _load_depth_snapshot()                              # ADDED: the saved copy is complete and the same for every worker, so it wins when present
+        if _saved:
+            run, spurt, snap = _saved
         head = ('<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
                 '<meta http-equiv="refresh" content="60"><title>Spurt stocks - Bids / Offers</title>'
                 '<style>body{font-family:Arial,sans-serif;margin:12px;background:#fafafa}table{border-collapse:collapse;width:100%;background:#fff;margin-bottom:18px}'
