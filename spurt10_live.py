@@ -783,7 +783,8 @@ NEWS_KEEP_WORDS = ("result", "outcome of board", "board meeting", "acquisition",
                    "preferential", "qip", "rights issue", "bonus", "split", "dividend", "buy back", "buyback", "merger", "demerger", "amalgamation",
                    "scheme of arrangement", "rating", "press release", "joint venture", "agreement", "usfda", "patent", "capacity", "expansion",
                    "default", "fraud", "raid", "penalty", "insolvency", "takeover", "open offer", "delisting", "stake")
-NEWS_SKIP_WORDS = ("trading window", "loss of share", "duplicate share", "certificate under regulation 74", "shareholding pattern", "investor complaints",
+NEWS_LIST_MIN_MULT = 5.0     # the "left out because of news" list at the bottom shows only stocks with a volume spurt of at least this multiple (they are all removed from the table either way)
+NEWS_SKIP_WORDS = ("monitoring agency", "trading window", "loss of share", "duplicate share", "certificate under regulation 74", "shareholding pattern", "investor complaints",
                    "newspaper", "voting results", "scrutinizer", "record date for", "analysts", "institutional investor", "change in registrar")
 _news = {"at": 0.0, "syms": {}, "err": "", "ok_at": "", "n_all": 0}
 
@@ -852,6 +853,36 @@ def _news_get(now_ist):
         return {}
 
 
+def news_symbols():
+    """{symbol: announcement title} of the stocks with important news (for the other alert modules). {} when the filter is off or the feed is not readable. Never raises."""
+    try:
+        return _news_get(datetime.now(IST)) if NEWS_FILTER_ON else {}
+    except Exception:
+        return {}
+
+
+def _news_purge_tracker(nsyms):
+    """Take stocks with news out of the Spurt SELL tracker table (spurt_track.json keeps every stock that spurted today). Never raises."""
+    try:
+        if not nsyms:
+            return
+        import spurt_sell_live
+        path = spurt_sell_live.TRACK_PATH
+        with open(path) as fh:
+            data = json.load(fh)
+        rows = data.get("rows") or {}
+        gone = [k for k in rows if k in nsyms]
+        if gone:
+            for k in gone:
+                rows.pop(k, None)
+            with open(path + ".tmp", "w") as fh:
+                json.dump(data, fh)
+            os.replace(path + ".tmp", path)
+            log.info(f"Spurt10 news: {len(gone)} stock(s) taken out of the Spurt SELL tracker")
+    except Exception:
+        pass
+
+
 def _news_html(meta):
     """List of the spurt stocks left out because of news, plus the status of the news feed. Never raises."""
     try:
@@ -860,7 +891,7 @@ def _news_html(meta):
         nl = meta.get("news_list") or []
         status = meta.get("news_status") or ""
         head = (f'<h3 style="margin:22px 0 4px">Spurt stocks left out because of news &mdash; {len(nl)}</h3>'
-                f'<div class="m">Important NSE corporate announcement since the previous close (results, board meeting, orders, deals, fund raising, dividend, rating ...). {status}</div>')
+                f'<div class="m">Important NSE corporate announcement since the previous close (results, board meeting, orders, deals, fund raising, dividend, rating ...). Shown here: volume spurt of {NEWS_LIST_MIN_MULT:g}x or more. {status}</div>')
         if not nl:
             return head + '<div class="m">None right now.</div>'
         rows = "".join(f"<tr><td>{i}</td><td>{_tvl(t['symbol'])}</td><td>{t['price']:.2f}</td><td>{t['candle']}</td><td>{t['multiple']:.2f}x</td><td style='text-align:left'>{t['title']}</td></tr>"
@@ -910,8 +941,14 @@ def run_once():
             news_status = f'News feed OK (read {_news["ok_at"]} IST, {len(_nsyms)} stocks with news).'
         if _nsyms:
             news_list = sorted(({"symbol": _r["symbol"], "price": _r["price"], "candle": _r["candle"], "multiple": _r["multiple"], "title": _nsyms[_r["symbol"]]}
-                                for _r in rows if _r["symbol"] in _nsyms), key=lambda t: -t["multiple"])[:60]
+                                for _r in rows if _r["symbol"] in _nsyms and _r["multiple"] >= NEWS_LIST_MIN_MULT), key=lambda t: -t["multiple"])[:60]
             rows = [_r for _r in rows if _r["symbol"] not in _nsyms]
+            try:                                                    # also stop following stocks that spurted earlier today and now have news (zone / wick alerts keep checking those)
+                for _d in (_watch.get("syms"), _wick.get("syms")):
+                    for _k in [k for k in (_d or {}) if k in _nsyms]:
+                        _d.pop(_k, None)
+            except Exception:
+                pass
     rows.sort(key=lambda r: -r["multiple"])
     top = rows[:TOP_N]
     top_ids = {id(x) for x in top}
@@ -974,6 +1011,7 @@ def run_once():
         log.warning(f"Spurt link step failed: {e}")
     try:                                                            # ADDED: spurt -> red candle SELL signals (own page, own ntfy topic)
         import spurt_sell_live
+        _news_purge_tracker(_news.get("syms") if NEWS_FILTER_ON else None)
         spurt_sell_live.update_tracker(trk_items, now_ist)
         spurt_sell_live.process(sell_hits, now_ist)
     except Exception as e:

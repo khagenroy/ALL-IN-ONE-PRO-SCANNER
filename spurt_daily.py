@@ -264,6 +264,12 @@ def _send_alert(rows, meta):
     if not (sp.NTFY_ON and topic):
         return
     hits = [r for r in rows if r["multiple"] >= ALERT_MULT and r.get("at_zone") in ("SUPPORT", "RESISTANCE")]
+    try:                                                      # ADDED: no alert for a stock with important news (spurt10_live.news_symbols)
+        import spurt10_live as _s10
+        _nws = _s10.news_symbols()
+        hits = [r for r in hits if r["symbol"] not in _nws]
+    except Exception:
+        pass
     if not hits:
         return
     lines = []

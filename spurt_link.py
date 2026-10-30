@@ -118,7 +118,14 @@ def process(now_ist=None):
         if "timestamp" in sg:
             sg = sg[sg["timestamp"].astype(str).str.startswith(today)]
         new = []
+        try:                                                    # ADDED: no OB alert for a stock with important news (spurt10_live.news_symbols)
+            import spurt10_live as _s10
+            _nws = _s10.news_symbols()
+        except Exception:
+            _nws = {}
         for r in sg.itertuples():
+            if r.symbol in _nws:
+                continue
             key = (r.symbol, str(r.signal).upper(), (str(getattr(r, "timestamp", ""))[11:16] or str(getattr(r, "timestamp", ""))))
             if r.symbol not in _st["seen"] or key in _st["done"]:
                 continue
