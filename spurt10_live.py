@@ -853,6 +853,55 @@ def _news_get(now_ist):
         return {}
 
 
+NEWS_DAY_JSON = os.path.join(RESULTS_DIR, "news_day.json")      # ADDED: every stock with news and a spurt of NEWS_LIST_MIN_MULT or more, kept for the whole day
+NEWS_DAY_CSV = os.path.join(RESULTS_DIR, "news_day.csv")
+_news_day = {"date": None, "rows": {}}
+
+
+def _news_day_update(items, now_ist):
+    """Adds this cycle's news stocks (spurt >= NEWS_LIST_MIN_MULT) to the day list (first spurt time stays, best multiple / last price update), saves it to disk
+    (json for a restart, csv for download; older days stay in the csv) and returns the day list, biggest best-spurt first. Never raises."""
+    today = now_ist.strftime("%Y-%m-%d")
+    try:
+        if _news_day["date"] != today:
+            _news_day.update(date=today, rows={})
+            try:
+                with open(NEWS_DAY_JSON) as fh:
+                    d = json.load(fh)
+                if d.get("date") == today:
+                    _news_day["rows"] = dict(d.get("rows") or {})
+            except Exception:
+                pass
+        rows = _news_day["rows"]
+        for it in items:
+            cur = rows.get(it["symbol"])
+            if cur is None:
+                rows[it["symbol"]] = {"symbol": it["symbol"], "first": it["candle"], "best": it["multiple"], "price": it["price"], "title": it["title"]}
+            else:
+                cur["best"] = max(cur["best"], it["multiple"])
+                cur["price"] = it["price"]
+                cur["title"] = it["title"]
+        if items:
+            os.makedirs(RESULTS_DIR, exist_ok=True)
+            with open(NEWS_DAY_JSON + ".tmp", "w") as fh:
+                json.dump({"date": today, "rows": rows}, fh)
+            os.replace(NEWS_DAY_JSON + ".tmp", NEWS_DAY_JSON)
+            new = pd.DataFrame([{"date": today, "first_spurt_candle": r["first"], "symbol": r["symbol"], "best_spurt_x": r["best"], "last_price": r["price"],
+                                 "announcement": r["title"]} for r in rows.values()])
+            if os.path.exists(NEWS_DAY_CSV):
+                try:
+                    old = pd.read_csv(NEWS_DAY_CSV)
+                    new = pd.concat([old[old["date"].astype(str) != today], new], ignore_index=True)
+                except Exception:
+                    pass
+            new.to_csv(NEWS_DAY_CSV + ".tmp", index=False)
+            os.replace(NEWS_DAY_CSV + ".tmp", NEWS_DAY_CSV)
+        return sorted(rows.values(), key=lambda t: -t["best"])[:100]
+    except Exception as e:
+        log.warning(f"Spurt10 news day list failed: {e}")
+        return sorted(items, key=lambda t: -t["multiple"])
+
+
 def news_symbols():
     """{symbol: announcement title} of the stocks with important news (for the other alert modules). {} when the filter is off or the feed is not readable. Never raises."""
     try:
@@ -890,13 +939,13 @@ def _news_html(meta):
             return ""
         nl = meta.get("news_list") or []
         status = meta.get("news_status") or ""
-        head = (f'<h3 style="margin:22px 0 4px">Spurt stocks left out because of news &mdash; {len(nl)}</h3>'
-                f'<div class="m">Important NSE corporate announcement since the previous close (results, board meeting, orders, deals, fund raising, dividend, rating ...). Shown here: volume spurt of {NEWS_LIST_MIN_MULT:g}x or more. {status}</div>')
+        head = (f'<h3 style="margin:22px 0 4px">Spurt stocks left out because of news today &mdash; {len(nl)}</h3>'
+                f'<div class="m">Important NSE corporate announcement since the previous close (results, board meeting, orders, deals, fund raising, dividend, rating ...). Whole day: every stock that reached a volume spurt of {NEWS_LIST_MIN_MULT:g}x or more, kept until the day ends &middot; <a href="/news_day.csv">CSV</a>. {status}</div>')
         if not nl:
             return head + '<div class="m">None right now.</div>'
-        rows = "".join(f"<tr><td>{i}</td><td>{_tvl(t['symbol'])}</td><td>{t['price']:.2f}</td><td>{t['candle']}</td><td>{t['multiple']:.2f}x</td><td style='text-align:left'>{t['title']}</td></tr>"
+        rows = "".join(f"<tr><td>{i}</td><td>{_tvl(t['symbol'])}</td><td>{t['price']:.2f}</td><td>{t.get('first', t.get('candle', ''))}</td><td>{t.get('best', t.get('multiple', 0)):.2f}x</td><td style='text-align:left'>{t['title']}</td></tr>"
                        for i, t in enumerate(nl, 1))
-        return (head + '<div class="w"><table class="sp"><tr><th>#</th><th>Symbol</th><th>Price</th><th>Candle</th><th>Multiple</th><th>Announcement</th></tr>' + rows + '</table></div>')
+        return (head + '<div class="w"><table class="sp"><tr><th>#</th><th>Symbol</th><th>Last price</th><th>First spurt (candle)</th><th>Best spurt</th><th>Announcement</th></tr>' + rows + '</table></div>')
     except Exception:
         return ""
 
@@ -940,8 +989,8 @@ def run_once():
         elif _news["ok_at"]:
             news_status = f'News feed OK (read {_news["ok_at"]} IST, {len(_nsyms)} stocks with news).'
         if _nsyms:
-            news_list = sorted(({"symbol": _r["symbol"], "price": _r["price"], "candle": _r["candle"], "multiple": _r["multiple"], "title": _nsyms[_r["symbol"]]}
-                                for _r in rows if _r["symbol"] in _nsyms and _r["multiple"] >= NEWS_LIST_MIN_MULT), key=lambda t: -t["multiple"])[:60]
+            news_list = _news_day_update([{"symbol": _r["symbol"], "price": _r["price"], "candle": _r["candle"], "multiple": _r["multiple"], "title": _nsyms[_r["symbol"]]}
+                                          for _r in rows if _r["symbol"] in _nsyms and _r["multiple"] >= NEWS_LIST_MIN_MULT], now_ist)
             rows = [_r for _r in rows if _r["symbol"] not in _nsyms]
             try:                                                    # also stop following stocks that spurted earlier today and now have news (zone / wick alerts keep checking those)
                 for _d in (_watch.get("syms"), _wick.get("syms")):

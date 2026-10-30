@@ -592,6 +592,11 @@ def spurt_daily_history_csv():
     return _serve_csv("spurt_daily_history.csv", "volume_spurt_daily_history.csv")
 
 
+@app.route("/news_day.csv", methods=["GET"])
+def news_day_csv():
+    return _serve_csv("news_day.csv", "spurt_stocks_with_news.csv")
+
+
 @app.route("/depth/<sym>", methods=["GET"])
 def depth_stock_page(sym):
     try:
