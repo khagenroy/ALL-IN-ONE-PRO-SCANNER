@@ -155,22 +155,23 @@ THIN_LIST_MIN_MULT = 10.0  # the illiquid list at the bottom of /spurt10 shows t
 THIN_LIST_MAX = 30
 LIQ_SPREAD_THIN = 0.25     # above this = THIN (wide spread: hard to get in / out at the shown price); in between = OK
 _dsnap = {}                # {symbol: {px, chg, vol, spread, offers}} - the latest cycle, used by depth_html() (/depth page)
-_dsnap_meta = {"run": None, "spurt": {}}
+_dsnap_meta = {"run": None, "spurt": {}, "zone": {}}
 DEPTH_MIN_TURNOVER = 1e7   # /depth page: leave out stocks that traded less than Rs 1 crore so far today (dead stocks show random depth)
 DEPTH_LIST_N = 50          # /depth page: stocks shown in each list
 DEPTH_PCT = 55.0           # /depth page: Bids % / Offers % cells turn green / red above this
+DEPTH_ONLY_AT_ZONE = True  # ADDED: /depth page lists only spurt stocks that are AT a support / resistance zone AND have Bids % or Offers % above DEPTH_PCT; False = every spurt stock
 _depth = {}                # {symbol: (spread_pct, buy_qty / sell_qty, offers_pct)} filled by _fetch_quotes every cycle
 DEPTH_PATH = os.path.join(os.path.dirname(__file__), "results", "depth_snapshot.json")   # ADDED: the /depth page data, saved to disk every cycle so it shows whichever worker / thread serves the page and survives a restart
 
 
-def _save_depth_snapshot(run, spurt):
+def _save_depth_snapshot(run, spurt, zone=None):
     """ADDED: save the /depth page data (run time, spurt multiples, depth of those stocks) to disk. Never raises."""
     try:
         snap = {sym: _dsnap[sym] for sym in spurt if sym in _dsnap}
         os.makedirs(os.path.dirname(DEPTH_PATH), exist_ok=True)
         tmp = DEPTH_PATH + ".tmp"
         with open(tmp, "w") as f:
-            json.dump({"run": run, "spurt": spurt, "snap": snap}, f)
+            json.dump({"run": run, "spurt": spurt, "snap": snap, "zone": zone or {}}, f)
         os.replace(tmp, DEPTH_PATH)
     except Exception as e:
         log.warning(f"Spurt10: could not save the /depth snapshot: {e}")
@@ -182,7 +183,7 @@ def _load_depth_snapshot():
         with open(DEPTH_PATH, "r") as f:
             d = json.load(f)
         if d.get("run") and d.get("spurt"):
-            return d["run"], dict(d["spurt"]), dict(d.get("snap") or {})
+            return d["run"], dict(d["spurt"]), dict(d.get("snap") or {}), dict(d.get("zone") or {})
     except Exception:
         pass
     return None
@@ -837,7 +838,8 @@ def run_once():
     try:
         _dsnap_meta["run"] = now_ist.strftime("%Y-%m-%d %H:%M:%S IST")
         _dsnap_meta["spurt"] = {r["symbol"]: r["multiple"] for r in top}
-        _save_depth_snapshot(_dsnap_meta["run"], _dsnap_meta["spurt"])
+        _dsnap_meta["zone"] = {r["symbol"]: {"at": r.get("at_zone") or "", "sup": r.get("support") or "", "res": r.get("resistance") or ""} for r in top}
+        _save_depth_snapshot(_dsnap_meta["run"], _dsnap_meta["spurt"], _dsnap_meta["zone"])
     except Exception:
         pass
     try:
@@ -1311,8 +1313,9 @@ def depth_html():
         run = _dsnap_meta.get("run")
         spurt = dict(_dsnap_meta.get("spurt") or {})
         _saved = _load_depth_snapshot()                              # ADDED: the saved copy is complete and the same for every worker, so it wins when present
+        zone = dict(_dsnap_meta.get("zone") or {})
         if _saved:
-            run, spurt, snap = _saved
+            run, spurt, snap, zone = _saved
         head = ('<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
                 '<meta http-equiv="refresh" content="60"><title>Spurt stocks - Bids / Offers</title>'
                 '<style>body{font-family:Arial,sans-serif;margin:12px;background:#fafafa}table{border-collapse:collapse;width:100%;background:#fff;margin-bottom:18px}'
@@ -1321,11 +1324,29 @@ def depth_html():
         if not run or not spurt:
             return head + "<h2>Volume-spurt stocks &mdash; Bids / Offers</h2><p>No scan has run yet. It fills at the first 10-min cycle after 09:25 IST on a trading day.</p></body></html>"
         rows = sorted(((sym, mult) for sym, mult in spurt.items()), key=lambda x: -x[1])
+        total_spurt = len(rows)
+        if DEPTH_ONLY_AT_ZONE:                                          # ADDED: only stocks at a zone with one side above DEPTH_PCT
+            def _keep(sym):
+                d_ = snap.get(sym)
+                if not d_ or d_.get("offers") is None:
+                    return False
+                at_ = (zone.get(sym) or {}).get("at")
+                return at_ in ("SUPPORT", "RESISTANCE") and (d_["offers"] > DEPTH_PCT or (100.0 - d_["offers"]) > DEPTH_PCT)
+            rows = [(sym, mult) for sym, mult in rows if _keep(sym)]
         body = ""
         for i, (sym, mult) in enumerate(rows, 1):
             d = snap.get(sym)
+            zi = zone.get(sym) or {}                                   # ADDED: Zone column - AT SUPPORT / AT RESISTANCE (green / red) or the nearest zones when between them
+            if zi.get("at") == "SUPPORT":
+                zc = f'<td style="background:#d4f0dc;text-align:left"><b>AT SUPPORT</b> {zi.get("sup", "")}</td>'
+            elif zi.get("at") == "RESISTANCE":
+                zc = f'<td style="background:#f8d9d6;text-align:left"><b>AT RESISTANCE</b> {zi.get("res", "")}</td>'
+            elif zi.get("sup") or zi.get("res"):
+                zc = f'<td style="text-align:left;color:#666">between &middot; S {zi.get("sup") or "-"} &middot; R {zi.get("res") or "-"}</td>'
+            else:
+                zc = '<td style="text-align:left;color:#888">no zone</td>'
             if not d or d.get("offers") is None:
-                body += f"<tr><td>{i}</td><td>{_tvl(sym)}</td><td>-</td><td>-</td><td><b>{mult:.2f}x</b></td><td>-</td><td>-</td><td>-</td></tr>"
+                body += f"<tr><td>{i}</td><td>{_tvl(sym)}</td><td>-</td><td>-</td><td><b>{mult:.2f}x</b></td><td>-</td><td>-</td><td>-</td>{zc}</tr>"
                 continue
             off = d["offers"]
             chg = d["chg"]
@@ -1335,13 +1356,15 @@ def depth_html():
             dl = f'<a href="/depth/{sym}" target="_blank" rel="noopener" title="open the Bids / Offers depth of this stock" style="color:inherit;text-decoration:none;border-bottom:1px dotted #888">'
             body += (f"<tr><td>{i}</td><td>{_tvl(sym)}</td><td>{d['px']:.2f}</td><td>{chg_s}</td><td><b>{mult:.2f}x</b></td>"
                      f"<td{bg_b}><b>{dl}{100.0 - off:.1f}%</a></b></td><td{bg_o}><b>{dl}{off:.1f}%</a></b></td>"
-                     f"<td>{'-' if d['spread'] is None else format(d['spread'], '.2f') + '%'}</td></tr>")
+                     f"<td>{'-' if d['spread'] is None else format(d['spread'], '.2f') + '%'}</td>{zc}</tr>")
         return (head + '<h2>Volume-spurt stocks &mdash; Bids / Offers</h2>'
-                f'<div class="m">Run: {run} &middot; the {len(rows)} stocks of the 10-min volume-spurt table, biggest spurt first &middot; '
+                f'<div class="m">Run: {run} &middot; ' + (f'{len(rows)} of the {total_spurt} volume-spurt stocks: only those AT a support / resistance zone with Bids % or Offers % above {DEPTH_PCT:g}%' if DEPTH_ONLY_AT_ZONE else f'the {len(rows)} stocks of the 10-min volume-spurt table') + f', biggest spurt first &middot; '
                 f'Bids % / Offers % = total buy / sell quantity in the Dhan depth window (green / red cell = above {DEPTH_PCT:g}%) &middot; click a value for that stock\'s 5-level depth &middot; '
                 'refreshes every 10 min &middot; <a href="/spurt10">Volume spurt</a> &middot; <a href="/spurt_sell">Spurt SELL signals</a></div>'
-                '<div class="w"><table class="sp"><tr><th>#</th><th>Symbol</th><th>Price</th><th>Day %</th><th>Spurt (10-min)</th><th>Bids %</th><th>Offers %</th><th>Bid-ask spread</th></tr>'
-                + body + '</table></div>' + _SORT_JS + "</body></html>")
+                '<div class="w"><table class="sp"><tr><th>#</th><th>Symbol</th><th>Price</th><th>Day %</th><th>Spurt (10-min)</th><th>Bids %</th><th>Offers %</th><th>Bid-ask spread</th><th>Zone</th></tr>'
+                + body + '</table></div>'
+                + (f'<p class="m">No spurt stock is at a support / resistance zone with Bids % or Offers % above {DEPTH_PCT:g}% right now. It is checked every 10 minutes.</p>' if (DEPTH_ONLY_AT_ZONE and not rows) else '')
+                + _SORT_JS + "</body></html>")
     except Exception as e:
         log.warning(f"Spurt10 /depth page failed: {e}")
         return "<p>Bids / Offers page could not be built. Please try again after the next cycle.</p>"
