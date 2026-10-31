@@ -40,6 +40,88 @@ KEY_FILE = os.path.join(_data_dir(), "session.key")
 TOPIC_FILE = os.path.join(_data_dir(), "alert_topic.txt")
 
 
+# ---------------------------------------------------------------- alert feed (alerts also shown on the web pages)
+FEED_FILE = os.path.join(_data_dir(), "alerts_feed.jsonl")
+_FEED_LOCK = threading.Lock()
+_FEED_KEEP = 300
+
+
+def _feed_add(title, msg, prio):
+    try:
+        rec = {"t": time.time(), "title": str(title)[:160], "msg": str(msg)[:1500], "p": str(prio or "default")}
+        with _FEED_LOCK:
+            rows = []
+            try:
+                with open(FEED_FILE, "r", encoding="utf-8") as f:
+                    rows = [x for x in f.read().splitlines() if x.strip()]
+            except Exception:
+                pass
+            rows.append(json.dumps(rec, ensure_ascii=False))
+            rows = rows[-_FEED_KEEP:]
+            with open(FEED_FILE, "w", encoding="utf-8") as f:
+                f.write("\n".join(rows) + "\n")
+    except Exception:
+        pass
+
+
+def _feed_read(n=100):
+    out = []
+    try:
+        with open(FEED_FILE, "r", encoding="utf-8") as f:
+            for ln in f.read().splitlines()[-n:]:
+                try:
+                    out.append(json.loads(ln))
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    out.reverse()
+    return out
+
+
+def _capture_ntfy():
+    """Every phone alert the scanners send to ntfy is also written to the feed, so people without the ntfy app can read it on the web page."""
+    try:
+        import requests
+        if getattr(requests.post, "_ag_wrapped", False):
+            return
+        orig = requests.post
+
+        def post(url, *a, **kw):
+            resp = orig(url, *a, **kw)
+            try:
+                if isinstance(url, str) and url.startswith("https://ntfy.sh/") and getattr(resp, "status_code", 999) < 300:
+                    h = kw.get("headers") or {}
+                    d = kw.get("data")
+                    if isinstance(d, bytes):
+                        d = d.decode("utf-8", "replace")
+                    _feed_add(h.get("Title", "Alert"), d or "", h.get("Priority", "default"))
+            except Exception:
+                pass
+            return resp
+        post._ag_wrapped = True
+        requests.post = post
+    except Exception:
+        pass
+
+
+def _ist(ts):
+    return time.strftime("%d %b %H:%M", time.gmtime(ts + 19800)) + " IST"
+
+
+def _feed_html(rows):
+    if not rows:
+        return "<div style='color:#8d9bb0;padding:6px 0'>No alert yet. New alerts appear here as soon as the scanner sends them.</div>"
+    out = ""
+    for r in rows:
+        col = {"urgent": "#ef4444", "high": "#f59e0b"}.get(r.get("p"), "#3b82f6")
+        out += (f"<div style='border-left:4px solid {col};background:rgba(24,29,39,.85);border-radius:6px;padding:6px 10px;margin:6px 0'>"
+                f"<div style='font-size:11px;color:#8d9bb0'>{escape(_ist(r.get('t', 0)))}</div>"
+                f"<div style='font-weight:700'>{escape(r.get('title', ''))}</div>"
+                f"<div style='white-space:pre-wrap;font-size:13px'>{escape(r.get('msg', ''))}</div></div>")
+    return out
+
+
 def alert_topic():
     """The ntfy topic used for the scanner's phone alerts: the one the admin saved (kept on the disk), else the NTFY_TOPIC setting."""
     try:
@@ -192,6 +274,7 @@ def _admin():
 
 
 def install(app):
+    _capture_ntfy()
     _t = alert_topic()
     if _t:
         os.environ["NTFY_TOPIC"] = _t
@@ -392,10 +475,13 @@ def add_menu(app):
         oc = [c for c in orphan if ok(c)]
         if oc:
             cards += "<section><h3>OI zones / MCX / ORB / news CSVs</h3><div class=r>" + "".join(f"<a class=ch href='{escape(c)}'>{escape(c[1:-4])}</a>" for c in oc) + "</div></section>"
-        if not cards:
-            cards = "<section><h3>Welcome</h3><div class=r>No pages have been allocated to your account yet. Ask the admin.</div></section>"
+        _recent = [r for r in _feed_read(40) if "read before you trade" not in r.get("title", "")][:3]
+        cards = ("<section style='grid-column:1/-1'><h3>Latest alerts <a href='/alerts' style='float:right;text-transform:none;font-weight:400'>see all &rarr;</a></h3>"
+                 + _feed_html(_recent) + "</section>") + cards
+        if not cards.count("<h3>") > 1:
+            cards = cards + "<section><h3>Welcome</h3><div class=r>No pages have been allocated to your account yet. Ask the admin.</div></section>"
         who = escape(str(session.get("user", "")))
-        top = ("<a href='/alerts'>Phone alerts</a>" + (" &middot; <a href='/admin/users'>Manage users</a>" if admin else "") + f" &middot; <a href='/logout'>Logout ({who})</a>")
+        top = ("<a href='/alerts'>Alerts</a>" + (" &middot; <a href='/admin/users'>Manage users</a>" if admin else "") + f" &middot; <a href='/logout'>Logout ({who})</a>")
         css = (_ART_CSS + "body{margin:0;background:" + _BG + ";background-attachment:fixed;min-height:100vh;color:#e6e9ef;font-family:system-ui,Arial,sans-serif}.t{display:flex;justify-content:space-between;align-items:center;padding:10px 16px;border-bottom:1px solid #2f3a50;background:rgba(11,15,22,.75);backdrop-filter:blur(6px);font-size:14px;gap:10px;flex-wrap:wrap}"
                ".g{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px;padding:12px 14px}section{background:rgba(24,29,39,.82);border:1px solid #2f3a50;border-radius:12px;padding:10px 12px;box-shadow:0 6px 20px rgba(0,0,0,.35);transition:transform .15s,border-color .15s}section:hover{transform:translateY(-2px);border-color:#4a6fb0}"
                "h3{margin:0 0 6px;font-size:13px;color:#8fb4ff;text-transform:uppercase;letter-spacing:.5px}.r{display:flex;flex-wrap:wrap;align-items:center;gap:4px;padding:2px 0;font-size:13px}"
@@ -444,19 +530,22 @@ def add_menu(app):
 
 
 def add_alerts_page(app):
-    """/alerts: tells a logged-in user how to get the phone alerts (shows the topic only to approved users)."""
+    """/alerts: the latest scanner alerts as a web page (no phone app needed) + how to get them on a phone."""
     @app.route("/alerts")
     def _alerts():
         tp = alert_topic()
+        feed = _feed_html(_feed_read(100))
         if not tp:
-            body = "<h2>Phone alerts</h2><p>No alert topic has been set yet. Ask the admin.</p><p><a href='/'>Home</a></p>"
+            ph = "<p>No phone alert topic has been set yet. Ask the admin.</p>"
         else:
-            body = ("<h2>Phone alerts</h2><ol><li>Install the free <b>ntfy</b> app (Android / iPhone).</li>"
-                    "<li>Tap <b>+</b> (Subscribe to topic).</li>"
-                    f"<li>Enter this topic name exactly:<br><b style='font-size:18px'>{escape(tp)}</b></li></ol>"
-                    "<p><small>Do not share this name with people who have no login. If it stops working, come back here: the admin may have changed it.</small></p>"
-                    "<p><a href='/'>Home</a></p>")
-        return _page("Phone alerts", body)
+            ph = ("<ol><li>Install the free <b>ntfy</b> app (Android / iPhone).</li><li>Tap <b>+</b> (Subscribe to topic).</li>"
+                  f"<li>Enter this topic name exactly:<br><b style='font-size:18px'>{escape(tp)}</b></li></ol>"
+                  "<p><small>Do not share this name with people who have no login. If it stops working, come back here: the admin may have changed it.</small></p>")
+        body = ("<meta http-equiv=refresh content=60><h2>Latest alerts</h2><p><small>Same alerts as the phone. This page refreshes every minute. "
+                "Alerts are information only, not advice to buy or sell.</small></p>" + feed +
+                "<details style='margin-top:14px'><summary style='cursor:pointer;color:#7db3ff'>Also get them on your phone (optional)</summary>" + ph + "</details>"
+                "<p><a href='/'>Home</a></p>")
+        return _page("Alerts", body, wide=True)
 
 
 def add_theme(app):
@@ -483,7 +572,7 @@ def add_theme(app):
             html = resp.get_data(as_text=True)
             if "ag-theme" in html or "name=ag-own" in html or "<body" not in html.lower() and "<table" not in html.lower():
                 return resp
-            links = "<a href='/alerts' style='color:#7db3ff;text-decoration:none'>Phone alerts</a>"
+            links = "<a href='/alerts' style='color:#7db3ff;text-decoration:none'>Alerts</a>"
             if _admin():
                 links += " &middot; <a href='/admin/users' style='color:#7db3ff;text-decoration:none'>Users</a>"
             links += f" &middot; <a href='/logout' style='color:#7db3ff;text-decoration:none'>Logout ({escape(str(session.get('user', '')))})</a>"
