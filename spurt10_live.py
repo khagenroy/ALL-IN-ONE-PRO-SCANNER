@@ -655,6 +655,46 @@ WICK_ALERT_MAX = 40          # safety cap on these notifications per day
 _wick = {"date": None, "syms": {}, "keys": set(), "count": 0, "hits": []}
 
 
+# ADDED: today's watch list, wick rejections and "already alerted" memory are saved to the results folder (the Render disk), so a restart or an
+# update of the app no longer empties them or repeats a phone alert. A saved state from an earlier day is ignored by the daily reset below.
+STATE_PATH = os.path.join(RESULTS_DIR, "spurt10_state.json")
+
+
+def _state_save():
+    try:
+        os.makedirs(RESULTS_DIR, exist_ok=True)
+        d = {"watch": _watch,
+             "wick": {**_wick, "keys": [list(k) for k in _wick["keys"]]},
+             "zone": {**_zone_alerted, "keys": [list(k) for k in _zone_alerted["keys"]]}}
+        tmp = STATE_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(d, f, default=str)
+        os.replace(tmp, STATE_PATH)
+    except Exception as e:
+        log.warning(f"Spurt10 state save failed: {e}")
+
+
+def _state_load():
+    try:
+        with open(STATE_PATH, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        _watch.clear()
+        _watch.update(d.get("watch") or {"date": None, "syms": {}})
+        w = d.get("wick") or {}
+        _wick.update(date=w.get("date"), syms=w.get("syms") or {}, keys={tuple(k) for k in (w.get("keys") or [])},
+                     count=w.get("count", 0), hits=w.get("hits") or [])
+        z = d.get("zone") or {}
+        _zone_alerted.update(date=z.get("date"), keys={tuple(k) for k in (z.get("keys") or [])}, count=z.get("count", 0))
+        log.info(f"Spurt10 state restored: {len((_watch.get('syms') or {}))} watched, {len(_wick['hits'])} wick hits, {len(_zone_alerted['keys'])} zone alerts")
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        log.warning(f"Spurt10 state load failed: {e}")
+
+
+_state_load()
+
+
 def _wick_eval(o, h, l, c, res):
     """Wick % of the candle when it touched the resistance zone `res` ("lo-hi"), has an upper wick >= WICK_PCT and closed at / below the zone top; else None."""
     try:
@@ -1052,6 +1092,7 @@ def run_once():
         _wick_alerts(top, now_ist, sid_of)
     except Exception as e:
         log.warning(f"Spurt10 wick step failed: {e}")
+    _state_save()
     try:                                                            # ADDED: link Section A OB_BUY / OB_SELL signals with spurt stocks (spurt_link.py)
         import spurt_link
         spurt_link.note_spurts(top, now_ist)

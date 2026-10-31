@@ -63,6 +63,7 @@ app = Flask(__name__)
 import auth_gate
 auth_gate.install(app)
 auth_gate.add_alerts_page(app)
+auth_gate.add_theme(app)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("all-in-one-pro-live")
 
@@ -1005,6 +1006,55 @@ def sma200_grid_csv():
 @app.route("/sma200/trades.csv", methods=["GET"])
 def sma200_trades_csv():
     return _serve_csv("sma200_trades.csv", "sma200_all_historical_signals.csv")
+
+
+# ---- /spurt10 split into separate pages (one per section), built from the same saved spurt10.html - nothing is recomputed
+_S10_PARTS = [("main", "Top 30 spurt", None), ("ob", "OB signals", "OB mitigation signals on spurt stocks"),
+              ("wick", "Rejected at resistance", "Spurt stocks rejected at resistance"), ("watch", "Watch list", "Watch list &mdash;"),
+              ("news", "Left out: news", "Spurt stocks left out because of news"), ("thin", "Illiquid", "Illiquid stocks with a volume spurt")]
+
+
+def _s10_part(key: str):
+    path = os.path.join(RESULTS_DIR, "spurt10.html")
+    if not os.path.exists(path):
+        return "No scan has run yet.", 404
+    with open(path, encoding="utf-8", errors="replace") as f:
+        html = f.read()
+    try:
+        b0 = html.index("<body>") + 6
+        end = html.rindex("</body>")
+        sj = html.rfind("<script>", 0, end)
+        head, core, script = html[:b0], html[b0:sj], html[sj:end]
+        first = core.find("<h2>")
+        banner, core = core[:first], core[first:]
+        marks = []
+        for k, _lab, needle in _S10_PARTS[1:]:
+            i = core.find(needle)
+            if i >= 0:
+                marks.append((max(core.rfind("<h2", 0, i), core.rfind("<h3", 0, i)), k))
+        marks.sort()
+        chunks = {"main": core[:marks[0][0]] if marks else core}
+        for n, (pos, k) in enumerate(marks):
+            chunks[k] = core[pos:(marks[n + 1][0] if n + 1 < len(marks) else len(core))]
+        tabs = '<div style="display:flex;flex-wrap:wrap;gap:6px;margin:0 0 12px">' + "".join(
+            f'<a href="/spurt10_{k}" style="padding:5px 12px;border:1px solid #222;border-radius:5px;text-decoration:none;'
+            + ("background:#222;color:#fff" if k == key else "color:#222;background:#fff") + f'">{lab}</a>' for k, lab, _n in _S10_PARTS) + "</div>"
+        body = chunks.get(key) or '<div class="m">This section is empty right now.</div>'
+        return head + banner + tabs + body + script + "</body></html>"
+    except Exception as e:
+        log.warning(f"spurt10 split failed: {e}")
+        return "This section could not be built from the last scan. Open the full /spurt10 page.", 500
+
+
+def _s10_route(key):
+    def view():
+        return _s10_part(key)
+    view.__name__ = f"spurt10_{key}_page"
+    app.add_url_rule(f"/spurt10_{key}", view_func=view, methods=["GET"])
+
+
+for _k, _l, _n in _S10_PARTS:
+    _s10_route(_k)
 
 
 auth_gate.add_menu(app)   # "/" home page that lists every page after login
