@@ -62,6 +62,7 @@ _link_results_to_disk()
 app = Flask(__name__)
 import auth_gate
 auth_gate.install(app)
+auth_gate.add_alerts_page(app)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("all-in-one-pro-live")
 

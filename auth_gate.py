@@ -37,6 +37,25 @@ def _data_dir():
 
 USERS_FILE = os.path.join(_data_dir(), "users.json")
 KEY_FILE = os.path.join(_data_dir(), "session.key")
+TOPIC_FILE = os.path.join(_data_dir(), "alert_topic.txt")
+
+
+def alert_topic():
+    """The ntfy topic used for the scanner's phone alerts: the one the admin saved (kept on the disk), else the NTFY_TOPIC setting."""
+    try:
+        with open(TOPIC_FILE, "r", encoding="utf-8") as f:
+            t = f.read().strip()
+            if t:
+                return t
+    except Exception:
+        pass
+    return os.environ.get("NTFY_TOPIC", "").strip()
+
+
+def _set_topic(t):
+    with open(TOPIC_FILE, "w", encoding="utf-8") as f:
+        f.write(t)
+    os.environ["NTFY_TOPIC"] = t      # the scanners read NTFY_TOPIC each time they send, so the new topic is used at once
 
 
 def _load():
@@ -115,6 +134,9 @@ def _admin():
 
 
 def install(app):
+    _t = alert_topic()
+    if _t:
+        os.environ["NTFY_TOPIC"] = _t
     app.secret_key = _key()
     app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax",
                       SESSION_COOKIE_SECURE=bool(os.environ.get("RENDER")),
@@ -206,6 +228,13 @@ def install(app):
             users = _load()
             if request.method == "POST":
                 act, name = request.form.get("a"), request.form.get("n")
+                if act in ("topic_set", "topic_new"):
+                    t = (request.form.get("topic") or "").strip()
+                    if act == "topic_new":
+                        t = "scan-" + secrets.token_urlsafe(12).replace("_", "x").replace("-", "y")
+                    if 8 <= len(t) <= 64 and all(c.isalnum() or c in "_-" for c in t):
+                        _set_topic(t)
+                    return redirect("/admin/users")
                 rec = users.get(name)
                 if rec and name != session.get("user"):
                     if act == "approve":
@@ -223,7 +252,13 @@ def install(app):
                     btn += f"<form method=post style='display:inline'><input type=hidden name=a value=approve><input type=hidden name=n value='{escape(n)}'><button class=bt>Approve</button></form>"
                 btn += f"<form method=post style='display:inline'><input type=hidden name=a value=remove><input type=hidden name=n value='{escape(n)}'><button class=bt style='background:#c0392b'>Remove</button></form>"
             rows += f"<tr><td>{escape(n)}</td><td>{st}</td><td>{escape(r.get('created',''))}</td><td>{btn}</td></tr>"
-        body = f"<h2>Users</h2><table><tr><th>Name</th><th>Status</th><th>Since</th><th></th></tr>{rows}</table><p><a href='/'>Home</a> · <a href='/logout'>Logout</a></p>"
+        tp = alert_topic()
+        topic_box = (f"<h2>Phone alerts</h2><p>Topic now: <b>{escape(tp) if tp else 'none set'}</b><br><small>Everyone who is logged in sees this on the Alerts page. "
+                     "To cut someone off, create a new topic: nobody needs to be told, the Alerts page shows the new name.</small></p>"
+                     "<form method=post style='display:inline'><input type=hidden name=a value=topic_new><button class=bt>Create a new random topic</button></form>"
+                     "<form method=post><input type=hidden name=a value=topic_set><input name=topic placeholder='or type your own topic name (8-64 letters, numbers, _ -)' maxlength=64>"
+                     "<button class=bt>Use this topic</button></form><hr style='border-color:#2a3140'>")
+        body = f"{topic_box}<h2>Users</h2><table><tr><th>Name</th><th>Status</th><th>Since</th><th></th></tr>{rows}</table><p><a href='/'>Home</a> · <a href='/alerts'>Alerts page</a> · <a href='/logout'>Logout</a></p>"
         return _page("Users", body, wide=True)
 
 
@@ -242,7 +277,23 @@ def add_menu(app):
                 continue
             (csvs if r.rule.endswith(".csv") else pages).append(r.rule)
         li = lambda xs: "".join(f"<li><a href='{escape(x)}'>{escape(x)}</a></li>" for x in xs)
-        admin = "<p><a href='/admin/users'>Manage users</a> · " if _admin() else "<p>"
+        admin = "<p><a href='/alerts'>Phone alerts</a> · " + ("<a href='/admin/users'>Manage users</a> · " if _admin() else "")
         body = (f"<h2>Pages</h2><ul>{li(pages)}</ul><h2>CSV downloads</h2><ul>{li(csvs)}</ul>"
                 f"{admin}<a href='/logout'>Logout</a> ({escape(str(session.get('user', '')))})</p>")
         return _page("Home", body, wide=True)
+
+
+def add_alerts_page(app):
+    """/alerts: tells a logged-in user how to get the phone alerts (shows the topic only to approved users)."""
+    @app.route("/alerts")
+    def _alerts():
+        tp = alert_topic()
+        if not tp:
+            body = "<h2>Phone alerts</h2><p>No alert topic has been set yet. Ask the admin.</p><p><a href='/'>Home</a></p>"
+        else:
+            body = ("<h2>Phone alerts</h2><ol><li>Install the free <b>ntfy</b> app (Android / iPhone).</li>"
+                    "<li>Tap <b>+</b> (Subscribe to topic).</li>"
+                    f"<li>Enter this topic name exactly:<br><b style='font-size:18px'>{escape(tp)}</b></li></ol>"
+                    "<p><small>Do not share this name with people who have no login. If it stops working, come back here: the admin may have changed it.</small></p>"
+                    "<p><a href='/'>Home</a></p>")
+        return _page("Phone alerts", body)
