@@ -1038,7 +1038,8 @@ def _s10_part(key: str):
             chunks[k] = core[pos:(marks[n + 1][0] if n + 1 < len(marks) else len(core))]
         tabs = '<div style="display:flex;flex-wrap:wrap;gap:6px;margin:0 0 12px">' + "".join(
             f'<a href="/spurt10_{k}" style="padding:5px 12px;border:1px solid #222;border-radius:5px;text-decoration:none;'
-            + ("background:#222;color:#fff" if k == key else "color:#222;background:#fff") + f'">{lab}</a>' for k, lab, _n in _S10_PARTS) + "</div>"
+            + ("background:#222;color:#fff" if k == key else "color:#222;background:#fff") + f'">{lab}</a>' for k, lab, _n in _S10_PARTS) + (
+            '<a href="/depth" style="padding:5px 12px;border:1px solid #222;border-radius:5px;text-decoration:none;color:#222;background:#fff">Bids / Offers</a>') + "</div>"
         body = chunks.get(key) or '<div class="m">This section is empty right now.</div>'
         return head + banner + tabs + body + script + "</body></html>"
     except Exception as e:

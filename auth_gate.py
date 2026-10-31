@@ -332,14 +332,13 @@ def add_menu(app):
     app.config["AG_RESTRICT"] = True
     GROUPS = [
         ("Spurt scanners", ["/spurt10", "/spurt10_history", "/spurt_daily", "/spurt_sell", "/spurt_paper", "/spurtpb", "/volspurt", "/spz"]),
-        ("Spurt10 sections", ["/spurt10_main", "/spurt10_ob", "/spurt10_wick", "/spurt10_watch", "/spurt10_news", "/spurt10_thin"]),
+        ("Spurt10 sections", ["/spurt10_main", "/spurt10_ob", "/spurt10_wick", "/spurt10_watch", "/spurt10_news", "/spurt10_thin", "/depth"]),
         ("SMA / Trend", ["/sma200", "/sma200now", "/trendnow"]),
         ("Best setups", ["/best", "/bestnow"]),
         ("Scanner / Swing / Gainers", ["/scanner", "/swing", "/gainers"]),
         ("Commodity / Crypto", ["/commodity", "/mcx_sell", "/crypto", "/crypto_sell"]),
         ("Bot / Deals", ["/botlog", "/botpnl", "/deals"]),
-        ("Tools", ["/depth"]),
-    ]
+            ]
     SKIP = ("/", "/health", "/login", "/logout", "/register", "/setup", "/alerts")
 
     def catalog():
