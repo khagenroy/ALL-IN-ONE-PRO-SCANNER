@@ -38,6 +38,20 @@ def _data_dir():
 USERS_FILE = os.path.join(_data_dir(), "users.json")
 KEY_FILE = os.path.join(_data_dir(), "session.key")
 TOPIC_FILE = os.path.join(_data_dir(), "alert_topic.txt")
+CONTACT_FILE = os.path.join(_data_dir(), "contact_email.txt")
+
+
+def contact_email():
+    try:
+        with open(CONTACT_FILE, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except Exception:
+        return ""
+
+
+def _contact_line():
+    e = contact_email()
+    return (f"<div style='text-align:center;font-size:12px;color:#8d9bb0;margin:10px 0'>Questions? Contact: <a href='mailto:{escape(e)}' style='color:#7db3ff'>{escape(e)}</a></div>") if e else ""
 
 
 # ---------------------------------------------------------------- alert feed (alerts also shown on the web pages)
@@ -241,25 +255,44 @@ _CSS = (_ART_CSS + "body{font-family:system-ui,Arial,sans-serif;background:" + _
 
 def _page(title, body, status=200, wide=False):
     st = _CSS + (".b{max-width:640px}" if wide else ".b{margin-top:110px}")
-    html = f"<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'><meta name=ag-own content=1><title>{escape(title)}</title><style>{st}{_FOOT_CSS}body{{padding-bottom:70px!important}}</style><div class=b>{body}</div>{_FOOT}"
+    html = f"<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'><meta name=ag-own content=1><title>{escape(title)}</title><style>{st}{_FOOT_CSS}body{{padding-bottom:70px!important}}</style><div class=b>{body}{_contact_line()}</div>{_FOOT}"
     return Response(html, status=status, mimetype="text/html")
 
 
-def _form(title, action, extra_link="", msg="", err="", button="Continue"):
+def _form(title, action, extra_link="", msg="", err="", button="Continue", fields="", after=""):
     body = f"<h2>{escape(title)}</h2>"
     if err:
         body += f"<div class=e>{escape(err)}</div>"
     if msg:
         body += f"<div class=m>{escape(msg)}</div>"
     body += (f"<form method=post action='{action}'><input name=u placeholder='Username' autocomplete=username required maxlength=40>"
-             f"<input name=p type=password placeholder='Password (min 8 characters)' autocomplete=current-password required maxlength=100>"
-             f"<button>{escape(button)}</button></form>{extra_link}")
+             f"{fields}<input name=p type=password placeholder='Password (min 8 characters)' autocomplete=current-password required maxlength=100>"
+             f"{after}<button>{escape(button)}</button></form>{extra_link}")
     return _page(title, body)
 
 
 def _clean_name(s):
     s = (s or "").strip().lower()
     return s if 3 <= len(s) <= 40 and all(c.isalnum() or c in "._-" for c in s) else ""
+
+
+def _clean_phone(s):
+    d = "".join(c for c in (s or "") if c.isdigit())
+    if d.startswith("91") and len(d) == 12:
+        d = d[2:]
+    return d if len(d) == 10 else ""
+
+
+def _clean_email(s):
+    s = (s or "").strip().lower()
+    import re
+    return s if len(s) <= 80 and re.fullmatch(r"[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}", s) else ""
+
+
+_REG_FIELDS = ("<input name=fn placeholder='Your full name' required maxlength=60 autocomplete=name>"
+               "<input name=ph placeholder='WhatsApp mobile number (10 digits)' required maxlength=16 inputmode=tel autocomplete=tel>"
+               "<input name=em type=email placeholder='Email address' required maxlength=80 autocomplete=email>")
+_REG_NOTE = "<p style='font-size:11px;color:#8d9bb0;margin:2px 0 8px'>Please give the mobile number that has <b>WhatsApp</b>: the admin will message you there. Your name, mobile and email are kept only so the admin can contact you about your access. They are not shown to other users.</p>"
 
 
 def _too_many(ip):
@@ -271,6 +304,23 @@ def _too_many(ip):
 
 def _admin():
     return session.get("role") == "admin"
+
+
+def _notify_links(name, rec):
+    from urllib.parse import quote
+    host = request.host_url.rstrip("/")
+    who = rec.get("fullname") or name
+    ce = contact_email()
+    txt = (f"Hello {who},\n\nYour account on the scanner is now activated.\nLogin here: {host}/login\nUsername: {name}\n"
+           "Use the password you chose when you registered. If you forget it, contact me and I will reset it.\n"
+           + (f"For any help, write to: {ce}\n" if ce else "") +
+           "\nThe pages are for education and information only, not investment advice.")
+    out = []
+    if rec.get("email"):
+        out.append(f"<a class=bt style='display:inline-block;background:#3b82f6;color:#fff;border-radius:6px;text-decoration:none' href='mailto:{escape(rec['email'])}?subject={quote('Your scanner account is activated')}&body={quote(txt)}'>&#9993; Email them</a>")
+    if rec.get("phone"):
+        out.append(f"<a class=bt style='display:inline-block;background:#16a34a;color:#fff;border-radius:6px;text-decoration:none' href='https://wa.me/91{escape(rec['phone'])}?text={quote(txt)}' target=_blank>WhatsApp them</a>")
+    return " ".join(out) or "(no contact details saved for this user)"
 
 
 def install(app):
@@ -293,9 +343,11 @@ def install(app):
             rec = _load().get(u)
             if rec and rec.get("approved"):
                 session["role"] = rec.get("role", "viewer")
+                if rec.get("must_change") and p not in ("/password", "/logout"):
+                    return redirect("/password")
                 if p.startswith("/admin") and not _admin():
                     return _page("Not allowed", "<h2>Admin only</h2><a href='/'>Back</a>", 403)
-                if app.config.get("AG_RESTRICT") and not _admin() and p not in ("/", "/alerts", "/indices.json"):
+                if app.config.get("AG_RESTRICT") and not _admin() and p not in ("/", "/alerts", "/indices.json", "/password"):
                     ok = set(rec.get("pages") or [])
                     if not (p in ok or any(p.startswith(r + "/") for r in ok)):
                         return _page("Not allocated", "<h2>This page is not part of your account</h2><p>Ask the admin if you need it.</p><a href='/'>Back to home</a>", 403)
@@ -347,20 +399,52 @@ def install(app):
         link = "<p><small><a href='/login'>Back to login</a></small></p>"
         if request.method == "POST":
             name, pw = _clean_name(request.form.get("u")), request.form.get("p") or ""
+            fn = (request.form.get("fn") or "").strip()[:60]
+            ph, em = _clean_phone(request.form.get("ph")), _clean_email(request.form.get("em"))
+            rf = dict(fields=_REG_FIELDS, after=_REG_NOTE, button="Request access")
             if not name or len(pw) < 8:
-                return _form("Request access", "/register", link, err="Username 3+ characters (letters, numbers . _ -) and password 8+ characters.", button="Request access")
+                return _form("Request access", "/register", link, err="Username 3+ characters (letters, numbers . _ -) and password 8+ characters.", **rf)
+            if len(fn) < 2 or not ph or not em:
+                return _form("Request access", "/register", link, err="Please give your full name, a 10-digit WhatsApp mobile number and a valid email address.", **rf)
             with _LOCK:
                 users = _load()
                 if not users:
                     return redirect("/setup")
                 if name in users:
-                    return _form("Request access", "/register", link, err="That username is taken.", button="Request access")
+                    return _form("Request access", "/register", link, err="That username is taken.", **rf)
                 if sum(1 for r in users.values() if not r.get("approved")) >= 30:
-                    return _form("Request access", "/register", link, err="Too many pending requests. Try later.", button="Request access")
-                users[name] = {"hash": generate_password_hash(pw), "role": "viewer", "approved": False, "created": time.strftime("%Y-%m-%d %H:%M")}
+                    return _form("Request access", "/register", link, err="Too many pending requests. Try later.", **rf)
+                users[name] = {"hash": generate_password_hash(pw), "role": "viewer", "approved": False, "created": time.strftime("%Y-%m-%d %H:%M"),
+                               "fullname": fn, "phone": ph, "email": em}
                 _save(users)
             return _form("Request access", "/register", link, msg="Request sent. You can log in once the admin approves it.", button="Request access")
-        return _form("Request access", "/register", link, button="Request access")
+        return _form("Request access", "/register", link, fields=_REG_FIELDS, after=_REG_NOTE, button="Request access")
+
+    @app.route("/password", methods=["GET", "POST"])
+    def _password():
+        me = session.get("user", "")
+        link = "<p><small><a href='/'>Home</a></small></p>"
+        fld = ("<input name=old type=password placeholder='Current (or temporary) password' required maxlength=100>"
+               "<input name=new type=password placeholder='New password (min 8 characters)' required maxlength=100>")
+
+        def form(msg="", err=""):
+            b = "<h2>Change password</h2>" + (f"<div class=e>{escape(err)}</div>" if err else "") + (f"<div class=m>{escape(msg)}</div>" if msg else "")
+            b += f"<form method=post>{fld}<button>Save new password</button></form>{link}"
+            return _page("Change password", b)
+        if request.method == "POST":
+            with _LOCK:
+                users = _load()
+                rec = users.get(me)
+                if not rec or not check_password_hash(rec["hash"], request.form.get("old") or ""):
+                    return form(err="Current password is wrong.")
+                nw = request.form.get("new") or ""
+                if len(nw) < 8:
+                    return form(err="New password needs 8+ characters.")
+                rec["hash"] = generate_password_hash(nw)
+                rec.pop("must_change", None)
+                _save(users)
+            return form(msg="Password changed.")
+        return form(msg=("The admin gave you a temporary password. Please choose your own now." if (_load().get(me) or {}).get("must_change") else ""))
 
     @app.route("/logout")
     def _logout():
@@ -369,10 +453,17 @@ def install(app):
 
     @app.route("/admin/users", methods=["GET", "POST"])
     def _admin_users():
+        flash = ""
         with _LOCK:
             users = _load()
             if request.method == "POST":
                 act, name = request.form.get("a"), request.form.get("n")
+                if act == "contact_set":
+                    e = _clean_email(request.form.get("email"))
+                    if e or not (request.form.get("email") or "").strip():
+                        with open(CONTACT_FILE, "w", encoding="utf-8") as f:
+                            f.write(e)
+                    return redirect("/admin/users")
                 if act in ("topic_set", "topic_new"):
                     t = (request.form.get("topic") or "").strip()
                     if act == "topic_new":
@@ -382,12 +473,21 @@ def install(app):
                     return redirect("/admin/users")
                 rec = users.get(name)
                 if rec and name != session.get("user"):
-                    if act == "approve":
+                    if act == "reset":
+                        tmp = secrets.token_urlsafe(9).replace("_", "x").replace("-", "y")
+                        rec["hash"] = generate_password_hash(tmp)
+                        rec["must_change"] = True
+                        _save(users)
+                        flash = f"Temporary password for <b>{escape(name)}</b>: <b style='font-size:18px;user-select:all'>{escape(tmp)}</b> &nbsp; (tell them; they must choose their own at the next login; it is shown only now)"
+                    elif act == "approve":
                         rec["approved"] = True
+                        _save(users)
+                        flash = f"<b>{escape(name)}</b> is approved. Tell them: " + _notify_links(name, rec)
                     elif act == "remove":
                         users.pop(name, None)
                     _save(users)
-                return redirect("/admin/users")
+                if not flash:
+                    return redirect("/admin/users")
         rows = ""
         for n, r in sorted(users.items()):
             st = "admin" if r.get("role") == "admin" else ("approved" if r.get("approved") else "<b>pending</b>")
@@ -395,17 +495,32 @@ def install(app):
             if n != session.get("user"):
                 if app.config.get("AG_RESTRICT"):
                     btn += f"<a class=bt style='display:inline-block;background:#3b82f6;color:#fff;border-radius:6px;text-decoration:none' href='/admin/access/{escape(n)}'>Pages ({len(r.get('pages') or [])})</a> "
+                btn += f"<form method=post style='display:inline' onsubmit=\"return confirm('Give {escape(n)} a new temporary password?')\"><input type=hidden name=a value=reset><input type=hidden name=n value='{escape(n)}'><button class=bt style='background:#6b7280'>Reset password</button></form> "
+                if r.get("approved") and (r.get("email") or r.get("phone")):
+                    btn += _notify_links(n, r).replace("class=bt", "class=bt title=notify") + " "
                 if not r.get("approved"):
                     btn += f"<form method=post style='display:inline'><input type=hidden name=a value=approve><input type=hidden name=n value='{escape(n)}'><button class=bt>Approve</button></form>"
                 btn += f"<form method=post style='display:inline'><input type=hidden name=a value=remove><input type=hidden name=n value='{escape(n)}'><button class=bt style='background:#c0392b'>Remove</button></form>"
-            rows += f"<tr><td>{escape(n)}</td><td>{st}</td><td>{escape(r.get('created',''))}</td><td>{btn}</td></tr>"
+            ph, em = r.get("phone", ""), r.get("email", "")
+            contact = ""
+            if r.get("fullname"):
+                contact += f"{escape(r['fullname'])}<br>"
+            if ph:
+                contact += f"<a href='tel:+91{escape(ph)}'>{escape(ph)}</a> &middot; <a href='https://wa.me/91{escape(ph)}' target=_blank>WhatsApp</a><br>"
+            if em:
+                contact += f"<a href='mailto:{escape(em)}'>{escape(em)}</a>"
+            rows += f"<tr><td>{escape(n)}</td><td style='font-size:12px'>{contact or '-'}</td><td>{st}</td><td>{escape(r.get('created',''))}</td><td>{btn}</td></tr>"
         tp = alert_topic()
         topic_box = (f"<h2>Phone alerts</h2><p>Topic now: <b>{escape(tp) if tp else 'none set'}</b><br><small>Everyone who is logged in sees this on the Alerts page. "
                      "To cut someone off, create a new topic: nobody needs to be told, the Alerts page shows the new name.</small></p>"
                      "<form method=post style='display:inline'><input type=hidden name=a value=topic_new><button class=bt>Create a new random topic</button></form>"
                      "<form method=post><input type=hidden name=a value=topic_set><input name=topic placeholder='or type your own topic name (8-64 letters, numbers, _ -)' maxlength=64>"
                      "<button class=bt>Use this topic</button></form><hr style='border-color:#2a3140'>")
-        body = f"{topic_box}<h2>Users</h2><table><tr><th>Name</th><th>Status</th><th>Since</th><th></th></tr>{rows}</table><p><a href='/'>Home</a> · <a href='/alerts'>Alerts page</a> · <a href='/logout'>Logout</a></p>"
+        ce = contact_email()
+        topic_box += ("<h2>Your contact email</h2><p><small>Shown to students on the login, sign-up and home pages, and in the activation message.</small></p>"
+                      f"<form method=post><input type=hidden name=a value=contact_set><input name=email type=email value='{escape(ce)}' placeholder='your email address' maxlength=80>"
+                      "<button class=bt>Save</button></form><hr style='border-color:#2a3140'>")
+        body = f"<style>.b{{max-width:980px!important}}</style>{('<div class=m>' + flash + '</div>') if flash else ''}{topic_box}<h2>Users</h2><table><tr><th>Username</th><th>Contact</th><th>Status</th><th>Since</th><th></th></tr>{rows}</table><p><a href='/'>Home</a> · <a href='/alerts'>Alerts page</a> · <a href='/logout'>Logout</a></p>"
         return _page("Users", body, wide=True)
 
 
@@ -481,7 +596,7 @@ def add_menu(app):
         if not cards.count("<h3>") > 1:
             cards = cards + "<section><h3>Welcome</h3><div class=r>No pages have been allocated to your account yet. Ask the admin.</div></section>"
         who = escape(str(session.get("user", "")))
-        top = ("<a href='/alerts'>Alerts</a>" + (" &middot; <a href='/admin/users'>Manage users</a>" if admin else "") + f" &middot; <a href='/logout'>Logout ({who})</a>")
+        top = ("<a href='/alerts'>Alerts</a>" + (" &middot; <a href='/admin/users'>Manage users</a>" if admin else "") + f" &middot; <a href='/password'>Password</a> &middot; <a href='/logout'>Logout ({who})</a>")
         css = (_ART_CSS + "body{margin:0;background:" + _BG + ";background-attachment:fixed;min-height:100vh;color:#e6e9ef;font-family:system-ui,Arial,sans-serif}.t{display:flex;justify-content:space-between;align-items:center;padding:10px 16px;border-bottom:1px solid #2f3a50;background:rgba(11,15,22,.75);backdrop-filter:blur(6px);font-size:14px;gap:10px;flex-wrap:wrap}"
                ".g{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px;padding:12px 14px}section{background:rgba(24,29,39,.82);border:1px solid #2f3a50;border-radius:12px;padding:10px 12px;box-shadow:0 6px 20px rgba(0,0,0,.35);transition:transform .15s,border-color .15s}section:hover{transform:translateY(-2px);border-color:#4a6fb0}"
                "h3{margin:0 0 6px;font-size:13px;color:#8fb4ff;text-transform:uppercase;letter-spacing:.5px}.r{display:flex;flex-wrap:wrap;align-items:center;gap:4px;padding:2px 0;font-size:13px}"
@@ -489,7 +604,7 @@ def add_menu(app):
                ".ch{font-size:11px;background:#1d232e;border:1px dashed #3a4558;border-radius:10px;padding:0 6px;color:#8d9bb0}.ch:before{content:\"\\2193 \"}body{padding-bottom:50px}" + _FOOT_CSS)
         note = "(blue = open the scanner, grey \u2193 = download CSV)"
         html = (f"<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'><meta name=ag-own content=1><title>Scanner</title><style>{css}</style>"
-                f"<div class=t><span><b style='font-size:16px;letter-spacing:.3px'>&#9889; Scanner pages</b> <span style='color:#8d9bb0;font-size:12px'>{note}</span></span>{_IDX_BOX}<span>{top}</span></div><div class=g>{cards}</div>{_FOOT}{_IDX_JS}")
+                f"<div class=t><span><b style='font-size:16px;letter-spacing:.3px'>&#9889; Scanner pages</b> <span style='color:#8d9bb0;font-size:12px'>{note}</span></span>{_IDX_BOX}<span>{top}</span></div><div class=g>{cards}</div>{_contact_line()}{_FOOT}{_IDX_JS}")
         return Response(html, mimetype="text/html")
 
     @app.route("/admin/access/<name>", methods=["GET", "POST"])
@@ -575,7 +690,7 @@ def add_theme(app):
             links = "<a href='/alerts' style='color:#7db3ff;text-decoration:none'>Alerts</a>"
             if _admin():
                 links += " &middot; <a href='/admin/users' style='color:#7db3ff;text-decoration:none'>Users</a>"
-            links += f" &middot; <a href='/logout' style='color:#7db3ff;text-decoration:none'>Logout ({escape(str(session.get('user', '')))})</a>"
+            links += f" &middot; <a href='/password' style='color:#7db3ff;text-decoration:none'>Password</a> &middot; <a href='/logout' style='color:#7db3ff;text-decoration:none'>Logout ({escape(str(session.get('user', '')))})</a>"
             tb = bar.replace("__LINKS__", links)
             if re.search(r"<body[^>]*>", html, re.I):
                 html = re.sub(r"(<body[^>]*>)", lambda m_: m_.group(1) + tb, html, count=1, flags=re.I)
