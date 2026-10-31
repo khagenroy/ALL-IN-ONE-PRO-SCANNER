@@ -1119,6 +1119,10 @@ def run_once():
     }
     _write(top, meta)
     _append_history(top, now_ist)      # top 30 of the cycle only
+    try:                                                            # ADDED: every spurt stock, every candle (price + zones) and what happened after each zone touch
+        _track_update(top, now_ist, sid_of)
+    except Exception as e:
+        log.warning(f"Spurt10 track step failed: {e}")
     log.info(f"Spurt10 done: {meta}")
     return top, meta
 
@@ -1271,6 +1275,170 @@ def _append_history(rows, now_ist):
             HIST_PATH, mode="a", header=new_file, index=False)
     except Exception as e:
         log.warning(f"Spurt10 history write failed: {e}")
+
+
+# ------------------------------------------------------------------ ADDED: every-candle track + zone-touch follow-up
+# Every stock that reached the top 30 today is followed for the rest of the day (even after it drops out of the table): one row per
+# 10-min candle with price, candle and support / resistance zone  ->  results/spurt10_track.csv
+# Each time a followed stock arrives AT a support / resistance zone, the price 10 / 30 / 60 minutes later and the best / worst move
+# are recorded  ->  results/zone_touch_followup.csv   (answers: did it reverse or break through?)
+TRACK_ON = os.environ.get("SPURT10_TRACK", "true").strip().lower() == "true"
+TRACK_MAX = int(os.environ.get("SPURT10_TRACK_MAX", "150") or "150")          # most stocks followed in one day
+TRACK_PATH = os.path.join(RESULTS_DIR, "spurt10_track.csv")
+TOUCH_PATH = os.path.join(RESULTS_DIR, "zone_touch_followup.csv")
+TRACK_STATE = os.path.join(RESULTS_DIR, "spurt10_track_state.json")
+TRACK_COLS = ["date", "run", "candle", "symbol", "in_top30", "price", "day_chg_pct", "candle_chg_pct", "open", "high", "low", "close",
+              "candle_vol", "sma_vol", "multiple", "day_vol", "support", "support_dist_pct", "resistance", "resistance_dist_pct",
+              "zone_view", "zone_src", "at_zone", "conf_support", "conf_resistance"]
+TOUCH_COLS = ["date", "symbol", "zone_type", "touch_candle", "touch_run", "touch_price", "zone", "multiple", "candle_chg_pct", "day_chg_pct",
+              "ret_10m", "ret_30m", "ret_60m", "best_pct", "worst_pct", "last_pct", "last_time", "broke_zone", "outcome"]
+_trk = {"date": None, "syms": [], "seen": [], "prev_at": {}, "events": []}
+
+
+def _trk_load():
+    try:
+        with open(TRACK_STATE, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        _trk.update(date=d.get("date"), syms=d.get("syms") or [], seen=d.get("seen") or [], prev_at=d.get("prev_at") or {}, events=d.get("events") or [])
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        log.warning(f"Spurt10 track state load failed: {e}")
+
+
+def _trk_save():
+    try:
+        os.makedirs(RESULTS_DIR, exist_ok=True)
+        tmp = TRACK_STATE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(_trk, f, default=str)
+        os.replace(tmp, TRACK_STATE)
+    except Exception as e:
+        log.warning(f"Spurt10 track state save failed: {e}")
+
+
+def _trk_row(sid_sym, sid, now_ist):
+    """Fresh candle + zone data of one followed stock that is no longer in the top-30 table (None when it cannot be read)."""
+    r = _score_symbol(sid_sym, sid)
+    if not r:
+        return None
+    zs = r.pop("_zones", None)
+    ztf = r.pop("_zone_tf", 10)
+    d5, asof = r.pop("_df5", None), r.pop("_as_of", None)
+    for k in ("_trk", "_sell"):
+        r.pop(k, None)
+    r.update(_zone_fields(zs, r["price"], r.get("candle_chg_pct")))
+    r.update(_conf_fields(zs, _conf_zones(d5, asof), r["price"]))
+    if r.get("zone_src"):
+        r["zone_src"] = f"Section A {ztf}m"
+    return r
+
+
+def _trk_event_update(ev, price, now_ist):
+    """Move one zone-touch event forward with the newest price of its stock."""
+    p0 = ev["touch_price"]
+    if not p0:
+        return
+    pct = round((price / p0 - 1) * 100, 2)
+    t0 = datetime.strptime(ev["date"] + " " + ev["touch_run"], "%Y-%m-%d %H:%M:%S")
+    mins = (now_ist.replace(tzinfo=None) - t0).total_seconds() / 60.0
+    for key, lim in (("ret_10m", 9), ("ret_30m", 29), ("ret_60m", 59)):
+        if ev.get(key) in (None, "") and mins >= lim:
+            ev[key] = pct
+    ev["best_pct"] = pct if ev.get("best_pct") in (None, "") else max(ev["best_pct"], pct)
+    ev["worst_pct"] = pct if ev.get("worst_pct") in (None, "") else min(ev["worst_pct"], pct)
+    ev["last_pct"], ev["last_time"] = pct, now_ist.strftime("%H:%M")
+    try:
+        lo, hi = [float(x) for x in str(ev["zone"]).split("-")]
+        if ev["zone_type"] == "RESISTANCE" and price > hi * 1.002:
+            ev["broke_zone"] = "YES"
+        elif ev["zone_type"] == "SUPPORT" and price < lo * 0.998:
+            ev["broke_zone"] = "YES"
+    except Exception:
+        pass
+    res = ev.get("ret_60m")
+    if ev.get("broke_zone") == "YES":
+        ev["outcome"] = "BROKE THROUGH"
+    elif res in (None, ""):
+        ev["outcome"] = "open"
+    else:
+        away = -res if ev["zone_type"] == "RESISTANCE" else res          # move away from the zone = reversal
+        ev["outcome"] = "REVERSED" if away >= 0.5 else "STALLED"
+
+
+def _track_update(top, now_ist, sid_of):
+    if not TRACK_ON:
+        return
+    today = now_ist.strftime("%Y-%m-%d")
+    if _trk["date"] != today:
+        _trk.update(date=today, syms=[], seen=[], prev_at={}, events=[])
+    run = now_ist.strftime("%H:%M:%S")
+    in_top = {r["symbol"] for r in top}
+    for r in top:                                                   # every stock that reaches the top 30 is followed from now on
+        if r["symbol"] not in _trk["syms"] and len(_trk["syms"]) < TRACK_MAX:
+            _trk["syms"].append(r["symbol"])
+    todo = [x for x in _trk["syms"] if x not in in_top and x in sid_of]
+    rows = [(dict(r), 1) for r in top if r["symbol"] in _trk["syms"]]
+    if todo:
+        with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+            futs = {x: ex.submit(_trk_row, x, sid_of[x], now_ist) for x in todo}
+            for x, fu in futs.items():
+                try:
+                    rr = fu.result()
+                    if rr:
+                        rows.append((rr, 0))
+                except Exception as e:
+                    log.warning(f"Spurt10 track fetch failed for {x}: {e}")
+    seen = {tuple(k) for k in _trk["seen"]}
+    out = []
+    for r, intop in rows:
+        k = (r["candle"], r["symbol"])
+        if k in seen:
+            continue
+        seen.add(k)
+        o = r.get("ohlc") or (None, None, None, None)
+        row = {"date": today, "run": run, "in_top30": intop, "open": o[0], "high": o[1], "low": o[2], "close": o[3]}
+        row.update({c: r.get(c) for c in TRACK_COLS if c not in row})
+        out.append(row)
+        # --- zone touch events
+        sym, at, price = r["symbol"], r.get("at_zone") or "", r["price"]
+        for ev in _trk["events"]:                                   # earlier touches of this stock: move them forward
+            if ev["symbol"] == sym and ev["touch_run"] != run:
+                _trk_event_update(ev, price, now_ist)
+        if at in ("SUPPORT", "RESISTANCE") and _trk["prev_at"].get(sym, "") != at:
+            ev = {"date": today, "symbol": sym, "zone_type": at, "touch_candle": r["candle"], "touch_run": run, "touch_price": price,
+                  "zone": r.get("resistance") if at == "RESISTANCE" else r.get("support"), "multiple": r.get("multiple"),
+                  "candle_chg_pct": r.get("candle_chg_pct"), "day_chg_pct": r.get("day_chg_pct"), "broke_zone": "", "outcome": "open"}
+            _trk["events"].append(ev)
+        _trk["prev_at"][sym] = at
+    _trk["seen"] = [list(k) for k in seen]
+    try:
+        os.makedirs(RESULTS_DIR, exist_ok=True)
+        if out:
+            new_file = not os.path.exists(TRACK_PATH)
+            if not new_file:
+                with open(TRACK_PATH) as fh:
+                    first = fh.readline().strip().split(",")
+                if first != TRACK_COLS:
+                    pd.read_csv(TRACK_PATH).reindex(columns=TRACK_COLS).to_csv(TRACK_PATH + ".tmp", index=False)
+                    os.replace(TRACK_PATH + ".tmp", TRACK_PATH)
+            pd.DataFrame(out, columns=TRACK_COLS).sort_values(["candle", "multiple"], ascending=[True, False]).to_csv(
+                TRACK_PATH, mode="a", header=new_file, index=False)
+        # touch file = earlier days kept as they are + today's events rewritten
+        old = pd.DataFrame(columns=TOUCH_COLS)
+        if os.path.exists(TOUCH_PATH):
+            old = pd.read_csv(TOUCH_PATH, dtype=str)
+            old = old[old["date"] != today]
+        new = pd.DataFrame(_trk["events"]).reindex(columns=TOUCH_COLS)
+        pd.concat([old.reindex(columns=TOUCH_COLS), new], ignore_index=True).to_csv(TOUCH_PATH + ".tmp", index=False)
+        os.replace(TOUCH_PATH + ".tmp", TOUCH_PATH)
+    except Exception as e:
+        log.warning(f"Spurt10 track write failed: {e}")
+    _trk_save()
+    log.info(f"Spurt10 track: {len(_trk['syms'])} stock(s) followed, {len(out)} new row(s), {len(_trk['events'])} zone touch(es) today")
+
+
+_trk_load()
 
 
 def _write(top, meta):

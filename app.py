@@ -799,6 +799,16 @@ def spurt10_history_csv():
     return _serve_csv("spurt10_history.csv", "volume_spurt_10min_history.csv")
 
 
+@app.route("/spurt10_track.csv", methods=["GET"])
+def spurt10_track_csv():
+    return _serve_csv("spurt10_track.csv", "volume_spurt_every_candle_track.csv")
+
+
+@app.route("/zone_touch.csv", methods=["GET"])
+def zone_touch_csv():
+    return _serve_csv("zone_touch_followup.csv", "zone_touch_followup.csv")
+
+
 @app.route("/spurt_sell", methods=["GET"])
 def spurt_sell_page():
     try:
@@ -1061,6 +1071,7 @@ for _k, _l, _n in _S10_PARTS:
 
 # ---- table pages for the results that so far had only a CSV download (same data, shown on a page; the CSV chip stays beside it)
 _TABLE_PAGES = [
+    ("/zone_touch", "zone_touch_followup.csv", "Zone touch follow-up (what happened after support / resistance)"),
     ("/orb", "orb.csv", "Signals vs opening range"),
     ("/oizones", "oizones.csv", "OI zones near price"),
     ("/oizones_signals", "oizones_signals.csv", "Signals vs OI zones"),
@@ -1113,6 +1124,7 @@ for _r, _f, _t in _TABLE_PAGES:
 
 import indices_strip
 indices_strip.install(app)   # NIFTY / BANKNIFTY / ... strip at the top of every page
+app.config["AG_LINKS"] = [("F&O scanner", "https://f-o-scanner-42tp.onrender.com")]   # button on the home page and in the top bar
 auth_gate.add_menu(app)   # "/" home page that lists every page after login
 
 

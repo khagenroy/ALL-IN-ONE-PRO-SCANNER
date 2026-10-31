@@ -532,7 +532,7 @@ def add_menu(app):
         return
     app.config["AG_RESTRICT"] = True
     GROUPS = [
-        ("Spurt scanners", ["/spurt10", "/spurt10_history", "/spurt_daily", "/spurt_sell", "/spurt_paper", "/spurtpb", "/volspurt", "/spz"]),
+        ("Spurt scanners", ["/spurt10", "/spurt10_history", "/zone_touch", "/spurt_daily", "/spurt_sell", "/spurt_paper", "/spurtpb", "/volspurt", "/spz"]),
         ("Spurt10 sections", ["/spurt10_main", "/spurt10_ob", "/spurt10_wick", "/spurt10_watch", "/spurt10_news", "/spurt10_thin", "/depth"]),
         ("SMA / Trend", ["/sma200", "/sma200now", "/trendnow"]),
         ("Best setups", ["/best", "/bestnow"]),
@@ -590,6 +590,9 @@ def add_menu(app):
             rows = "".join(f"<div class=r><a class=pg href='{escape(p)}' target=_blank rel=noopener>{escape(p[1:])}</a>{chips(p)}</div>" for p in plist if ok(p))
             if rows:
                 cards += f"<section><h3>{escape(title)}</h3>{rows}</section>"
+        _lk = app.config.get("AG_LINKS") or []
+        if _lk:
+            cards += "<section><h3>Other scanners</h3>" + "".join(f"<div class=r><a class=pg href='{escape(u)}' target=_blank rel=noopener>{escape(n)} &#8599;</a></div>" for n, u in _lk) + "</section>"
         oc = [c for c in orphan if ok(c)]
         if oc:
             cards += "<section><h3>OI zones / MCX / ORB / news CSVs</h3><div class=r>" + "".join(f"<a class=ch href='{escape(c)}'>{escape(c[1:-4])}</a>" for c in oc) + "</div></section>"
@@ -689,12 +692,13 @@ def add_theme(app):
     @app.after_request
     def _theme(resp):
         try:
-            if resp.status_code not in (200, 404) or resp.mimetype != "text/html" or resp.direct_passthrough or request.path.endswith((".csv", ".json")):
+            if resp.status_code not in (200, 404) or resp.mimetype != "text/html" or resp.direct_passthrough or request.path.endswith((".csv", ".json")) or request.path == "/health":
                 return resp
             html = resp.get_data(as_text=True)
             if "ag-theme" in html or "name=ag-own" in html:
                 return resp
-            links = "<a href='/alerts' style='color:#7db3ff;text-decoration:none'>Alerts</a>"
+            links = "".join(f"<a href='{escape(u)}' target=_blank rel=noopener style='color:#9fe0b0;text-decoration:none'>{escape(n)} &#8599;</a> &middot; " for n, u in (app.config.get("AG_LINKS") or []))
+            links += "<a href='/alerts' style='color:#7db3ff;text-decoration:none'>Alerts</a>"
             if _admin():
                 links += " &middot; <a href='/admin/users' style='color:#7db3ff;text-decoration:none'>Users</a>"
             links += f" &middot; <a href='/password' style='color:#7db3ff;text-decoration:none'>Password</a> &middot; <a href='/logout' style='color:#7db3ff;text-decoration:none'>Logout ({escape(str(session.get('user', '')))})</a>"
