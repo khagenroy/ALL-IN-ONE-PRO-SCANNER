@@ -1059,6 +1059,58 @@ for _k, _l, _n in _S10_PARTS:
     _s10_route(_k)
 
 
+# ---- table pages for the results that so far had only a CSV download (same data, shown on a page; the CSV chip stays beside it)
+_TABLE_PAGES = [
+    ("/orb", "orb.csv", "Signals vs opening range"),
+    ("/oizones", "oizones.csv", "OI zones near price"),
+    ("/oizones_signals", "oizones_signals.csv", "Signals vs OI zones"),
+    ("/mcx_oizones", "mcx_oizones.csv", "Commodity OI zones"),
+    ("/mcx_signals", "mcx_signals.csv", "Commodity signals vs OI zones"),
+    ("/mcx_signals_all", "mcx_signals_all.csv", "Commodity signals (all)"),
+    ("/mcx_spurt", "mcx_spurt.csv", "Commodity volume spurt"),
+    ("/crypto_oizones", "crypto_oizones.csv", "Crypto OI zones"),
+    ("/crypto_signals", "crypto_signals.csv", "Crypto signals vs OI zones"),
+    ("/crypto_signals_all", "crypto_signals_all.csv", "Crypto signals (all)"),
+    ("/crypto_spurt", "crypto_spurt.csv", "Crypto volume spurt"),
+]
+
+
+def _table_page(route, filename, title):
+    import csv
+    from html import escape as _e
+
+    def view():
+        path = os.path.join(RESULTS_DIR, filename)
+        if not os.path.exists(path):
+            return ("<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'><title>" + _e(title) + "</title>"
+                    "<h2>" + _e(title) + "</h2><p>No scan has run yet. It fills when the scanner next runs.</p>"), 404
+        try:
+            with open(path, encoding="utf-8", errors="replace", newline="") as f:
+                rows = list(csv.reader(f))
+        except Exception as e:
+            return f"Could not read the file: {e}", 500
+        if not rows:
+            return "<!doctype html><title>" + _e(title) + "</title><h2>" + _e(title) + "</h2><p>The last scan found nothing.</p>"
+        head, body = rows[0], rows[1:]
+        shown = body[:1500]
+        th = "".join(f"<th>{_e(h)}</th>" for h in head)
+        tr = "".join("<tr>" + "".join(f"<td>{_e(c)}</td>" for c in r) + "</tr>" for r in shown)
+        mt = time.strftime("%d %b %H:%M", time.gmtime(os.path.getmtime(path) + 19800)) + " IST"
+        more = f" (first {len(shown)} shown, download the CSV for all)" if len(body) > len(shown) else ""
+        css = ("body{font:13px system-ui,Arial,sans-serif;color:#e6e9ef;padding:14px}h2{margin:4px 0}table{border-collapse:collapse;margin-top:8px;background:rgba(24,29,39,.88)}"
+               "th,td{border:1px solid #2f3a50;padding:3px 8px;white-space:nowrap}th{position:sticky;top:34px;background:#1d2a44}tr:nth-child(even) td{background:rgba(255,255,255,.04)}"
+               "a{color:#7db3ff}.w{overflow:auto;max-width:100%}")
+        return (f"<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'><title>{_e(title)}</title><style>{css}</style>"
+                f"<h2>{_e(title)}</h2><div>{len(body)} rows &middot; last updated {mt}{more} &middot; <a href='{route}.csv'>download CSV</a></div>"
+                f"<div class=w><table><tr>{th}</tr>{tr}</table></div>")
+    view.__name__ = "tbl_" + route.strip("/")
+    app.add_url_rule(route, view_func=view, methods=["GET"])
+
+
+for _r, _f, _t in _TABLE_PAGES:
+    _table_page(_r, _f, _t)
+
+
 import indices_strip
 indices_strip.install(app)   # NIFTY / BANKNIFTY / ... strip at the top of every page
 auth_gate.add_menu(app)   # "/" home page that lists every page after login

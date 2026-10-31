@@ -538,9 +538,12 @@ def add_menu(app):
         ("Best setups", ["/best", "/bestnow"]),
         ("Scanner / Swing / Gainers", ["/scanner", "/swing", "/gainers"]),
         ("Commodity / Crypto", ["/commodity", "/mcx_sell", "/crypto", "/crypto_sell"]),
+        ("OI zones / ORB", ["/oizones", "/oizones_signals", "/orb"]),
+        ("Commodity tables", ["/mcx_oizones", "/mcx_signals", "/mcx_signals_all", "/mcx_spurt"]),
+        ("Crypto tables", ["/crypto_oizones", "/crypto_signals", "/crypto_signals_all", "/crypto_spurt"]),
         ("Bot / Deals", ["/botlog", "/botpnl", "/deals"]),
             ]
-    SKIP = ("/", "/health", "/login", "/logout", "/register", "/setup", "/alerts", "/indices.json")
+    SKIP = ("/", "/health", "/login", "/logout", "/register", "/setup", "/alerts", "/indices.json", "/password")
 
     def catalog():
         pages, csvs = [], []
@@ -584,15 +587,19 @@ def add_menu(app):
 
         cards = ""
         for title, plist in groups:
-            rows = "".join(f"<div class=r><a class=pg href='{escape(p)}'>{escape(p[1:])}</a>{chips(p)}</div>" for p in plist if ok(p))
+            rows = "".join(f"<div class=r><a class=pg href='{escape(p)}' target=_blank rel=noopener>{escape(p[1:])}</a>{chips(p)}</div>" for p in plist if ok(p))
             if rows:
                 cards += f"<section><h3>{escape(title)}</h3>{rows}</section>"
         oc = [c for c in orphan if ok(c)]
         if oc:
             cards += "<section><h3>OI zones / MCX / ORB / news CSVs</h3><div class=r>" + "".join(f"<a class=ch href='{escape(c)}'>{escape(c[1:-4])}</a>" for c in oc) + "</div></section>"
         _recent = [r for r in _feed_read(40) if "read before you trade" not in r.get("title", "")][:3]
-        cards = ("<section style='grid-column:1/-1'><h3>Latest alerts <a href='/alerts' style='float:right;text-transform:none;font-weight:400'>see all &rarr;</a></h3>"
-                 + _feed_html(_recent) + "</section>") + cards
+        if _recent:
+            cards = ("<section style='grid-column:1/-1'><h3>Latest alerts <a href='/alerts' style='float:right;text-transform:none;font-weight:400'>see all &rarr;</a></h3>"
+                     + _feed_html(_recent) + "</section>") + cards
+        else:
+            cards = ("<section style='grid-column:1/-1;padding:6px 12px'><span style='font-size:13px'><b style='color:#8fb4ff;text-transform:uppercase;font-size:12px'>Latest alerts</b> &nbsp; none yet &middot; "
+                     "<a href='/alerts'>see all</a></span></section>") + cards
         if not cards.count("<h3>") > 1:
             cards = cards + "<section><h3>Welcome</h3><div class=r>No pages have been allocated to your account yet. Ask the admin.</div></section>"
         who = escape(str(session.get("user", "")))
@@ -675,17 +682,17 @@ def add_theme(app):
     css = ("<style id=ag-theme>html{--agov:rgba(8,12,20,.80)}html::before{content:'';position:fixed;inset:0;z-index:-1;pointer-events:none;"
            "background:linear-gradient(var(--agov),var(--agov)),url(/bg/page.jpg) center/cover no-repeat}" + _FOOT_CSS + "body{padding-bottom:56px!important}</style>")
     js = ("<script id=ag-js>(function(){try{var b=document.body,c=getComputedStyle(b).backgroundColor,m=c.match(/[\\d.]+/g)||[],a=m.length>3?+m[3]:1;"
-          "var dark=a>0&&m.length>=3&&(0.299*m[0]+0.587*m[1]+0.114*m[2])<110;var s=document.createElement('style');"
-          "s.textContent='html{background:'+(dark?'#0b0f16':'#e8edf5')+'!important}body{background:transparent!important}';if(!dark)document.documentElement.style.setProperty('--agov','rgba(236,241,248,.90)');"
+          "var dark=a>0&&m.length>=3&&(0.299*m[0]+0.587*m[1]+0.114*m[2])<110;var plain=a===0&&!document.querySelector('table,canvas,svg,img,input,button')&&(b.innerText||'').length<500;if(plain){dark=true}var s=document.createElement('style');"
+          "s.textContent='html{background:'+(dark?'#0b0f16':'#e8edf5')+'!important}body{background:transparent!important}'+(plain?'body{color:#e6e9ef!important;font:16px system-ui,Arial,sans-serif!important;padding:18px!important}':'');if(!dark)document.documentElement.style.setProperty('--agov','rgba(236,241,248,.90)');"
           "document.head.appendChild(s)}catch(e){}})();</script>")
 
     @app.after_request
     def _theme(resp):
         try:
-            if resp.status_code != 200 or resp.mimetype != "text/html" or resp.direct_passthrough:
+            if resp.status_code not in (200, 404) or resp.mimetype != "text/html" or resp.direct_passthrough or request.path.endswith((".csv", ".json")):
                 return resp
             html = resp.get_data(as_text=True)
-            if "ag-theme" in html or "name=ag-own" in html or "<body" not in html.lower() and "<table" not in html.lower():
+            if "ag-theme" in html or "name=ag-own" in html:
                 return resp
             links = "<a href='/alerts' style='color:#7db3ff;text-decoration:none'>Alerts</a>"
             if _admin():
