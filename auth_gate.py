@@ -21,7 +21,7 @@ from flask import request, redirect, session, Response
 from werkzeug.security import generate_password_hash, check_password_hash
 
 _LOCK = threading.Lock()
-_OPEN = ("/health", "/login", "/register", "/setup", "/logout")
+_OPEN = ("/health", "/login", "/register", "/setup", "/logout", "/bg/home.jpg", "/bg/page.jpg")
 _FAILS = {}  # ip -> [timestamps] of recent failed logins
 
 
@@ -137,12 +137,15 @@ DISCLAIMER = ("Disclaimer: for education and information only. Nothing here is i
 _FOOT_CSS = ("#ag-foot{position:fixed;left:0;right:0;bottom:0;z-index:99998;padding:5px 14px;background:rgba(11,15,22,.94);border-top:1px solid #2f3a50;"
              "color:#8d9bb0;font:11px/1.35 system-ui,Arial,sans-serif;text-align:center}")
 _FOOT = f"<div id=ag-foot>{DISCLAIMER}</div>"
-_BG = ("radial-gradient(900px 500px at 12% -10%,rgba(59,130,246,.22),transparent 60%),radial-gradient(800px 500px at 100% 0%,rgba(16,185,129,.14),transparent 55%),"
-       + _CANDLES + " center bottom/100% 300px no-repeat,"
-       "linear-gradient(rgba(255,255,255,.03) 1px,transparent 1px) 0 0/34px 34px,linear-gradient(90deg,rgba(255,255,255,.03) 1px,transparent 1px) 0 0/34px 34px,#0b0f16")
-_ART_CSS = ("body::before,body::after{content:'';position:fixed;bottom:12px;width:230px;height:190px;background-repeat:no-repeat;background-size:contain;opacity:.16;pointer-events:none;z-index:0}"
-            "body::before{left:14px;background-image:" + _BULL + "}body::after{right:14px;background-image:" + _BEAR + "}"
-            ".b,.g,.t{position:relative;z-index:1}@media(max-width:700px){body::before,body::after{width:120px;height:100px}}")
+_IDX_BOX = "<span id=ag-idx style='display:none;gap:6px;flex-wrap:wrap;align-items:center'></span>"
+_IDX_JS = ("<script>(function(){var b=document.getElementById('ag-idx');if(!b)return;function f(n){return n==null?'-':n.toLocaleString('en-IN',{maximumFractionDigits:2})}"
+           "function go(){fetch('/indices.json',{credentials:'same-origin'}).then(function(r){return r.ok?r.json():null}).then(function(d){"
+           "if(!d||!d.rows||!d.rows.length)return;var h='';d.rows.forEach(function(x){if(x.price==null)return;var up=x.pct!=null&&x.pct>=0,c=x.pct==null?'#8d9bb0':(up?'#22c55e':'#ef4444');"
+           "h+='<span style=\"background:#161c27;border:1px solid #2f3a50;border-radius:12px;padding:1px 8px;font:12px system-ui,Arial,sans-serif;white-space:nowrap;color:#e6e9ef\">'+x.name+' '+f(x.price)+"
+           "' <b style=\"color:'+c+'\">'+(x.pct==null?'':(up?'&#9650; +':'&#9660; ')+x.pct.toFixed(2)+'%')+'</b></span>'});"
+           "if(h){b.innerHTML=h;b.style.display='inline-flex';b.title='As of '+(d.asof||'')}}).catch(function(){})}go();setInterval(go,30000)})();</script>")
+_BG = "linear-gradient(rgba(6,10,18,.55),rgba(6,10,18,.55)),url(/bg/home.jpg) center/cover no-repeat fixed,#0b0f16"
+_ART_CSS = ".b,.g,.t{position:relative;z-index:1}"
 
 
 _CSS = (_ART_CSS + "body{font-family:system-ui,Arial,sans-serif;background:" + _BG + ";background-attachment:fixed;color:#e6e9ef;display:flex;justify-content:center;padding:40px 16px;min-height:100vh;box-sizing:border-box}"
@@ -155,7 +158,7 @@ _CSS = (_ART_CSS + "body{font-family:system-ui,Arial,sans-serif;background:" + _
 
 
 def _page(title, body, status=200, wide=False):
-    st = _CSS + (".b{max-width:640px}" if wide else "")
+    st = _CSS + (".b{max-width:640px}" if wide else ".b{margin-top:110px}")
     html = f"<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'><meta name=ag-own content=1><title>{escape(title)}</title><style>{st}{_FOOT_CSS}body{{padding-bottom:70px!important}}</style><div class=b>{body}</div>{_FOOT}"
     return Response(html, status=status, mimetype="text/html")
 
@@ -209,7 +212,7 @@ def install(app):
                 session["role"] = rec.get("role", "viewer")
                 if p.startswith("/admin") and not _admin():
                     return _page("Not allowed", "<h2>Admin only</h2><a href='/'>Back</a>", 403)
-                if app.config.get("AG_RESTRICT") and not _admin() and p not in ("/", "/alerts"):
+                if app.config.get("AG_RESTRICT") and not _admin() and p not in ("/", "/alerts", "/indices.json"):
                     ok = set(rec.get("pages") or [])
                     if not (p in ok or any(p.startswith(r + "/") for r in ok)):
                         return _page("Not allocated", "<h2>This page is not part of your account</h2><p>Ask the admin if you need it.</p><a href='/'>Back to home</a>", 403)
@@ -339,7 +342,7 @@ def add_menu(app):
         ("Commodity / Crypto", ["/commodity", "/mcx_sell", "/crypto", "/crypto_sell"]),
         ("Bot / Deals", ["/botlog", "/botpnl", "/deals"]),
             ]
-    SKIP = ("/", "/health", "/login", "/logout", "/register", "/setup", "/alerts")
+    SKIP = ("/", "/health", "/login", "/logout", "/register", "/setup", "/alerts", "/indices.json")
 
     def catalog():
         pages, csvs = [], []
@@ -400,7 +403,7 @@ def add_menu(app):
                ".ch{font-size:11px;background:#1d232e;border:1px dashed #3a4558;border-radius:10px;padding:0 6px;color:#8d9bb0}.ch:before{content:\"\\2193 \"}body{padding-bottom:50px}" + _FOOT_CSS)
         note = "(blue = open the scanner, grey \u2193 = download CSV)"
         html = (f"<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'><meta name=ag-own content=1><title>Scanner</title><style>{css}</style>"
-                f"<div class=t><span><b style='font-size:16px;letter-spacing:.3px'>&#9889; Scanner pages</b> <span style='color:#8d9bb0;font-size:12px'>{note}</span></span><span>{top}</span></div><div class=g>{cards}</div>{_FOOT}")
+                f"<div class=t><span><b style='font-size:16px;letter-spacing:.3px'>&#9889; Scanner pages</b> <span style='color:#8d9bb0;font-size:12px'>{note}</span></span>{_IDX_BOX}<span>{top}</span></div><div class=g>{cards}</div>{_FOOT}{_IDX_JS}")
         return Response(html, mimetype="text/html")
 
     @app.route("/admin/access/<name>", methods=["GET", "POST"])
@@ -463,15 +466,13 @@ def add_theme(app):
     import re
     bar = ("<div id=ag-bar style=\"position:sticky;top:0;z-index:99999;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;"
            "padding:7px 14px;background:rgba(11,15,22,.92);border-bottom:1px solid #2f3a50;font:13px system-ui,Arial,sans-serif;color:#e6e9ef\">"
-           "<span><a href='/' style='color:#fff;font-weight:700;text-decoration:none'>&#9889; Home</a></span>"
+           "<span><a href='/' style='color:#fff;font-weight:700;text-decoration:none'>&#9889; Home</a></span>" + _IDX_BOX +
            "<span>__LINKS__</span></div>")
-    css = ("<style id=ag-theme>html::before,html::after{content:'';position:fixed;inset:0;z-index:-1;pointer-events:none}"
-           "html::before{background:" + _BG.replace(",#0b0f16", ",transparent") + "}"
-           "html::after{background:" + _BULL + " 14px calc(100% - 12px)/230px 190px no-repeat," + _BEAR + " calc(100% - 14px) calc(100% - 12px)/230px 190px no-repeat;opacity:.16}"
-           "@media(max-width:700px){html::after{background-size:110px 90px,110px 90px}}" + _FOOT_CSS + "body{padding-bottom:56px!important}</style>")
+    css = ("<style id=ag-theme>html{--agov:rgba(8,12,20,.80)}html::before{content:'';position:fixed;inset:0;z-index:-1;pointer-events:none;"
+           "background:linear-gradient(var(--agov),var(--agov)),url(/bg/page.jpg) center/cover no-repeat}" + _FOOT_CSS + "body{padding-bottom:56px!important}</style>")
     js = ("<script id=ag-js>(function(){try{var b=document.body,c=getComputedStyle(b).backgroundColor,m=c.match(/[\\d.]+/g)||[],a=m.length>3?+m[3]:1;"
           "var dark=a>0&&m.length>=3&&(0.299*m[0]+0.587*m[1]+0.114*m[2])<110;var s=document.createElement('style');"
-          "s.textContent='html{background:'+(dark?'#0b0f16':'#e8edf5')+'!important}body{background:transparent!important}'+(dark?'':'html::before{opacity:.55}html::after{opacity:.5}');"
+          "s.textContent='html{background:'+(dark?'#0b0f16':'#e8edf5')+'!important}body{background:transparent!important}';if(!dark)document.documentElement.style.setProperty('--agov','rgba(236,241,248,.90)');"
           "document.head.appendChild(s)}catch(e){}})();</script>")
 
     @app.after_request
@@ -491,8 +492,22 @@ def add_theme(app):
                 html = re.sub(r"(<body[^>]*>)", lambda m_: m_.group(1) + tb, html, count=1, flags=re.I)
             else:
                 html = tb + html
-            html = (html + css + _FOOT + js) if "</body>" not in html.lower() else re.sub(r"</body>", lambda m_: css + _FOOT + js + "</body>", html, count=1, flags=re.I)
+            html = (html + css + _FOOT + js + _IDX_JS) if "</body>" not in html.lower() else re.sub(r"</body>", lambda m_: css + _FOOT + js + _IDX_JS + "</body>", html, count=1, flags=re.I)
             resp.set_data(html)
         except Exception:
             pass
         return resp
+
+
+def add_backgrounds(app):
+    """Serves the two background pictures from the 'bg' folder next to this file (cached by the browser; open to everybody so the login page can use them)."""
+    from flask import send_from_directory
+    folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bg")
+
+    @app.route("/bg/<name>")
+    def _bg(name):
+        if name not in ("home.jpg", "page.jpg"):
+            return Response("Not found", status=404)
+        r = send_from_directory(folder, name, mimetype="image/jpeg")
+        r.headers["Cache-Control"] = "public, max-age=86400"
+        return r

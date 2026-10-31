@@ -64,6 +64,7 @@ import auth_gate
 auth_gate.install(app)
 auth_gate.add_alerts_page(app)
 auth_gate.add_theme(app)
+auth_gate.add_backgrounds(app)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("all-in-one-pro-live")
 
@@ -1058,6 +1059,8 @@ for _k, _l, _n in _S10_PARTS:
     _s10_route(_k)
 
 
+import indices_strip
+indices_strip.install(app)   # NIFTY / BANKNIFTY / ... strip at the top of every page
 auth_gate.add_menu(app)   # "/" home page that lists every page after login
 
 
