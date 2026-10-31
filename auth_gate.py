@@ -225,3 +225,24 @@ def install(app):
             rows += f"<tr><td>{escape(n)}</td><td>{st}</td><td>{escape(r.get('created',''))}</td><td>{btn}</td></tr>"
         body = f"<h2>Users</h2><table><tr><th>Name</th><th>Status</th><th>Since</th><th></th></tr>{rows}</table><p><a href='/'>Home</a> · <a href='/logout'>Logout</a></p>"
         return _page("Users", body, wide=True)
+
+
+def add_menu(app):
+    """Home page "/" that links every page (and CSV) of the app. Call it at the END of app.py, after all routes exist.
+    Skipped when the app already has its own "/" page."""
+    if any(r.rule == "/" for r in app.url_map.iter_rules()):
+        return
+
+    @app.route("/")
+    def _menu():
+        pages, csvs = [], []
+        for r in sorted(app.url_map.iter_rules(), key=lambda x: x.rule):
+            if "GET" not in r.methods or r.arguments or r.rule in ("/", "/health", "/login", "/logout", "/register", "/setup") \
+                    or r.rule.startswith("/admin") or r.rule.startswith("/static"):
+                continue
+            (csvs if r.rule.endswith(".csv") else pages).append(r.rule)
+        li = lambda xs: "".join(f"<li><a href='{escape(x)}'>{escape(x)}</a></li>" for x in xs)
+        admin = "<p><a href='/admin/users'>Manage users</a> · " if _admin() else "<p>"
+        body = (f"<h2>Pages</h2><ul>{li(pages)}</ul><h2>CSV downloads</h2><ul>{li(csvs)}</ul>"
+                f"{admin}<a href='/logout'>Logout</a> ({escape(str(session.get('user', '')))})</p>")
+        return _page("Home", body, wide=True)

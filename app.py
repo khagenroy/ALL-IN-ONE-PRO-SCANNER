@@ -1006,6 +1006,9 @@ def sma200_trades_csv():
     return _serve_csv("sma200_trades.csv", "sma200_all_historical_signals.csv")
 
 
+auth_gate.add_menu(app)   # "/" home page that lists every page after login
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
