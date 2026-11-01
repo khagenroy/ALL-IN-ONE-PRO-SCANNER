@@ -194,7 +194,7 @@ $('sym').addEventListener('input',function(){clearTimeout(tm);tm=setTimeout(sugg
 $('sym').addEventListener('change',function(){symChanged($('sym').value);getQuote()});
 ['qty','sl','t1','t2','lim','otype'].forEach(function(i){$(i).addEventListener('input',calc)});
 $('otype').addEventListener('change',calc);
-setSide('BUY');setProd('INTRADAY');load();cur='RELIANCE';pcFill();setTimeout(function(){showChart('RELIANCE');loadInfo('RELIANCE')},300);setInterval(function(){if(cur)loadInfo(cur)},60000);setInterval(load,4000);setInterval(function(){if($('sym').value)getQuote()},8000);
+setSide('BUY');setProd('INTRADAY');load();cur='RELIANCE';pcFill();if(!$('sym').value.trim())$('sym').value=cur;getQuote();setTimeout(function(){showChart('RELIANCE');loadInfo('RELIANCE')},300);setInterval(function(){if(cur)loadInfo(cur)},60000);setInterval(load,4000);setInterval(function(){if($('sym').value)getQuote()},8000);
 </script>"""
 
 
