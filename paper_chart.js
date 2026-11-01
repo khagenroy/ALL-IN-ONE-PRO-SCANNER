@@ -168,4 +168,5 @@
   document.getElementById('pbig').addEventListener('click', function () { card.classList.toggle('big'); document.body.style.overflow = card.classList.contains('big') ? 'hidden' : ''; this.textContent = card.classList.contains('big') ? 'Close ✕' : 'Enlarge ⛶'; setTimeout(function () { chart.timeScale().fitContent(); }, 80); });
   document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && card.classList.contains('big')) document.getElementById('pbig').click(); });
   setInterval(function () { if (sym) load(true); }, 20000);
+  if (window.onPChartReady) { try { window.onPChartReady(); } catch (e) {} }   // draw the stock the page already picked
 })();

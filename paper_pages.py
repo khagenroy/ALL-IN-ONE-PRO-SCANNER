@@ -34,6 +34,13 @@ button.buy{background:#1f9d57}button.sell{background:#d6453d}button.sm{padding:4
 #pcard.big{position:fixed;inset:0;z-index:100001;background:#0b0f16;border-radius:0;padding:10px;display:flex;flex-direction:column;margin:0}#pcard.big #pchart{flex:1;height:auto}#pcard.big p.note{display:none}
 .bd{display:inline-block;padding:2px 8px;border-radius:10px;font-size:12px;font-weight:700}.bd.sup{background:#1f9d57;color:#fff}.bd.res{background:#d6453d;color:#fff}
 .zr{display:flex;justify-content:space-between;gap:8px;padding:4px 0;border-bottom:1px solid #2a344a}
+#pcs{position:relative;display:inline-block}#pcs .ic{position:absolute;left:9px;top:50%;transform:translateY(-50%);color:#9aa8bf;font-size:13px;pointer-events:none}
+#pcsearch{width:190px;padding:6px 10px 6px 30px;font-weight:700;font-size:15px;text-transform:uppercase;background:#0f1520;border:1px solid #37445f;border-radius:8px;cursor:pointer}
+#pcsearch:focus{cursor:text;border-color:#2d5bd6;outline:none}
+#pcdd{display:none;position:absolute;top:38px;left:0;z-index:60;width:340px;max-width:85vw;max-height:340px;overflow:auto;background:#141a26;border:1px solid #37445f;border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.5)}
+#pcdd div{padding:8px 12px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;gap:12px;border-bottom:1px solid #222c40}
+#pcdd div.on,#pcdd div:hover{background:#2d5bd6}#pcdd small{color:#9aa8bf;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}#pcdd div.on small,#pcdd div:hover small{color:#dfe8ff}
+#pcdd i{font-style:normal;font-size:11px;color:#9aa8bf;margin-left:6px}
 </style>"""
 
 DISCLAIMER = ("<p class=note>Practice only: no real money and no real orders. Prices are live from Dhan; fills happen at the live price seen by the app "
@@ -111,6 +118,8 @@ function getQuote(){
 }
 
 function showChart(sym){if(window.PChart)PChart.setSymbol(sym)}
+/* the chart script loads after this one; when it is ready it calls this, so the first stock is never missed */
+window.onPChartReady=function(){if(cur){showChart(cur);loadInfo(cur)}};
 function zr(label,z,cls2){return z?'<div class=zr><span>'+label+'</span><span><b>'+fm(z.lo,2)+' - '+fm(z.hi,2)+'</b> <span class=m>('+z.dist+'% away)</span></span></div>':'<div class=zr><span>'+label+'</span><span class=m>none found</span></div>'}
 function loadInfo(sym){
   var el=$('info');if(!el||!sym)return;
@@ -126,8 +135,30 @@ function loadInfo(sym){
     el.innerHTML=h;if(window.PChart)PChart.setInfo(i)});
 }
 function symChanged(s){
-  s=s.trim().toUpperCase();if(!s||s===cur)return;cur=s;showChart(s);loadInfo(s);
+  s=s.trim().toUpperCase();if(!s||s===cur)return;cur=s;showChart(s);loadInfo(s);pcFill();
 }
+/* ---------- TradingView-style stock search on the chart ---------- */
+var ddI=-1,ddL=[],ddT=null;
+function pcFill(){var b=$('pcsearch');if(b&&document.activeElement!==b)b.value=cur||''}
+function pcHide(){$('pcdd').style.display='none'}
+function pcDraw(){var d=$('pcdd');
+  if(!ddL.length){d.innerHTML='<div class=m>No NSE stock found</div>';d.style.display='block';return}
+  d.innerHTML=ddL.map(function(x,i){return '<div data-i='+i+(i==ddI?' class=on':'')+'><span><b>'+esc(x.symbol)+'</b><i>NSE</i></span><small>'+esc(x.name)+'</small></div>'}).join('');d.style.display='block';
+  var on=d.querySelector('.on');if(on)on.scrollIntoView({block:'nearest'})}
+function pcPick(s){pcHide();$('pcsearch').blur();if(!s){pcFill();return}s=s.toUpperCase();$('sym').value=s;symChanged(s);getQuote();pcFill()}
+(function(){
+  var b=$('pcsearch'),d=$('pcdd');
+  b.addEventListener('focus',function(){b.select()});
+  b.addEventListener('input',function(){clearTimeout(ddT);var v=b.value.trim();if(!v){pcHide();return}
+    ddT=setTimeout(function(){fetch('/paper/api/symbols?q='+encodeURIComponent(v)).then(function(r){return r.json()}).then(function(j){
+      if(b.value.trim()!==v)return;ddL=j||[];ddI=ddL.length?0:-1;pcDraw()})},150)});
+  b.addEventListener('keydown',function(e){
+    if(e.key==='ArrowDown'||e.key==='ArrowUp'){if(!ddL.length)return;e.preventDefault();ddI=(ddI+(e.key==='ArrowDown'?1:-1)+ddL.length)%ddL.length;pcDraw()}
+    else if(e.key==='Enter'){e.preventDefault();pcPick(ddI>=0&&ddL[ddI]?ddL[ddI].symbol:b.value.trim())}
+    else if(e.key==='Escape'){pcHide();b.blur();pcFill()}});
+  b.addEventListener('blur',function(){setTimeout(function(){pcHide();pcFill()},150)});
+  d.addEventListener('mousedown',function(e){e.preventDefault();var t=e.target.closest('[data-i]');if(t)pcPick(ddL[+t.dataset.i].symbol)});
+})();
 var tm=null;
 function suggest(){
   var v=$('sym').value.trim();if(v.length<1)return;
@@ -163,7 +194,7 @@ $('sym').addEventListener('input',function(){clearTimeout(tm);tm=setTimeout(sugg
 $('sym').addEventListener('change',function(){symChanged($('sym').value);getQuote()});
 ['qty','sl','t1','t2','lim','otype'].forEach(function(i){$(i).addEventListener('input',calc)});
 $('otype').addEventListener('change',calc);
-setSide('BUY');setProd('INTRADAY');load();cur='RELIANCE';setTimeout(function(){showChart('RELIANCE');loadInfo('RELIANCE')},300);setInterval(function(){if(cur)loadInfo(cur)},60000);setInterval(load,4000);setInterval(function(){if($('sym').value)getQuote()},8000);
+setSide('BUY');setProd('INTRADAY');load();cur='RELIANCE';pcFill();setTimeout(function(){showChart('RELIANCE');loadInfo('RELIANCE')},300);setInterval(function(){if(cur)loadInfo(cur)},60000);setInterval(load,4000);setInterval(function(){if($('sym').value)getQuote()},8000);
 </script>"""
 
 
@@ -176,7 +207,8 @@ def trade_page(user):
 <div class=cols>
 <div>
 <div class=card id=pcard style="padding:8px">
-<div class=ch><b id=pctitle>Pick a stock</b>
+<div class=ch><b id=pctitle style="display:none">Pick a stock</b>
+<span id=pcs><span class=ic>&#128269;</span><input id=pcsearch autocomplete=off spellcheck=false placeholder="Search stock" title="Search any NSE stock"><div id=pcdd></div></span>
 <span id=ptf><button data-tf=5 class=on>5m</button><button data-tf=15>15m</button><button data-tf=60>1h</button></span>
 <span style="position:relative"><button id=pindbtn class=sm>Indicators &#9662;</button><div id=pind>
 <label><input type=checkbox data-k=vol>Volume</label><label><input type=checkbox data-k=vwap>VWAP</label>
