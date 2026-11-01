@@ -360,7 +360,7 @@ def chart_info(symbol, tf=15):
 _cc = {}
 CHART_DAYS = 8
 # intraday timeframe (minutes) -> (Dhan candle size used to build it, days of history loaded)
-TF_INTRA = {5: (5, 8), 15: (5, 8), 30: (15, 45), 45: (15, 75), 60: (15, 120), 120: (15, 180), 180: (15, 270), 240: (15, 365)}
+TF_INTRA = {5: (5, 8), 15: (5, 8), 30: (15, 45), 45: (15, 75), 60: (15, 100), 120: (15, 160), 180: (15, 240), 240: (15, 300)}
 TF_HTF = ("D", "W", "M")                  # daily / weekly / monthly, built from Dhan daily candles
 DAILY_YEARS = 20                          # one daily download serves D, W and M
 TF_ALL = tuple(str(k) for k in TF_INTRA) + TF_HTF
@@ -374,15 +374,28 @@ def _tf(tf, default="5"):
     return s if s in TF_ALL else default
 
 
+_bc_locks = {}
+_bc_guard = threading.Lock()
+
+
 def _cached(key, ttl, fn):
+    """Returns the cached download, or downloads it. When the chart and the zones panel ask for the same candles at the
+    same moment, only ONE download goes to Dhan and the other request waits for it (before, both downloaded = twice as slow)."""
     c = _bc.get(key)
     if c is not None and time.time() - c[0] < ttl:
         return c[1]
-    v = fn()
-    _bc[key] = (time.time(), v)
+    with _bc_guard:
+        lk = _bc_locks.setdefault(key, threading.Lock())
+    with lk:
+        c = _bc.get(key)
+        if c is not None and time.time() - c[0] < ttl:
+            return c[1]
+        v = fn()
+        _bc[key] = (time.time(), v)
     if len(_bc) > 80:                     # keep memory small on the 512 MB instance: forget the oldest downloads
-        for k, _ in sorted(_bc.items(), key=lambda kv: kv[1][0])[:30]:
+        for k, _ in sorted(list(_bc.items()), key=lambda kv: kv[1][0])[:30]:
             _bc.pop(k, None)
+            _bc_locks.pop(k, None)
     return v
 
 

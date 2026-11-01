@@ -157,6 +157,7 @@
     if (!keep) needFit = true;
     var my = ++reqId, s = sym, t = TF;
     inflight++;
+    if (!keep) document.getElementById('pcmsg').textContent = 'Loading ' + s + ' ' + tfLabel() + ' candles...';
     fetch('/paper/api/candles?symbol=' + encodeURIComponent(s) + '&tf=' + t).then(function (r) { return r.json(); }).then(function (j) {
       inflight--;
       if (my !== reqId || s !== sym || t !== TF) return;   // an older answer: ignore it
