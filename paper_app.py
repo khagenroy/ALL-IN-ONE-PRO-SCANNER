@@ -59,8 +59,20 @@ def install(app):
         return jsonify({"ok": p is not None, "price": p, "msg": err})
 
     def api_chartinfo():
-        d, err = pe.chart_info(request.args.get("symbol", ""))
+        d, err = pe.chart_info(request.args.get("symbol", ""), request.args.get("tf", "15"))
         return jsonify({"ok": d is not None, "info": d, "msg": err})
+
+    def api_candles():
+        bars, err = pe.candles_json(request.args.get("symbol", ""), request.args.get("tf", "5"))
+        return jsonify({"ok": bars is not None, "bars": bars or [], "msg": err})
+
+    def _js(name):
+        def view():
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), name), "rb") as f:
+                r = Response(f.read(), mimetype="application/javascript")
+            r.headers["Cache-Control"] = "private, max-age=300"
+            return r
+        return view
 
     def api_order():
         d = body()
@@ -100,6 +112,9 @@ def install(app):
     add("/paper/api/symbols", api_symbols)
     add("/paper/api/quote", api_quote)
     add("/paper/api/chartinfo", api_chartinfo)
+    add("/paper/api/candles", api_candles)
+    add("/paper/api/lw.js", _js("paper_lw.js"), name="paper_lw_js")
+    add("/paper/api/chart.js", _js("paper_chart.js"), name="paper_chart_js")
     for r, f in (("/paper/api/order", api_order), ("/paper/api/close", api_close), ("/paper/api/closeall", api_closeall),
                  ("/paper/api/cancel", api_cancel), ("/paper/api/reset", api_reset)):
         add(r, f, ("POST",))

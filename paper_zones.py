@@ -106,13 +106,13 @@ def live_zones(df):
             if choch_bull[i]:
                 lb = _lookback(i, high_idx)
                 seg = low[max(i - lb, 0): i + 1]
-                bull.append({"value": float(seg.min()), "atr": float(atr[i])})
+                bull.append({"value": float(seg.min()), "atr": float(atr[i]), "i0": int(max(i - lb, 0) + int(np.argmin(seg)))})
                 if len(bull) > 20:
                     bull.pop(0)
             if choch_bear[i]:
                 lb = _lookback(i, low_idx)
                 seg = high[max(i - lb, 0): i + 1]
-                bear.append({"value": float(seg.max()), "atr": float(atr[i])})
+                bear.append({"value": float(seg.max()), "atr": float(atr[i]), "i0": int(max(i - lb, 0) + int(np.argmax(seg)))})
                 if len(bear) > 20:
                     bear.pop(0)
             # a close through the zone deletes it - only checked for the newest NUMBER_OB_SHOW, like the indicator
@@ -131,9 +131,9 @@ def live_zones(df):
 
         out = []
         for ob in bull[-NUMBER_OB_SHOW:]:
-            out.append({"type": "SUPPORT", "lo": round(ob["value"], 2), "hi": round(ob["value"] + ob["atr"], 2), "value": ob["value"]})
+            out.append({"type": "SUPPORT", "lo": round(ob["value"], 2), "hi": round(ob["value"] + ob["atr"], 2), "value": ob["value"], "i0": ob.get("i0")})
         for ob in bear[-NUMBER_OB_SHOW:]:
-            out.append({"type": "RESISTANCE", "lo": round(ob["value"] - ob["atr"], 2), "hi": round(ob["value"], 2), "value": ob["value"]})
+            out.append({"type": "RESISTANCE", "lo": round(ob["value"] - ob["atr"], 2), "hi": round(ob["value"], 2), "value": ob["value"], "i0": ob.get("i0")})
         return out
     except Exception:
         return []

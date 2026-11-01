@@ -23,7 +23,13 @@ button.buy{background:#1f9d57}button.sell{background:#d6453d}button.sm{padding:4
 .me td{background:rgba(45,91,214,.18)}
 .cols{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(300px,1fr);gap:12px;align-items:start}.cols>div{min-width:0}
 @media(max-width:900px){.cols{grid-template-columns:1fr}}
-#tvbox{height:470px;border-radius:8px;overflow:hidden;background:#0f1520}
+#pchart{height:520px;border-radius:8px;overflow:hidden;background:#0f1520}
+.ch{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:2px 4px 8px}.ch b{font-size:16px;margin-right:4px}
+#ptf button{background:#47546f;padding:5px 11px;border-radius:6px;font-size:12px;margin-right:3px}#ptf button.on{background:#2d5bd6}
+#pind{display:none;position:absolute;left:0;top:30px;z-index:50;background:#141a26;border:1px solid #37445f;border-radius:8px;padding:8px 12px;width:230px;max-height:340px;overflow:auto}
+#pind label{display:flex;gap:8px;align-items:center;color:#e6e9ef;font-size:13px;margin:5px 0;cursor:pointer}#pind input{width:auto}
+#plegend{margin:0 4px 4px;min-height:16px;font-size:12px}
+#pcard.big{position:fixed;inset:0;z-index:100001;background:#0b0f16;border-radius:0;padding:10px;display:flex;flex-direction:column;margin:0}#pcard.big #pchart{flex:1;height:auto}#pcard.big p.note{display:none}
 .bd{display:inline-block;padding:2px 8px;border-radius:10px;font-size:12px;font-weight:700}.bd.sup{background:#1f9d57;color:#fff}.bd.res{background:#d6453d;color:#fff}
 .zr{display:flex;justify-content:space-between;gap:8px;padding:4px 0;border-bottom:1px solid #2a344a}
 </style>"""
@@ -59,9 +65,10 @@ def cls(v):
     return "g" if v > 0 else "r" if v < 0 else "m"
 
 
-TRADE_JS = r"""<script src="https://s3.tradingview.com/tv.js"></script>
+TRADE_JS = r"""<script src="/paper/api/lw.js"></script>
+<script src="/paper/api/chart.js" defer></script>
 <script>
-var side='BUY',ltp=null,S=null,cur='',tvOk=false;
+var side='BUY',ltp=null,S=null,cur='',tvOk=false,ptf=5;window.onPTf=function(t){ptf=t;if(cur)loadInfo(cur)};
 function $(i){return document.getElementById(i)}
 function fm(v,d){return v==null?'-':Number(v).toLocaleString('en-IN',{maximumFractionDigits:d==null?0:d,minimumFractionDigits:d==null?0:d})}
 function sg(v){return (v>0?'+':v<0?'-':'')+'Rs '+fm(Math.abs(v))}
@@ -80,36 +87,29 @@ function calc(){
       if(t1>0){var rw=Math.abs(t1-ref)*q;o+=' &middot; Reward at T1: <b class=g>Rs '+fm(rw)+'</b> (1 : '+(risk?(rw/risk).toFixed(1):'-')+')'}}
   }
   $('est').innerHTML=o;
+  if(window.PChart&&cur){var ent=0;if(S)S.positions.forEach(function(x){if(x.symbol===cur)ent=x.entry});PChart.setLevels({entry:ent||lim||0,sl:sl>0?sl:0,t1:t1>0?t1:0,t2:t2>0?t2:0})}
 }
 function getQuote(){
   var s=$('sym').value.trim().toUpperCase();ltp=null;$('q').textContent='';if(!s){calc();return}
   if(s!==cur&&document.activeElement!==$('sym'))symChanged(s);
   fetch('/paper/api/quote?symbol='+encodeURIComponent(s)).then(function(r){return r.json()}).then(function(j){
-    if(j.ok){ltp=j.price;$('q').innerHTML='Live price: <b>'+fm(j.price,2)+'</b>'}else{$('q').textContent=j.msg}calc()})
+    if(j.ok){ltp=j.price;$('q').innerHTML='Live price: <b>'+fm(j.price,2)+'</b>';if(window.PChart)PChart.tick(j.price)}else{$('q').textContent=j.msg}calc()})
 }
 
-function tvSym(s){return 'NSE:'+String(s).replace(/-/g,'_')}
-function showChart(sym){
-  var b=$('tvbox');if(!b)return;
-  if(typeof TradingView==='undefined'){b.innerHTML='<p class=note style="padding:12px">The chart could not load (TradingView is blocked on this network). The order form still works.</p>';return}
-  b.innerHTML='<div id=tvin style="height:100%"></div>';
-  new TradingView.widget({autosize:true,container_id:'tvin',symbol:tvSym(sym),interval:'5',timezone:'Asia/Kolkata',theme:'dark',style:'1',locale:'en',
-    toolbar_bg:'#141a26',enable_publishing:false,allow_symbol_change:true,hide_side_toolbar:false,withdateranges:true,
-    studies:['Volume@tv-basicstudies','VWAP@tv-basicstudies','MAExp@tv-basicstudies']});
-}
+function showChart(sym){if(window.PChart)PChart.setSymbol(sym)}
 function zr(label,z,cls2){return z?'<div class=zr><span>'+label+'</span><span><b>'+fm(z.lo,2)+' - '+fm(z.hi,2)+'</b> <span class=m>('+z.dist+'% away)</span></span></div>':'<div class=zr><span>'+label+'</span><span class=m>none found</span></div>'}
 function loadInfo(sym){
   var el=$('info');if(!el||!sym)return;
   el.innerHTML='<span class=note>Reading zones and volume...</span>';
-  fetch('/paper/api/chartinfo?symbol='+encodeURIComponent(sym)).then(function(r){return r.json()}).then(function(j){
+  fetch('/paper/api/chartinfo?symbol='+encodeURIComponent(sym)+'&tf='+ptf).then(function(r){return r.json()}).then(function(j){
     if(!j.ok){el.innerHTML='<span class=note>'+esc(j.msg)+'</span>';return}
     var i=j.info,h='<div class=zr><span><b>'+esc(i.symbol)+'</b> '+fm(i.price,2)+'</span><span class='+cl(i.day_chg||0)+'>'+(i.day_chg==null?'':(i.day_chg>0?'+':'')+i.day_chg+'% today')+'</span></div>';
     if(i.at_zone)h+='<div style="margin:6px 0"><span class="bd '+(i.at_zone=='SUPPORT'?'sup':'res')+'">Price is AT a '+i.at_zone.toLowerCase()+' zone</span></div>';
     h+=zr('Nearest support',i.support)+zr('Nearest resistance',i.resistance);
     if(i.spurt){var m=i.spurt.multiple;h+='<div class=zr><span>Volume spurt (last 10-min candle, '+i.spurt.time+')</span><span><b'+(m>=5?' class=g':'')+'>'+m+'x</b></span></div>'}
     if(i.spurt_peak)h+='<div class=zr><span>Peak spurt today</span><span><b>'+i.spurt_peak.multiple+'x</b> <span class=m>at '+i.spurt_peak.time+'</span></span></div>';
-    h+='<p class=note style="margin:6px 0 0">Zones use the same order-block rules as the stock scanner (15-minute candles). Spurt = candle volume divided by the average of the 50 candles before it.</p>';
-    el.innerHTML=h});
+    h+='<p class=note style="margin:6px 0 0">Zones use the same order-block rules as your indicator, built on the candles of the timeframe selected on the chart. Spurt = candle volume divided by the average of the 50 candles before it.</p>';
+    el.innerHTML=h;if(window.PChart)PChart.setInfo(i)});
 }
 function symChanged(s){
   s=s.trim().toUpperCase();if(!s||s===cur)return;cur=s;showChart(s);loadInfo(s);
@@ -149,7 +149,7 @@ $('sym').addEventListener('input',function(){clearTimeout(tm);tm=setTimeout(sugg
 $('sym').addEventListener('change',function(){symChanged($('sym').value);getQuote()});
 ['qty','sl','t1','t2','lim','otype'].forEach(function(i){$(i).addEventListener('input',calc)});
 $('otype').addEventListener('change',calc);
-setSide('BUY');load();showChart('NIFTY');setInterval(function(){if(cur)loadInfo(cur)},60000);setInterval(load,4000);setInterval(function(){if($('sym').value)getQuote()},8000);
+setSide('BUY');load();cur='RELIANCE';setTimeout(function(){showChart('RELIANCE');loadInfo('RELIANCE')},300);setInterval(function(){if(cur)loadInfo(cur)},60000);setInterval(load,4000);setInterval(function(){if($('sym').value)getQuote()},8000);
 </script>"""
 
 
@@ -161,8 +161,18 @@ def trade_page(user):
 <div><span>Today</span><b id=k3>-</b></div><div><span>Free cash (margin)</span><b id=k4>-</b></div><div><span>Open trades P&amp;L</span><b id=k5>-</b></div></div></div>
 <div class=cols>
 <div>
-<div class=card style="padding:8px"><div id=tvbox></div>
-<p class=note style="margin:6px 4px 0">TradingView chart: use its <b>Indicators</b> button to add any public indicator, and the search box on top to change stock. The chart can be a few minutes behind - your order always uses the live Dhan price.</p></div>
+<div class=card id=pcard style="padding:8px">
+<div class=ch><b id=pctitle>Pick a stock</b>
+<span id=ptf><button data-tf=5 class=on>5m</button><button data-tf=15>15m</button><button data-tf=60>1h</button></span>
+<span style="position:relative"><button id=pindbtn class=sm>Indicators &#9662;</button><div id=pind>
+<label><input type=checkbox data-k=vol>Volume</label><label><input type=checkbox data-k=vwap>VWAP</label>
+<label><input type=checkbox data-k=ema9>EMA 9</label><label><input type=checkbox data-k=ema20>EMA 20</label><label><input type=checkbox data-k=ema50>EMA 50</label><label><input type=checkbox data-k=sma200>SMA 200</label>
+<label><input type=checkbox data-k=bb>Bollinger Bands</label><label><input type=checkbox data-k=st>Supertrend (10,3)</label>
+<label><input type=checkbox data-k=rsi>RSI 14</label><label><input type=checkbox data-k=macd>MACD</label>
+<label><input type=checkbox data-k=spurt>Volume spurt marks (5x+)</label><label><input type=checkbox data-k=zones>Support / resistance zones</label><label><input type=checkbox data-k=lines>Entry / SL / target lines</label></div></span>
+<button id=pbig class=sm>Enlarge &#9974;</button><a id=ptvlink href="https://in.tradingview.com/" target=_blank rel=noopener class=note style="color:#7db3ff">Open in TradingView &#8599;</a></div>
+<div id=plegend class=note></div><div id=pchart></div><div id=pcmsg class=note></div>
+<p class=note style="margin:6px 4px 0">Our own chart on live Dhan data. Pick a stock in the order form (or open one from your scanner pages). Choose indicators with the <b>Indicators</b> button; they are remembered on this device. Yellow circles mark candles with 5x or more volume. Green and red boxes are the support and resistance zones (order blocks) as in the indicator; your entry, SL and targets are drawn as you type them.</p></div>
 <div class=card><h3>Zones and volume (from the scanner rules)</h3><div id=info><span class=note>Pick a stock to see its support / resistance zones and volume spurt.</span></div></div>
 </div>
 <div>
