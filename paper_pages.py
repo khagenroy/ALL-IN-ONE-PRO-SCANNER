@@ -27,7 +27,7 @@ button.buy{background:#1f9d57}button.sell{background:#d6453d}button.sm{padding:4
 @media(max-width:900px){.cols{grid-template-columns:1fr}}
 #pchart{height:520px;border-radius:8px;overflow:hidden;background:#0f1520}
 .ch{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:2px 4px 8px}.ch b{font-size:16px;margin-right:4px}
-#ptf{display:inline-flex;flex-wrap:wrap;gap:3px}#ptf button{background:#47546f;padding:5px 9px;border-radius:6px;font-size:12px;margin-right:3px}#ptf button.on{background:#2d5bd6}
+#ptfbtn{min-width:62px}#ptf{display:none;position:absolute;left:0;top:32px;z-index:55;background:#141a26;border:1px solid #37445f;border-radius:8px;padding:8px;width:210px;grid-template-columns:repeat(4,1fr);gap:4px;box-shadow:0 8px 24px rgba(0,0,0,.5)}#ptf.open{display:grid}#ptf .tfh{grid-column:1/-1;font-size:11px;color:#9aa8bf;text-transform:uppercase;letter-spacing:.4px;margin:4px 0 0}#ptf .tfh:first-child{margin-top:0}#ptf button{background:#47546f;padding:6px 0;border-radius:6px;font-size:12px}#ptf button.on{background:#2d5bd6}
 #pind{display:none;position:absolute;left:0;top:30px;z-index:50;background:#141a26;border:1px solid #37445f;border-radius:8px;padding:8px 12px;width:230px;max-height:340px;overflow:auto}
 #pind label{display:flex;gap:8px;align-items:center;color:#e6e9ef;font-size:13px;margin:5px 0;cursor:pointer}#pind input{width:auto}
 #plegend{margin:0 4px 4px;min-height:16px;font-size:12px}
@@ -81,7 +81,7 @@ def ptag(product):
 TRADE_JS = r"""<script src="/paper/api/lw.js"></script>
 <script src="/paper/api/chart.js" defer></script>
 <script>
-var side='BUY',prod='INTRADAY',ltp=null,S=null,cur='',tvOk=false,ptf='5';window.onPTf=function(t){ptf=t;if(cur)loadInfo(cur)};
+var side='BUY',prod='INTRADAY',ltp=null,S=null,cur='',tvOk=false,ptf='5';window.onPTf=function(t){ptf=t;var b=document.getElementById('ptfbtn'),m=+t;if(b)b.innerHTML=(isNaN(m)?t:(m>=60?(m/60)+'h':m+'m'))+' &#9662;';var d=document.getElementById('ptf');if(d)d.classList.remove('open');if(cur)loadInfo(cur)};
 function $(i){return document.getElementById(i)}
 function fm(v,d){return v==null?'-':Number(v).toLocaleString('en-IN',{maximumFractionDigits:d==null?0:d,minimumFractionDigits:d==null?0:d})}
 function sg(v){return (v>0?'+':v<0?'-':'')+'Rs '+fm(Math.abs(v))}
@@ -194,6 +194,7 @@ $('sym').addEventListener('input',function(){clearTimeout(tm);tm=setTimeout(sugg
 $('sym').addEventListener('change',function(){symChanged($('sym').value);getQuote()});
 ['qty','sl','t1','t2','lim','otype'].forEach(function(i){$(i).addEventListener('input',calc)});
 $('otype').addEventListener('change',calc);
+(function(){var b=$('ptfbtn'),d=$('ptf');b.addEventListener('click',function(e){e.stopPropagation();d.classList.toggle('open');var pi=$('pind');if(pi)pi.style.display='none'});d.addEventListener('click',function(e){e.stopPropagation()});document.addEventListener('click',function(){d.classList.remove('open')});document.addEventListener('keydown',function(e){if(e.key==='Escape')d.classList.remove('open')})})();
 setSide('BUY');setProd('INTRADAY');load();cur='RELIANCE';pcFill();if(!$('sym').value.trim())$('sym').value=cur;getQuote();setTimeout(function(){showChart('RELIANCE');loadInfo('RELIANCE')},300);setInterval(function(){if(cur)loadInfo(cur)},60000);setInterval(load,4000);setInterval(function(){if($('sym').value)getQuote()},8000);
 </script>"""
 
@@ -209,7 +210,7 @@ def trade_page(user):
 <div class=card id=pcard style="padding:8px">
 <div class=ch><b id=pctitle style="display:none">Pick a stock</b>
 <span id=pcs><span class=ic>&#128269;</span><input id=pcsearch autocomplete=off spellcheck=false placeholder="Search stock" title="Search any NSE stock"><div id=pcdd></div></span>
-<span id=ptf><button data-tf=5 class=on>5m</button><button data-tf=15>15m</button><button data-tf=30>30m</button><button data-tf=45>45m</button><button data-tf=60>1h</button><button data-tf=120>2h</button><button data-tf=180>3h</button><button data-tf=240>4h</button><button data-tf=D>D</button><button data-tf=W>W</button><button data-tf=M>M</button></span>
+<span style="position:relative"><button id=ptfbtn class=sm title="Timeframe">5m &#9662;</button><div id=ptf><div class=tfh>Minutes</div><button data-tf=5 class=on>5m</button><button data-tf=15>15m</button><button data-tf=30>30m</button><button data-tf=45>45m</button><div class=tfh>Hours</div><button data-tf=60>1h</button><button data-tf=120>2h</button><button data-tf=180>3h</button><button data-tf=240>4h</button><div class=tfh>Days</div><button data-tf=D>D</button><button data-tf=W>W</button><button data-tf=M>M</button></div></span>
 <span style="position:relative"><button id=pindbtn class=sm>Indicators &#9662;</button><div id=pind>
 <label><input type=checkbox data-k=vol>Volume</label><label><input type=checkbox data-k=vwap>VWAP</label>
 <label><input type=checkbox data-k=ema9>EMA 9</label><label><input type=checkbox data-k=ema20>EMA 20</label><label><input type=checkbox data-k=ema50>EMA 50</label><label><input type=checkbox data-k=sma200>SMA 200</label>
