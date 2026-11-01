@@ -230,9 +230,25 @@ _CANDLES, _BULL, _BEAR = _art()
 DISCLAIMER = ("Disclaimer: for education and information only. Nothing here is investment advice or a recommendation to buy or sell. "
               "Trading in stocks, futures and options carries a high risk of loss, including all your money. Past results do not guarantee future results. "
               "You alone are responsible for your own decisions.")
-_FOOT_CSS = ("#ag-foot{position:fixed;left:0;right:0;bottom:0;z-index:99998;padding:5px 14px;background:rgba(11,15,22,.94);border-top:1px solid #2f3a50;"
-             "color:#8d9bb0;font:11px/1.35 system-ui,Arial,sans-serif;text-align:center}")
-_FOOT = f"<div id=ag-foot>{DISCLAIMER}</div>"
+# bright amber disclaimer bar with a slow glow pulse, so nobody can miss it (no pulse for people whose device asks for reduced motion)
+_FOOT_CSS = ("#ag-foot{position:fixed;left:0;right:0;bottom:0;z-index:99998;padding:7px 14px;"
+             "background:linear-gradient(90deg,#f59e0b,#fbbf24,#f59e0b);border-top:2px solid #fde68a;"
+             "color:#1a1200;font:700 12.5px/1.4 system-ui,Arial,sans-serif;text-align:center;letter-spacing:.2px;"
+             "animation:agpulse 2s ease-in-out infinite}"
+             "#ag-foot .ic{font-size:15px;margin-right:4px;vertical-align:-1px}"
+             "@keyframes agpulse{0%,100%{box-shadow:0 -2px 10px rgba(245,158,11,.45);filter:brightness(1)}"
+             "50%{box-shadow:0 -4px 26px rgba(251,191,36,1);filter:brightness(1.18)}}"
+             "@media(prefers-reduced-motion:reduce){#ag-foot{animation:none}}"
+             "#ag-foot .sh{display:none}"
+             # phones: short disclaimer (the full text would cover a quarter of the screen), top bar scrolls away instead of sticking
+             "@media(max-width:640px){#ag-foot .fl{display:none}#ag-foot .sh{display:inline}#ag-foot{font-size:12px;padding:6px 10px}"
+             "#ag-bar{position:static!important}}"
+             # phones and tablets: the index strip is one line that scrolls sideways, on its own row
+             "#ag-idx{flex-wrap:nowrap!important;overflow-x:auto;max-width:100%;scrollbar-width:none;-webkit-overflow-scrolling:touch}"
+             "#ag-idx::-webkit-scrollbar{display:none}#ag-idx>span{flex:0 0 auto}"
+             "@media(max-width:1000px){#ag-idx{order:3;flex-basis:100%}}")
+DISCLAIMER_SHORT = "Education only - not investment advice. Trading can lose all your money. You alone are responsible for your decisions."
+_FOOT = f"<div id=ag-foot><span class=ic>&#9888;</span><span class=fl>{DISCLAIMER}</span><span class=sh>{DISCLAIMER_SHORT}</span></div>"
 _IDX_BOX = "<span id=ag-idx style='display:none;gap:6px;flex-wrap:wrap;align-items:center'></span>"
 _IDX_JS = ("<script>(function(){var b=document.getElementById('ag-idx');if(!b)return;function f(n){return n==null?'-':n.toLocaleString('en-IN',{maximumFractionDigits:2})}"
            "function go(){fetch('/indices.json',{credentials:'same-origin'}).then(function(r){return r.ok?r.json():null}).then(function(d){"
@@ -255,7 +271,7 @@ _CSS = (_ART_CSS + "body{font-family:system-ui,Arial,sans-serif;background:" + _
 
 def _page(title, body, status=200, wide=False):
     st = _CSS + (".b{max-width:640px}" if wide else ".b{margin-top:110px}")
-    html = f"<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'><meta name=ag-own content=1><title>{escape(title)}</title><style>{st}{_FOOT_CSS}body{{padding-bottom:70px!important}}</style><div class=b>{body}{_contact_line()}</div>{_FOOT}"
+    html = f"<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'><meta name=ag-own content=1><title>{escape(title)}</title><style>{st}{_FOOT_CSS}body{{padding-bottom:76px!important}}</style><div class=b>{body}{_contact_line()}</div>{_FOOT}"
     return Response(html, status=status, mimetype="text/html")
 
 
@@ -615,7 +631,7 @@ def add_menu(app):
                ".g{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px;padding:12px 14px}section{background:rgba(24,29,39,.82);border:1px solid #2f3a50;border-radius:12px;padding:10px 12px;box-shadow:0 6px 20px rgba(0,0,0,.35);transition:transform .15s,border-color .15s}section:hover{transform:translateY(-2px);border-color:#4a6fb0}"
                "h3{margin:0 0 6px;font-size:13px;color:#8fb4ff;text-transform:uppercase;letter-spacing:.5px}.r{display:flex;flex-wrap:wrap;align-items:center;gap:4px;padding:2px 0;font-size:13px}"
                ".pg{background:linear-gradient(135deg,#2f6fdc,#4a86f0);box-shadow:0 2px 8px rgba(47,111,220,.4);color:#fff;font-weight:600;padding:2px 9px;border-radius:6px;margin-right:4px}.pg:hover{background:#4a86f0}a{color:#7db3ff;text-decoration:none}"
-               ".ch{font-size:11px;background:#1d232e;border:1px dashed #3a4558;border-radius:10px;padding:0 6px;color:#8d9bb0}.ch:before{content:\"\\2193 \"}body{padding-bottom:50px}" + _FOOT_CSS)
+               ".ch{font-size:11px;background:#1d232e;border:1px dashed #3a4558;border-radius:10px;padding:0 6px;color:#8d9bb0}.ch:before{content:\"\\2193 \"}body{padding-bottom:64px}" + _FOOT_CSS)
         note = "(blue = open the scanner, grey \u2193 = download CSV)"
         html = (f"<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'><meta name=ag-own content=1><title>Scanner</title><style>{css}</style>"
                 f"<div class=t><span><b style='font-size:16px;letter-spacing:.3px'>&#9889; Scanner pages</b> <span style='color:#8d9bb0;font-size:12px'>{note}</span></span>{_IDX_BOX}<span>{top}</span></div><div class=g>{cards}</div>{_contact_line()}{_FOOT}{_IDX_JS}")
@@ -706,7 +722,9 @@ def add_theme(app):
            "<span><a href='/' style='color:#fff;font-weight:700;text-decoration:none'>&#9889; Home</a></span>" + _IDX_BOX +
            "<span>__LINKS__</span></div>")
     css = ("<style id=ag-theme>html{--agov:rgba(8,12,20,.80)}html::before{content:'';position:fixed;inset:0;z-index:-1;pointer-events:none;"
-           "background:linear-gradient(var(--agov),var(--agov)),url(/bg/page.jpg) center/cover no-repeat}" + _FOOT_CSS + "body{padding-bottom:56px!important}</style>")
+           "background:linear-gradient(var(--agov),var(--agov)),url(/bg/page.jpg) center/cover no-repeat}" + _FOOT_CSS + "body{padding-bottom:64px!important}"
+           "@media(max-width:900px){table{display:block;max-width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch}img{max-width:100%;height:auto}}</style>")
+    vp = "<meta name=viewport content='width=device-width,initial-scale=1'>"
     js = ("<script id=ag-js>(function(){try{var b=document.body,c=getComputedStyle(b).backgroundColor,m=c.match(/[\\d.]+/g)||[],a=m.length>3?+m[3]:1;"
           "var dark=a>0&&m.length>=3&&(0.299*m[0]+0.587*m[1]+0.114*m[2])<110;var plain=a===0&&!document.querySelector('table,canvas,svg,img,input,button')&&(b.innerText||'').length<500;if(plain){dark=true}var s=document.createElement('style');"
           "s.textContent='html{background:'+(dark?'#0b0f16':'#e8edf5')+'!important}body{background:transparent!important}'+(plain?'body{color:#e6e9ef!important;font:16px system-ui,Arial,sans-serif!important;padding:18px!important}':'');if(!dark)document.documentElement.style.setProperty('--agov','rgba(236,241,248,.90)');"
@@ -726,6 +744,13 @@ def add_theme(app):
                 links += " &middot; <a href='/admin/users' style='color:#7db3ff;text-decoration:none'>Users</a>"
             links += f" &middot; <a href='/password' style='color:#7db3ff;text-decoration:none'>Password</a> &middot; <a href='/logout' style='color:#7db3ff;text-decoration:none'>Logout ({escape(str(session.get('user', '')))})</a>"
             tb = bar.replace("__LINKS__", links)
+            if not re.search(r"<meta[^>]+name\s*=\s*[\"']?viewport", html, re.I):
+                if re.search(r"<head[^>]*>", html, re.I):
+                    html = re.sub(r"(<head[^>]*>)", lambda m_: m_.group(1) + vp, html, count=1, flags=re.I)
+                elif re.match(r"\s*<!doctype[^>]*>", html, re.I):
+                    html = re.sub(r"^(\s*<!doctype[^>]*>)", lambda m_: m_.group(1) + vp, html, count=1, flags=re.I)
+                else:
+                    html = vp + html
             if re.search(r"<body[^>]*>", html, re.I):
                 html = re.sub(r"(<body[^>]*>)", lambda m_: m_.group(1) + tb, html, count=1, flags=re.I)
             else:
