@@ -59,7 +59,8 @@ def install(app):
         return jsonify({"ok": p is not None, "price": p, "msg": err})
 
     def api_chartinfo():
-        d, err = pe.chart_info(request.args.get("symbol", ""), request.args.get("tf", "15"))
+        d, err = pe.chart_info(request.args.get("symbol", ""), request.args.get("tf", "15"),
+                               request.args.get("zz"), request.args.get("nob"), request.args.get("zatr"))
         return jsonify({"ok": d is not None, "info": d, "msg": err})
 
     def api_candles():

@@ -49,9 +49,14 @@ def _times(df):
     return None
 
 
-def live_zones(df):
+def live_zones(df, zigzag_len=None, ob_show=None, atr_len=None):
     """df = candles (open/high/low/close, date index), oldest first, last row = latest closed candle.
+    Optional settings (left out = the same values as the ALL IN ONE PRO indicator): zigzag_len (swing length),
+    ob_show (zones kept per side), atr_len (ATR length = zone height).
     Returns [{"type": "SUPPORT"|"RESISTANCE", "lo": float, "hi": float, "value": float}, ...]  ([] if not enough candles)."""
+    ZIGZAG_LEN = int(zigzag_len or globals()["ZIGZAG_LEN"])
+    NUMBER_OB_SHOW = int(ob_show or globals()["NUMBER_OB_SHOW"])
+    ATR_LEN = int(atr_len or globals()["ATR_LEN"])
     try:
         high = df["high"].to_numpy(dtype=float)
         low = df["low"].to_numpy(dtype=float)

@@ -5,6 +5,56 @@
   var OFF = 19800;                                  // show IST on the time axis
   var IND = { vol: 1, vwap: 1, ema20: 1, zones: 1, spurt: 1, ema9: 0, ema50: 0, sma200: 0, bb: 0, st: 0, rsi: 0, macd: 0, lines: 1 };
   try { var sv = JSON.parse(localStorage.getItem('pchart_ind') || 'null'); if (sv) for (var k in sv) IND[k] = sv[k]; } catch (e) {}
+  /* ---------- indicator settings (like TradingView): every indicator has its own settings, saved on this device ---------- */
+  var DEF = {
+    vol:    { up: '#26a69a', dn: '#ef5350' },
+    vwap:   { color: '#ffffff', w: 1 },
+    ema9:   { len: 9,   color: '#ffd54f', w: 1 },
+    ema20:  { len: 20,  color: '#42a5f5', w: 1 },
+    ema50:  { len: 50,  color: '#ab47bc', w: 1 },
+    sma200: { len: 200, color: '#ff7043', w: 2 },
+    bb:     { len: 20,  mult: 2, color: '#78909c', w: 1 },
+    st:     { len: 10,  mult: 3, up: '#26a69a', dn: '#ef5350', w: 2 },
+    rsi:    { len: 14,  ob: 70, os: 30, color: '#ba68c8', w: 1 },
+    macd:   { fast: 12, slow: 26, sig: 9, mcol: '#42a5f5', scol: '#ffb74d' },
+    spurt:  { mult: 5,  len: 50, color: '#ffd54f' },
+    zones:  { zz: 9, nob: 2, atr: 14, sup: '#26a69a', res: '#ef5350', op: 20, lab: 1 },
+    lines:  {}
+  };
+  /* rows of the Indicators menu: key, name, settings fields [field, label, type, min, max, step] */
+  var ROWS = [
+    ['vol', 'Volume', [['up', 'Up colour', 'color'], ['dn', 'Down colour', 'color']]],
+    ['vwap', 'VWAP', [['color', 'Colour', 'color'], ['w', 'Line width', 'num', 1, 4, 1]]],
+    ['ema9', 'EMA', [['len', 'Length', 'num', 1, 500, 1], ['color', 'Colour', 'color'], ['w', 'Line width', 'num', 1, 4, 1]]],
+    ['ema20', 'EMA', [['len', 'Length', 'num', 1, 500, 1], ['color', 'Colour', 'color'], ['w', 'Line width', 'num', 1, 4, 1]]],
+    ['ema50', 'EMA', [['len', 'Length', 'num', 1, 500, 1], ['color', 'Colour', 'color'], ['w', 'Line width', 'num', 1, 4, 1]]],
+    ['sma200', 'SMA', [['len', 'Length', 'num', 1, 500, 1], ['color', 'Colour', 'color'], ['w', 'Line width', 'num', 1, 4, 1]]],
+    ['bb', 'Bollinger Bands', [['len', 'Length', 'num', 2, 200, 1], ['mult', 'Std dev', 'num', 0.5, 5, 0.1], ['color', 'Colour', 'color']]],
+    ['st', 'Supertrend', [['len', 'ATR length', 'num', 1, 100, 1], ['mult', 'Factor', 'num', 0.5, 10, 0.1], ['up', 'Up colour', 'color'], ['dn', 'Down colour', 'color']]],
+    ['rsi', 'RSI', [['len', 'Length', 'num', 2, 100, 1], ['ob', 'Overbought', 'num', 50, 100, 1], ['os', 'Oversold', 'num', 0, 50, 1], ['color', 'Colour', 'color']]],
+    ['macd', 'MACD', [['fast', 'Fast length', 'num', 1, 100, 1], ['slow', 'Slow length', 'num', 2, 200, 1], ['sig', 'Signal length', 'num', 1, 50, 1], ['mcol', 'MACD colour', 'color'], ['scol', 'Signal colour', 'color']]],
+    ['spurt', 'Volume spurt marks', [['mult', 'Min. spurt (x average)', 'num', 1, 100, 0.5], ['len', 'Average of last N candles', 'num', 5, 200, 1], ['color', 'Colour', 'color']]],
+    ['zones', 'Support / resistance zones', [['zz', 'Swing length', 'num', 3, 50, 1], ['nob', 'Zones per side', 'num', 1, 5, 1], ['atr', 'Zone height (ATR length)', 'num', 2, 100, 1],
+      ['sup', 'Support colour', 'color'], ['res', 'Resistance colour', 'color'], ['op', 'Fill opacity %', 'num', 5, 80, 1], ['lab', 'Show labels', 'bool']]],
+    ['lines', 'Entry / SL / target lines', []]
+  ];
+  var CFG = JSON.parse(JSON.stringify(DEF));
+  try { var sc = JSON.parse(localStorage.getItem('pchart_cfg') || 'null'); if (sc) for (var k2 in sc) if (CFG[k2]) for (var f in sc[k2]) CFG[k2][f] = sc[k2][f]; } catch (e) {}
+  function saveCfg() { try { localStorage.setItem('pchart_cfg', JSON.stringify(CFG)); } catch (e) {} }
+  function rowLabel(r) {
+    var c = CFG[r[0]];
+    switch (r[0]) {
+      case 'ema9': case 'ema20': case 'ema50': case 'sma200': return r[1] + ' ' + c.len;
+      case 'bb': return 'Bollinger Bands (' + c.len + ', ' + c.mult + ')';
+      case 'st': return 'Supertrend (' + c.len + ', ' + c.mult + ')';
+      case 'rsi': return 'RSI ' + c.len;
+      case 'macd': return 'MACD (' + c.fast + ', ' + c.slow + ', ' + c.sig + ')';
+      case 'spurt': return 'Volume spurt marks (' + c.mult + 'x+)';
+      case 'zones': return 'Support / resistance zones (' + c.zz + ')';
+      default: return r[1];
+    }
+  }
+
   var TF = '5', sym = '', bars = [], extra = [], plines = [], info = null, S = { levels: {} };
   var chart = LW.createChart(el, {
     layout: { background: { color: '#0f1520' }, textColor: '#c8d1e0', panes: { separatorColor: '#2a344a' } },
@@ -46,18 +96,21 @@
           if (y1 == null || y2 == null) return;
           var x = null; if (z.tt != null) x = self.chart.timeScale().timeToCoordinate(z.tt);
           var x0 = x == null ? 0 : Math.max(0, Math.round(x * hr));
-          var sup = z.type === 'SUPPORT';
-          ctx.fillStyle = sup ? 'rgba(38,166,154,0.20)' : 'rgba(239,83,80,0.20)';
+          var sup = z.type === 'SUPPORT', zc = CFG.zones, col = sup ? zc.sup : zc.res;
+          ctx.fillStyle = rgba(col, (+zc.op) / 100);
           ctx.fillRect(x0, Math.round(y1 * vr), W - x0, Math.max(2, Math.round((y2 - y1) * vr)));
-          ctx.strokeStyle = sup ? 'rgba(38,166,154,0.9)' : 'rgba(239,83,80,0.9)'; ctx.lineWidth = Math.max(1, Math.round(hr));
+          ctx.strokeStyle = rgba(col, 0.9); ctx.lineWidth = Math.max(1, Math.round(hr));
           ctx.strokeRect(x0 + 0.5, Math.round(y1 * vr) + 0.5, W - x0, Math.max(2, Math.round((y2 - y1) * vr)));
-          ctx.fillStyle = sup ? '#7fe3d6' : '#ff9a97'; ctx.font = Math.round(11 * vr) + 'px system-ui,Arial';
+          if (!+zc.lab) return;
+          ctx.fillStyle = col; ctx.font = Math.round(11 * vr) + 'px system-ui,Arial';
           ctx.fillText((sup ? 'Support OB ' : 'Resistance OB ') + z.lo + ' - ' + z.hi, x0 + 6 * hr, Math.round(y1 * vr) + 13 * vr);
         });
       });
     } }; } }];
   };
   var zprim = null;
+  function rgba(hex, a) { var h = String(hex || '#888888').replace('#', ''); if (h.length === 3) h = h.replace(/./g, '$&$&');
+    var n = parseInt(h, 16); return 'rgba(' + ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')'; }
   function snap(t0) { if (t0 == null || !bars.length) return null; var tt = t0 + OFF, lo = 0, hi = bars.length - 1, r = 0;
     while (lo <= hi) { var m = (lo + hi) >> 1; if (bars[m].t + OFF <= tt) { r = m; lo = m + 1; } else hi = m - 1; } return bars[r].t + OFF; }
 
@@ -89,33 +142,33 @@
     if (IND.vol) {
       var vs = chart.addSeries(LW.HistogramSeries, { priceFormat: { type: 'volume' }, priceScaleId: 'vol', lastValueVisible: false, priceLineVisible: false });
       chart.priceScale('vol').applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
-      vs.setData(bars.map(function (b, i) { return { time: T(i), value: b.v, color: b.c >= b.o ? 'rgba(38,166,154,.45)' : 'rgba(239,83,80,.45)' }; })); extra.push(vs);
+      vs.setData(bars.map(function (b, i) { return { time: T(i), value: b.v, color: (b.c >= b.o ? CFG.vol.up : CFG.vol.dn) + '73' }; })); extra.push(vs);
     }
-    if (IND.ema9) line(ser(ema(closes, 9)), '#ffd54f', 0, 1, 'EMA9');
-    if (IND.ema20) line(ser(ema(closes, 20)), '#42a5f5', 0, 1, 'EMA20');
-    if (IND.ema50) line(ser(ema(closes, 50)), '#ab47bc', 0, 1, 'EMA50');
-    if (IND.sma200) line(ser(sma(closes, 200)), '#ff7043', 0, 2, 'SMA200');
-    if (IND.vwap && !htf()) { var pv = 0, vv = 0, cd0 = -1, vw = []; bars.forEach(function (b, i) { var d = day(b.t); if (d !== cd0) { cd0 = d; pv = 0; vv = 0; } pv += (b.h + b.l + b.c) / 3 * b.v; vv += b.v; vw.push(vv ? pv / vv : null); }); line(ser(vw), '#ffffff', 0, 1, 'VWAP'); }
-    if (IND.bb) { var m = sma(closes, 20), up = [], lo = []; for (var i = 0; i < closes.length; i++) { if (m[i] == null) { up.push(null); lo.push(null); continue; } var s = 0; for (var j = i - 19; j <= i; j++) s += Math.pow(closes[j] - m[i], 2); var sd = Math.sqrt(s / 20); up.push(m[i] + 2 * sd); lo.push(m[i] - 2 * sd); }
-      line(ser(m), '#78909c', 0, 1, ''); line(ser(up), '#78909c', 0, 1, ''); line(ser(lo), '#78909c', 0, 1, ''); }
-    if (IND.st) { var a = atr(bars, 10), fu = [], fl = [], dir = 1, stU = [], stD = []; for (i = 0; i < bars.length; i++) { if (a[i] == null) { fu.push(null); fl.push(null); continue; }
-        var hl = (bars[i].h + bars[i].l) / 2, bu = hl + 3 * a[i], bl = hl - 3 * a[i]; var pu = fu[i - 1], pl_ = fl[i - 1];
+    ['ema9', 'ema20', 'ema50'].forEach(function (k) { var c = CFG[k]; if (IND[k]) line(ser(ema(closes, +c.len)), c.color, 0, +c.w, 'EMA' + c.len); });
+    if (IND.sma200) { var cs = CFG.sma200; line(ser(sma(closes, +cs.len)), cs.color, 0, +cs.w, 'SMA' + cs.len); }
+    if (IND.vwap && !htf()) { var pv = 0, vv = 0, cd0 = -1, vw = []; bars.forEach(function (b, i) { var d = day(b.t); if (d !== cd0) { cd0 = d; pv = 0; vv = 0; } pv += (b.h + b.l + b.c) / 3 * b.v; vv += b.v; vw.push(vv ? pv / vv : null); }); line(ser(vw), CFG.vwap.color, 0, +CFG.vwap.w, 'VWAP'); }
+    var i, j;
+    if (IND.bb) { var bL = +CFG.bb.len, bM = +CFG.bb.mult, m = sma(closes, bL), up = [], lo = []; for (i = 0; i < closes.length; i++) { if (m[i] == null) { up.push(null); lo.push(null); continue; } var s = 0; for (j = i - bL + 1; j <= i; j++) s += Math.pow(closes[j] - m[i], 2); var sd = Math.sqrt(s / bL); up.push(m[i] + bM * sd); lo.push(m[i] - bM * sd); }
+      line(ser(m), CFG.bb.color, 0, 1, ''); line(ser(up), CFG.bb.color, 0, 1, ''); line(ser(lo), CFG.bb.color, 0, 1, ''); }
+    if (IND.st) { var sF = +CFG.st.mult, a = atr(bars, +CFG.st.len), fu = [], fl = [], dir = 1, stU = [], stD = []; for (i = 0; i < bars.length; i++) { if (a[i] == null) { fu.push(null); fl.push(null); continue; }
+        var hl = (bars[i].h + bars[i].l) / 2, bu = hl + sF * a[i], bl = hl - sF * a[i]; var pu = fu[i - 1], pl_ = fl[i - 1];
         fu.push(pu == null || bu < pu || bars[i - 1].c > pu ? bu : pu); fl.push(pl_ == null || bl > pl_ || bars[i - 1].c < pl_ ? bl : pl_);
         if (dir === 1 && bars[i].c < fl[i]) dir = -1; else if (dir === -1 && bars[i].c > fu[i]) dir = 1;
         stU.push(dir === 1 ? { time: T(i), value: fl[i] } : { time: T(i) }); stD.push(dir === -1 ? { time: T(i), value: fu[i] } : { time: T(i) }); }
-      var s1 = chart.addSeries(LW.LineSeries, { color: '#26a69a', lineWidth: 2, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false }); s1.setData(stU); extra.push(s1);
-      var s2 = chart.addSeries(LW.LineSeries, { color: '#ef5350', lineWidth: 2, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false }); s2.setData(stD); extra.push(s2); }
+      var s1 = chart.addSeries(LW.LineSeries, { color: CFG.st.up, lineWidth: 2, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false }); s1.setData(stU); extra.push(s1);
+      var s2 = chart.addSeries(LW.LineSeries, { color: CFG.st.dn, lineWidth: 2, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false }); s2.setData(stD); extra.push(s2); }
     var pane = 1;
-    if (IND.rsi) { var r = line(ser(rsi(closes, 14)), '#ba68c8', pane, 1, 'RSI14'); r.createPriceLine({ price: 70, color: '#ef5350', lineWidth: 1, lineStyle: 2, axisLabelVisible: false, title: '' }); r.createPriceLine({ price: 30, color: '#26a69a', lineWidth: 1, lineStyle: 2, axisLabelVisible: false, title: '' }); try { chart.panes()[pane].setHeight(110); } catch (e) {} pane++; }
-    if (IND.macd) { var e12 = ema(closes, 12), e26 = ema(closes, 26), mc = [], k = 0; for (i = 0; i < closes.length; i++) mc.push(e12[i] != null && e26[i] != null ? e12[i] - e26[i] : null);
-      var base = mc.map(function (v) { return v == null ? 0 : v; }), sg = ema(base, 9); for (i = 0; i < sg.length; i++) if (mc[i] == null || i < 33) sg[i] = null;
+    if (IND.rsi) { var r = line(ser(rsi(closes, +CFG.rsi.len)), CFG.rsi.color, pane, +CFG.rsi.w, 'RSI' + CFG.rsi.len); r.createPriceLine({ price: +CFG.rsi.ob, color: '#ef5350', lineWidth: 1, lineStyle: 2, axisLabelVisible: false, title: '' }); r.createPriceLine({ price: +CFG.rsi.os, color: '#26a69a', lineWidth: 1, lineStyle: 2, axisLabelVisible: false, title: '' }); try { chart.panes()[pane].setHeight(110); } catch (e) {} pane++; }
+    if (IND.macd) { var mF = +CFG.macd.fast, mS = +CFG.macd.slow, mG = +CFG.macd.sig, e12 = ema(closes, mF), e26 = ema(closes, mS), mc = []; for (i = 0; i < closes.length; i++) mc.push(e12[i] != null && e26[i] != null ? e12[i] - e26[i] : null);
+      var base = mc.map(function (v) { return v == null ? 0 : v; }), sg = ema(base, mG), first = Math.max(mF, mS) + mG - 2; for (i = 0; i < sg.length; i++) if (mc[i] == null || i < first) sg[i] = null;
       var hs = chart.addSeries(LW.HistogramSeries, { priceLineVisible: false, lastValueVisible: false }, pane);
       hs.setData(bars.map(function (b, i) { return mc[i] != null && sg[i] != null ? { time: T(i), value: mc[i] - sg[i], color: mc[i] - sg[i] >= 0 ? 'rgba(38,166,154,.6)' : 'rgba(239,83,80,.6)' } : { time: T(i) }; })); extra.push(hs);
-      line(ser(mc.map(function (v, i) { return sg[i] != null ? v : null; })), '#42a5f5', pane, 1, 'MACD'); line(ser(sg), '#ffb74d', pane, 1, 'Signal');
+      line(ser(mc.map(function (v, i) { return sg[i] != null ? v : null; })), CFG.macd.mcol, pane, 1, 'MACD'); line(ser(sg), CFG.macd.scol, pane, 1, 'Signal');
       try { chart.panes()[pane].setHeight(110); } catch (e) {} pane++; }
     // spurt markers (volume of the candle / average of the 50 candles before it)
     var mk = [];
-    if (IND.spurt) for (i = 50; i < bars.length; i++) { var s = 0; for (j = i - 50; j < i; j++) s += bars[j].v; var base2 = s / 50; if (base2 > 0 && bars[i].v / base2 >= 5) mk.push({ time: T(i), position: bars[i].c >= bars[i].o ? 'belowBar' : 'aboveBar', color: '#ffd54f', shape: 'circle', text: (bars[i].v / base2).toFixed(0) + 'x' }); }
+    var spN = +CFG.spurt.len, spX = +CFG.spurt.mult;
+    if (IND.spurt) for (i = spN; i < bars.length; i++) { var s = 0; for (j = i - spN; j < i; j++) s += bars[j].v; var base2 = s / spN; if (base2 > 0 && bars[i].v / base2 >= spX) mk.push({ time: T(i), position: bars[i].c >= bars[i].o ? 'belowBar' : 'aboveBar', color: CFG.spurt.color, shape: 'circle', text: (bars[i].v / base2).toFixed(0) + 'x' }); }
     markers.setMarkers(mk);
     // zones from the scanner rules
     if (IND.zones && info && info.zones && info.zones.length) { zprim = new ZonePrim(info.zones.map(function (z) { return { type: z.type, lo: z.lo, hi: z.hi, tt: snap(z.t0) }; })); candle.attachPrimitive(zprim); }
@@ -186,13 +239,57 @@
       b.c = price; b.h = Math.max(b.h, price); b.l = Math.min(b.l, price);
       candle.update({ time: T(bars.length - 1), open: b.o, high: b.h, low: b.l, close: price });
     },
-    refresh: function () { load(true); }
+    refresh: function () { load(true); },
+    zoneQuery: function () { var z = CFG.zones; return '&zz=' + z.zz + '&nob=' + z.nob + '&zatr=' + z.atr; }
   };
   /* ---------- controls ---------- */
   document.querySelectorAll('#ptf button').forEach(function (b) { b.addEventListener('click', function () { TF = b.dataset.tf; document.querySelectorAll('#ptf button').forEach(function (x) { x.classList.toggle('on', x === b); }); info = null; blank(); load(false); if (window.onPTf) window.onPTf(TF); }); });
-  var menu = document.getElementById('pind');
-  menu.querySelectorAll('input').forEach(function (c) { c.checked = !!IND[c.dataset.k]; c.addEventListener('change', function () { IND[c.dataset.k] = c.checked ? 1 : 0; try { localStorage.setItem('pchart_ind', JSON.stringify(IND)); } catch (e) {} if (bars.length) draw(true); }); });
-  document.getElementById('pindbtn').addEventListener('click', function () { menu.style.display = menu.style.display === 'block' ? 'none' : 'block'; });
+  var menu = document.getElementById('pind'), setp = null;
+  function buildMenu() {
+    menu.innerHTML = ROWS.map(function (r) {
+      return '<div class=irow><label><input type=checkbox data-k=' + r[0] + (IND[r[0]] ? ' checked' : '') + '>' + rowLabel(r) + '</label>' +
+             (r[2].length ? '<button class=igear data-k=' + r[0] + ' title="Settings">&#9881;</button>' : '') + '</div>';
+    }).join('') + '<div class=ifoot><button id=ireset>Reset all to defaults</button></div>';
+    menu.querySelectorAll('input[type=checkbox]').forEach(function (c) { c.addEventListener('change', function () { IND[c.dataset.k] = c.checked ? 1 : 0; try { localStorage.setItem('pchart_ind', JSON.stringify(IND)); } catch (e) {} if (bars.length) draw(true); }); });
+    menu.querySelectorAll('.igear').forEach(function (b) { b.addEventListener('click', function (e) { e.preventDefault(); e.stopPropagation(); openSettings(b.dataset.k); }); });
+    document.getElementById('ireset').addEventListener('click', function (e) { e.stopPropagation(); if (!confirm('Reset every indicator setting to its default?')) return; CFG = JSON.parse(JSON.stringify(DEF)); saveCfg(); closeSettings(); buildMenu(); if (bars.length) draw(true); if (window.onZoneCfg) window.onZoneCfg(); });
+  }
+  function closeSettings() { if (setp) { setp.remove(); setp = null; } }
+  function openSettings(k) {
+    closeSettings();
+    var r = ROWS.filter(function (x) { return x[0] === k; })[0], c = CFG[k];
+    setp = document.createElement('div'); setp.id = 'pset';
+    setp.innerHTML = '<div class=sh><b>' + r[1] + ' settings</b><button class=sx title=Close>&#10005;</button></div>' + r[2].map(function (f) {
+      var v = c[f[0]];
+      return '<label class=sf><span>' + f[1] + '</span>' + (f[2] === 'color' ? '<input type=color data-f=' + f[0] + ' value="' + v + '">' :
+             f[2] === 'bool' ? '<input type=checkbox data-f=' + f[0] + (+v ? ' checked' : '') + '>' :
+             '<input type=number data-f=' + f[0] + ' value="' + v + '" min=' + f[3] + ' max=' + f[4] + ' step=' + f[5] + '>') + '</label>';
+    }).join('') + '<div class=sb><button class=sd>Defaults</button><button class=sc>Cancel</button><button class=so>OK</button></div>';
+    menu.parentNode.appendChild(setp);
+    setp.addEventListener('click', function (e) { e.stopPropagation(); });
+    setp.querySelector('.sx').onclick = setp.querySelector('.sc').onclick = closeSettings;
+    setp.querySelector('.sd').onclick = function () { r[2].forEach(function (f) { var inp = setp.querySelector('[data-f=' + f[0] + ']'); if (f[2] === 'bool') inp.checked = !!DEF[k][f[0]]; else inp.value = DEF[k][f[0]]; }); };
+    setp.querySelector('.so').onclick = function () {
+      var bad = '', n = {};                          // checked on a copy, so a wrong value never half-changes the settings
+      r[2].forEach(function (f) {
+        var inp = setp.querySelector('[data-f=' + f[0] + ']'), v = f[2] === 'bool' ? (inp.checked ? 1 : 0) : inp.value;
+        if (f[2] === 'num') { v = parseFloat(v); if (isNaN(v) || v < f[3] || v > f[4]) { bad = bad || (f[1] + ' must be between ' + f[3] + ' and ' + f[4]); return; } if (f[5] >= 1) v = Math.round(v); }
+        n[f[0]] = v;
+      });
+      if (!bad && k === 'macd' && +n.fast >= +n.slow) bad = 'Fast length must be smaller than Slow length';
+      if (!bad && k === 'rsi' && +n.os >= +n.ob) bad = 'Oversold must be below Overbought';
+      if (bad) { alert(bad); return; }
+      for (var f2 in n) c[f2] = n[f2];
+      IND[k] = 1; try { localStorage.setItem('pchart_ind', JSON.stringify(IND)); } catch (e) {}
+      saveCfg(); closeSettings(); buildMenu(); if (bars.length) draw(true);
+      if (k === 'zones' && window.onZoneCfg) window.onZoneCfg();          // swing length / zones per side / ATR: ask the server again
+    };
+    setp.querySelectorAll('input').forEach(function (inp) { inp.addEventListener('keydown', function (e) { if (e.key === 'Enter') setp.querySelector('.so').click(); if (e.key === 'Escape') closeSettings(); }); });
+  }
+  buildMenu();
+  menu.addEventListener('click', function (e) { e.stopPropagation(); });
+  document.getElementById('pindbtn').addEventListener('click', function (e) { e.stopPropagation(); var open = menu.style.display === 'block'; menu.style.display = open ? 'none' : 'block'; if (open) closeSettings(); });
+  document.addEventListener('click', function () { if (setp) return; menu.style.display = 'none'; });
   var card = document.getElementById('pcard');
   document.getElementById('pbig').addEventListener('click', function () { card.classList.toggle('big'); document.body.style.overflow = card.classList.contains('big') ? 'hidden' : ''; this.textContent = card.classList.contains('big') ? 'Close ✕' : 'Enlarge ⛶'; setTimeout(fitRecent, 80); });
   document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && card.classList.contains('big')) document.getElementById('pbig').click(); });

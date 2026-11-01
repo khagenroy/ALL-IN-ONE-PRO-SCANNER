@@ -291,14 +291,24 @@ def _ist_label(ts):
     return (ts + pd.Timedelta(hours=5, minutes=30)).strftime("%d %b %H:%M")
 
 
-def chart_info(symbol, tf=15):
+def _zint(v, lo, hi, default):
+    try:
+        v = int(float(v))
+    except (TypeError, ValueError):
+        return default
+    return min(max(v, lo), hi)
+
+
+def chart_info(symbol, tf=15, zz=None, nob=None, zatr=None):
     """Nearest support / resistance zone, volume-spurt multiple and day change of one stock. Cached for 60 s. Returns (dict, error)."""
     symbol = (symbol or "").strip().upper()
     ent = _sym["map"].get(symbol)
     if not ent:
         return None, "Unknown symbol."
     tf = _tf(tf, "15")
-    c = _ci.get((symbol, tf))
+    zz, nob, zatr = _zint(zz, 3, 50, 9), _zint(nob, 1, 5, 2), _zint(zatr, 2, 100, 14)   # zone settings (defaults = the indicator)
+    ck = (symbol, tf, zz, nob, zatr)
+    c = _ci.get(ck)
     if c and time.time() - c[0] < 120:
         return c[1], ""
     try:
@@ -316,7 +326,7 @@ def chart_info(symbol, tf=15):
                "zones": [], "spurt": None, "spurt_peak": None}
         d15 = _closed_bars(ent[0], tf, asof)          # closed candles of the timeframe selected on the chart
         if d15 is not None and len(d15) >= 30:
-            zs = spurt_zones.live_zones(d15) or []
+            zs = spurt_zones.live_zones(d15, zz, nob, zatr) or []
             def _t0(z):
                 try:
                     return int((d15.index[z["i0"]] - pd.Timestamp("1970-01-01")) // pd.Timedelta(seconds=1))
@@ -349,7 +359,11 @@ def chart_info(symbol, tf=15):
                 k = int(np.argmax(tm))
                 out["spurt_peak"] = {"multiple": round(tm[k], 2), "time": _ist_label(d10.index[len(d10) - len(tm) + k])[-5:]}
         out["tf"] = tf
-        _ci[(symbol, tf)] = (time.time(), out)
+        out["zone_cfg"] = {"zz": zz, "nob": nob, "atr": zatr}
+        _ci[ck] = (time.time(), out)
+        if len(_ci) > 300:
+            for k, _ in sorted(list(_ci.items()), key=lambda kv: kv[1][0])[:100]:
+                _ci.pop(k, None)
         return out, ""
     except Exception as e:
         log.warning(f"paper: chart info failed for {symbol}: {e}")

@@ -28,8 +28,8 @@ button.buy{background:#1f9d57}button.sell{background:#d6453d}button.sm{padding:4
 #pchart{height:520px;border-radius:8px;overflow:hidden;background:#0f1520}
 .ch{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:2px 4px 8px}.ch b{font-size:16px;margin-right:4px}
 #ptfbtn{min-width:62px}#ptf{display:none;position:absolute;left:0;top:32px;z-index:55;background:#141a26;border:1px solid #37445f;border-radius:8px;padding:8px;width:210px;grid-template-columns:repeat(4,1fr);gap:4px;box-shadow:0 8px 24px rgba(0,0,0,.5)}#ptf.open{display:grid}#ptf .tfh{grid-column:1/-1;font-size:11px;color:#9aa8bf;text-transform:uppercase;letter-spacing:.4px;margin:4px 0 0}#ptf .tfh:first-child{margin-top:0}#ptf button{background:#47546f;padding:6px 0;border-radius:6px;font-size:12px}#ptf button.on{background:#2d5bd6}
-#pind{display:none;position:absolute;left:0;top:30px;z-index:50;background:#141a26;border:1px solid #37445f;border-radius:8px;padding:8px 12px;width:230px;max-height:340px;overflow:auto}
-#pind label{display:flex;gap:8px;align-items:center;color:#e6e9ef;font-size:13px;margin:5px 0;cursor:pointer}#pind input{width:auto}
+#pind{display:none;position:absolute;left:0;top:30px;z-index:50;background:#141a26;border:1px solid #37445f;border-radius:8px;padding:8px 12px;width:250px;max-height:420px;overflow:auto}
+#pind .irow{display:flex;align-items:center;justify-content:space-between;gap:6px;border-bottom:1px solid #222c40}#pind label{display:flex;gap:8px;align-items:center;color:#e6e9ef;font-size:13px;margin:5px 0;cursor:pointer;flex:1}#pind input{width:auto}#pind .igear{background:none;color:#9aa8bf;padding:2px 6px;font-size:15px;border-radius:5px}#pind .igear:hover{background:#2d5bd6;color:#fff}#pind .ifoot{padding-top:8px}#pind .ifoot button{background:#47546f;font-size:12px;padding:5px 10px;width:100%}#pset{position:absolute;left:240px;top:30px;z-index:60;background:#141a26;border:1px solid #4a6fb0;border-radius:8px;padding:10px 12px;width:250px;box-shadow:0 8px 24px rgba(0,0,0,.6)}@media(max-width:640px){#pset{left:0;top:auto;bottom:auto}}#pset .sh{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}#pset .sx{background:none;padding:0 4px;color:#9aa8bf}#pset .sf{display:flex;justify-content:space-between;align-items:center;gap:8px;margin:6px 0;color:#e6e9ef;font-size:13px}#pset .sf input[type=number]{width:80px;padding:5px 7px}#pset .sf input[type=color]{width:46px;height:28px;padding:0;border:1px solid #37445f;background:none}#pset .sb{display:flex;gap:6px;margin-top:10px}#pset .sb button{flex:1;padding:6px 0;font-size:12px}#pset .sd,#pset .sc{background:#47546f}
 #plegend{margin:0 4px 4px;min-height:16px;font-size:12px}
 #pcard.big{position:fixed;inset:0;z-index:100001;background:#0b0f16;border-radius:0;padding:10px;display:flex;flex-direction:column;margin:0}#pcard.big #pchart{flex:1;height:auto}#pcard.big p.note{display:none}
 .bd{display:inline-block;padding:2px 8px;border-radius:10px;font-size:12px;font-weight:700}.bd.sup{background:#1f9d57;color:#fff}.bd.res{background:#d6453d;color:#fff}
@@ -120,12 +120,13 @@ function getQuote(){
 
 function showChart(sym){if(window.PChart)PChart.setSymbol(sym)}
 /* the chart script loads after this one; when it is ready it calls this, so the first stock is never missed */
+window.onZoneCfg=function(){if(cur)loadInfo(cur)};
 window.onPChartReady=function(){if(cur){showChart(cur);loadInfo(cur)}};
 function zr(label,z,cls2){return z?'<div class=zr><span>'+label+'</span><span><b>'+fm(z.lo,2)+' - '+fm(z.hi,2)+'</b> <span class=m>('+z.dist+'% away)</span></span></div>':'<div class=zr><span>'+label+'</span><span class=m>none found</span></div>'}
 function loadInfo(sym){
   var el=$('info');if(!el||!sym)return;
   el.innerHTML='<span class=note>Reading zones and volume...</span>';
-  var t0=ptf;fetch('/paper/api/chartinfo?symbol='+encodeURIComponent(sym)+'&tf='+t0).then(function(r){return r.json()}).then(function(j){
+  var t0=ptf,zq=(window.PChart&&PChart.zoneQuery)?PChart.zoneQuery():'';fetch('/paper/api/chartinfo?symbol='+encodeURIComponent(sym)+'&tf='+t0+zq).then(function(r){return r.json()}).then(function(j){
     if(sym!==cur||t0!==ptf)return;   /* an answer for a stock / timeframe you already left */
     if(!j.ok){el.innerHTML='<span class=note>'+esc(j.msg)+'</span>';return}
     var i=j.info,h='<div class=zr><span><b>'+esc(i.symbol)+'</b> '+fm(i.price,2)+'</span><span class='+cl(i.day_chg||0)+'>'+(i.day_chg==null?'':(i.day_chg>0?'+':'')+i.day_chg+'% today')+'</span></div>';
@@ -133,7 +134,7 @@ function loadInfo(sym){
     h+=zr('Nearest support',i.support)+zr('Nearest resistance',i.resistance);
     if(i.spurt){var m=i.spurt.multiple;h+='<div class=zr><span>Volume spurt (last 10-min candle, '+i.spurt.time+')</span><span><b'+(m>=5?' class=g':'')+'>'+m+'x</b></span></div>'}
     if(i.spurt_peak)h+='<div class=zr><span>Peak spurt today</span><span><b>'+i.spurt_peak.multiple+'x</b> <span class=m>at '+i.spurt_peak.time+'</span></span></div>';
-    h+='<p class=note style="margin:6px 0 0">Zones use the same order-block rules as your indicator, built on the candles of the timeframe selected on the chart. Spurt = candle volume divided by the average of the 50 candles before it.</p>';
+    h+='<p class=note style="margin:6px 0 0">Zones use the same order-block rules as your indicator (change them with the &#9881; next to Support / resistance zones in Indicators), built on the candles of the timeframe selected on the chart. Spurt = candle volume divided by the average of the 50 candles before it.</p>';
     el.innerHTML=h;if(window.PChart)PChart.setInfo(i)});
 }
 function symChanged(s){
