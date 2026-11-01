@@ -141,15 +141,24 @@
   }
 
   /* ---------- data ---------- */
-  var busy = false;
+  /* FIX: a slow answer for the previous stock / timeframe could arrive after you switched and be drawn under the new name
+     (e.g. WIPRO candles titled ITC), and a switch made while the 20-second refresh was running was skipped. Now every request
+     is numbered and only the newest answer is drawn; a stock or timeframe switch always loads and re-fits the chart. */
+  var reqId = 0, inflight = 0, needFit = false;
   function load(keep) {
-    if (!sym || busy) return; busy = true;
-    fetch('/paper/api/candles?symbol=' + encodeURIComponent(sym) + '&tf=' + TF).then(function (r) { return r.json(); }).then(function (j) {
-      busy = false; var st = document.getElementById('pcmsg');
+    if (!sym) return;
+    if (keep && inflight) return;                    // the 20-second refresh waits while a request is still running
+    if (!keep) needFit = true;
+    var my = ++reqId, s = sym, t = TF;
+    inflight++;
+    fetch('/paper/api/candles?symbol=' + encodeURIComponent(s) + '&tf=' + t).then(function (r) { return r.json(); }).then(function (j) {
+      inflight--;
+      if (my !== reqId || s !== sym || t !== TF) return;   // an older answer: ignore it
+      var st = document.getElementById('pcmsg');
       if (!j.ok) { st.textContent = j.msg; return; } st.textContent = '';
-      bars = j.bars; draw(keep);
+      bars = j.bars; draw(!needFit); needFit = false;
       var b = bars[bars.length - 1]; if (b) leg.innerHTML = '<b>' + sym + '</b> ' + tfLabel() + ' &nbsp;O ' + fmt(b.o) + ' H ' + fmt(b.h) + ' L ' + fmt(b.l) + ' C ' + fmt(b.c);
-    }).catch(function () { busy = false; });
+    }).catch(function () { inflight--; });
   }
   window.PChart = {
     setSymbol: function (s) { sym = s; info = null; bars = []; document.getElementById('pctitle').textContent = s; var a = document.getElementById('ptvlink'); if (a) a.href = 'https://in.tradingview.com/chart/?symbol=NSE%3A' + encodeURIComponent(s.replace(/-/g, '_')); load(false); },

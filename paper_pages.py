@@ -124,7 +124,8 @@ function zr(label,z,cls2){return z?'<div class=zr><span>'+label+'</span><span><b
 function loadInfo(sym){
   var el=$('info');if(!el||!sym)return;
   el.innerHTML='<span class=note>Reading zones and volume...</span>';
-  fetch('/paper/api/chartinfo?symbol='+encodeURIComponent(sym)+'&tf='+ptf).then(function(r){return r.json()}).then(function(j){
+  var t0=ptf;fetch('/paper/api/chartinfo?symbol='+encodeURIComponent(sym)+'&tf='+t0).then(function(r){return r.json()}).then(function(j){
+    if(sym!==cur||t0!==ptf)return;   /* an answer for a stock / timeframe you already left */
     if(!j.ok){el.innerHTML='<span class=note>'+esc(j.msg)+'</span>';return}
     var i=j.info,h='<div class=zr><span><b>'+esc(i.symbol)+'</b> '+fm(i.price,2)+'</span><span class='+cl(i.day_chg||0)+'>'+(i.day_chg==null?'':(i.day_chg>0?'+':'')+i.day_chg+'% today')+'</span></div>';
     if(i.at_zone)h+='<div style="margin:6px 0"><span class="bd '+(i.at_zone=='SUPPORT'?'sup':'res')+'">Price is AT a '+i.at_zone.toLowerCase()+' zone</span></div>';
