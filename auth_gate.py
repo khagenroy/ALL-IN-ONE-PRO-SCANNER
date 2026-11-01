@@ -347,7 +347,7 @@ def install(app):
                     return redirect("/password")
                 if p.startswith("/admin") and not _admin():
                     return _page("Not allowed", "<h2>Admin only</h2><a href='/'>Back</a>", 403)
-                if app.config.get("AG_RESTRICT") and not _admin() and p not in ("/", "/alerts", "/indices.json", "/password"):
+                if app.config.get("AG_RESTRICT") and not _admin() and p not in ("/", "/alerts", "/indices.json", "/password", "/risk_mgmt"):
                     ok = set(rec.get("pages") or [])
                     if not (p in ok or any(p.startswith(r + "/") for r in ok)):
                         return _page("Not allocated", "<h2>This page is not part of your account</h2><p>Ask the admin if you need it.</p><a href='/'>Back to home</a>", 403)
@@ -544,7 +544,7 @@ def add_menu(app):
         ("Crypto tables", ["/crypto_oizones", "/crypto_signals", "/crypto_signals_all", "/crypto_spurt"]),
         ("Bot / Deals", ["/botlog", "/botpnl", "/deals"]),
             ]
-    SKIP = ("/", "/health", "/login", "/logout", "/register", "/setup", "/alerts", "/indices.json", "/password")
+    SKIP = ("/", "/health", "/login", "/logout", "/register", "/setup", "/alerts", "/indices.json", "/password", "/risk_mgmt")
 
     def catalog():
         pages, csvs = [], []
@@ -594,6 +594,9 @@ def add_menu(app):
         _lk = app.config.get("AG_LINKS") or []
         if _lk:
             cards += "<section><h3>Other scanners</h3>" + "".join(f"<div class=r><a class=pg href='{escape(u)}' target=_blank rel=noopener>{escape(n)} &#8599;</a></div>" for n, u in _lk) + "</section>"
+        _rk = app.config.get("AG_RISK_LINKS") or []
+        if _rk and admin:   # admin only: these links carry a secret
+            cards += "<section><h3>Risk management</h3><div class=r><a class=pg href='/risk_mgmt' target=_blank rel=noopener>Open here (both)</a></div>" + "".join(f"<div class=r><a class=pg href='{escape(u)}' target=_blank rel=noopener>{escape(n)} &#8599;</a></div>" for n, u in _rk) + "</section>"
         oc = [c for c in orphan if ok(c)]
         if oc:
             cards += "<section><h3>OI zones / MCX / ORB / news CSVs</h3><div class=r>" + "".join(f"<a class=ch href='{escape(c)}'>{escape(c[1:-4])}</a>" for c in oc) + "</div></section>"
@@ -616,6 +619,25 @@ def add_menu(app):
         note = "(blue = open the scanner, grey \u2193 = download CSV)"
         html = (f"<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'><meta name=ag-own content=1><title>Scanner</title><style>{css}</style>"
                 f"<div class=t><span><b style='font-size:16px;letter-spacing:.3px'>&#9889; Scanner pages</b> <span style='color:#8d9bb0;font-size:12px'>{note}</span></span>{_IDX_BOX}<span>{top}</span></div><div class=g>{cards}</div>{_contact_line()}{_FOOT}{_IDX_JS}")
+        return Response(html, mimetype="text/html")
+
+    @app.route("/risk_mgmt")
+    def _risk_mgmt():
+        if not _admin():
+            return Response("Admin only", 403)
+        rk = app.config.get("AG_RISK_LINKS") or []
+        btn = "".join(f"<button class=tb data-i='{i}'>{escape(n)}</button>" for i, (n, u) in enumerate(rk))
+        urls = json.dumps([u for n, u in rk])
+        html = ("<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'><meta name=ag-own content=1><title>Risk management</title>"
+                "<style>body{margin:0;background:#0b0f16;color:#e6e9ef;font-family:system-ui,Arial,sans-serif;height:100vh;display:flex;flex-direction:column}"
+                ".t{display:flex;gap:8px;align-items:center;padding:8px 12px;border-bottom:1px solid #2f3a50;background:#121826;flex-wrap:wrap}"
+                "a{color:#7db3ff;text-decoration:none}.tb{background:#1d232e;color:#cfd8e6;border:1px solid #3a4558;border-radius:8px;padding:6px 14px;cursor:pointer;font-weight:600}"
+                ".tb.on{background:#2f6fdc;color:#fff;border-color:#4a86f0}iframe{flex:1;border:0;width:100%;background:#fff}</style>"
+                f"<div class=t><a href='/'>&larr; Home</a><b>Risk management</b>{btn}<a id=nt href='#' target=_blank rel=noopener style='margin-left:auto'>open in new tab &#8599;</a></div>"
+                "<iframe id=f></iframe>"
+                f"<script>var U={urls};function go(i){{document.getElementById('f').src=U[i];document.getElementById('nt').href=U[i];"
+                "document.querySelectorAll('.tb').forEach(function(b){b.classList.toggle('on',b.dataset.i==i)})}"
+                "document.querySelectorAll('.tb').forEach(function(b){b.onclick=function(){go(b.dataset.i)}});if(U.length)go(0);</script>")
         return Response(html, mimetype="text/html")
 
     @app.route("/admin/access/<name>", methods=["GET", "POST"])

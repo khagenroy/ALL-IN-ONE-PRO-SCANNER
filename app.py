@@ -1125,6 +1125,10 @@ for _r, _f, _t in _TABLE_PAGES:
 import indices_strip
 indices_strip.install(app)   # NIFTY / BANKNIFTY / ... strip at the top of every page
 app.config["AG_LINKS"] = [("F&O scanner", "https://f-o-scanner-42tp.onrender.com")]   # button on the home page and in the top bar
+app.config["AG_RISK_LINKS"] = [   # admin-only box "Risk management" on the home page
+    ("Crypto risk (Delta)", "https://delta-bridge-leq3.onrender.com/risk/khagenindrajeetsujitakabitakartik"),
+    ("Dhan risk (stocks / MCX)", "https://dhan-bridge-tv.onrender.com/risk/khagenindrajeetmuktakabitakartiksanjucta"),
+]
 try:                                                            # ADDED: practice (paper) trading for students at /paper - a failure here never stops the scanner
     import paper_app
     paper_app.install(app)
