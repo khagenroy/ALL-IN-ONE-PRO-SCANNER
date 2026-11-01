@@ -190,6 +190,11 @@
   /* show the latest candles with some empty space on the right, like TradingView (also used by Enlarge) */
   function fitRecent() {
     var n = bars.length; if (!n) return;
+    /* FIX: once the price axis was dragged / zoomed by hand, the chart stopped auto-scaling, and the next stock or timeframe
+       opened with the OLD price range (SBIN at 961 shown on ITC's 100-600 scale, candles cut off at the top).
+       Every new stock / timeframe now switches auto-scale back on, so the candles always fit the height. */
+    try { candle.priceScale().applyOptions({ autoScale: true }); } catch (e) {}
+    try { chart.priceScale('right').applyOptions({ autoScale: true }); } catch (e) {}
     var show = TF === 'D' ? 160 : htf() ? 120 : 110;
     chart.timeScale().setVisibleLogicalRange({ from: Math.max(-2, n - show), to: n + 8 });
   }
