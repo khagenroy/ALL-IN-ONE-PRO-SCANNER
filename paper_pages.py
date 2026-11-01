@@ -108,7 +108,17 @@ function calc(){
       if(t1>0){var rw=Math.abs(t1-ref)*q;o+=' &middot; Reward at T1: <b class=g>Rs '+fm(rw)+'</b> (1 : '+(risk?(rw/risk).toFixed(1):'-')+')'}}
   }
   $('est').innerHTML=o;
-  if(window.PChart&&cur){var ent=0;if(S)S.positions.forEach(function(x){if(x.symbol===cur)ent=x.entry});PChart.setLevels({entry:ent||lim||0,sl:sl>0?sl:0,t1:t1>0?t1:0,t2:t2>0?t2:0})}
+  if(window.PChart&&cur)PChart.setLevels(chartLevels(lim,sl,t1,t2));
+}
+/* lines on the chart: while modifying -> the values being typed; an open trade / waiting limit order in this stock ->
+   its own entry, SL and targets (so you can watch them); otherwise -> the new order being typed in the form */
+function chartLevels(lim,sl,t1,t2){
+  var n=function(v){v=+v;return v>0?v:0};
+  if(edId&&$('e_sl'))return {entry:n(($('e_lim')||{}).value)||edEntry,sl:n($('e_sl').value),t1:n($('e_t1').value),t2:n($('e_t2').value)};
+  var x=null;if(S){S.positions.forEach(function(p){if(p.symbol===cur)x={entry:p.entry,sl:p.sl,t1:p.t1,t2:p.t2}});
+    if(!x)S.pending.forEach(function(o){if(o.symbol===cur)x={entry:o.limit,sl:o.sl,t1:o.t1,t2:o.t2}})}
+  if(x)return {entry:n(x.entry),sl:n(x.sl),t1:n(x.t1),t2:n(x.t2)};
+  return {entry:n(lim),sl:n(sl),t1:n(t1),t2:n(t2)};
 }
 function getQuote(){
   var s=$('sym').value.trim().toUpperCase();ltp=null;$('q').textContent='';if(!s){calc();return}
@@ -124,18 +134,12 @@ window.onZoneCfg=function(){if(cur)loadInfo(cur)};
 window.onPChartReady=function(){if(cur){showChart(cur);loadInfo(cur)}};
 function zr(label,z,cls2){return z?'<div class=zr><span>'+label+'</span><span><b>'+fm(z.lo,2)+' - '+fm(z.hi,2)+'</b> <span class=m>('+z.dist+'% away)</span></span></div>':'<div class=zr><span>'+label+'</span><span class=m>none found</span></div>'}
 function loadInfo(sym){
-  var el=$('info');if(!el||!sym)return;
-  el.innerHTML='<span class=note>Reading zones and volume...</span>';
+  /* the zones panel card was removed (the page is a practice page, not a scanner); the zones are still fetched here
+     because the chart draws the support / resistance boxes from them */
+  if(!sym)return;
   var t0=ptf,zq=(window.PChart&&PChart.zoneQuery)?PChart.zoneQuery():'';fetch('/paper/api/chartinfo?symbol='+encodeURIComponent(sym)+'&tf='+t0+zq).then(function(r){return r.json()}).then(function(j){
     if(sym!==cur||t0!==ptf)return;   /* an answer for a stock / timeframe you already left */
-    if(!j.ok){el.innerHTML='<span class=note>'+esc(j.msg)+'</span>';return}
-    var i=j.info,h='<div class=zr><span><b>'+esc(i.symbol)+'</b> '+fm(i.price,2)+'</span><span class='+cl(i.day_chg||0)+'>'+(i.day_chg==null?'':(i.day_chg>0?'+':'')+i.day_chg+'% today')+'</span></div>';
-    if(i.at_zone)h+='<div style="margin:6px 0"><span class="bd '+(i.at_zone=='SUPPORT'?'sup':'res')+'">Price is AT a '+i.at_zone.toLowerCase()+' zone</span></div>';
-    h+=zr('Nearest support',i.support)+zr('Nearest resistance',i.resistance);
-    if(i.spurt){var m=i.spurt.multiple;h+='<div class=zr><span>Volume spurt (last 10-min candle, '+i.spurt.time+')</span><span><b'+(m>=5?' class=g':'')+'>'+m+'x</b></span></div>'}
-    if(i.spurt_peak)h+='<div class=zr><span>Peak spurt today</span><span><b>'+i.spurt_peak.multiple+'x</b> <span class=m>at '+i.spurt_peak.time+'</span></span></div>';
-    h+='<p class=note style="margin:6px 0 0">Zones use the same order-block rules as your indicator (change them with the &#9881; next to Support / resistance zones in Indicators), built on the candles of the timeframe selected on the chart. Spurt = candle volume divided by the average of the 50 candles before it.</p>';
-    el.innerHTML=h;if(window.PChart)PChart.setInfo(i)});
+    if(j.ok&&window.PChart)PChart.setInfo(j.info)}).catch(function(){});
 }
 function symChanged(s){
   s=s.trim().toUpperCase();if(!s||s===cur)return;cur=s;showChart(s);loadInfo(s);pcFill();
@@ -174,6 +178,30 @@ function place(){
      limit:$('otype').value=='LIMIT'?$('lim').value:''}).then(function(j){say(j.msg,j.ok);if(j.ok)load()})
 }
 function act(u,b){post(u,b).then(function(j){say(j.msg,j.ok);load()})}
+/* ---------- modify an open trade (SL / targets) or a waiting limit order ---------- */
+var edId=null,edEntry=0;
+function openEdit(id){
+  if(!S)return;var x=null,pend=false;
+  S.positions.forEach(function(p){if(p.id===id)x=p});
+  if(!x)S.pending.forEach(function(o){if(o.id===id){x=o;pend=true}});
+  if(!x)return;edId=id;edEntry=pend?x.limit:x.entry;
+  if(x.symbol!==cur){$('sym').value=x.symbol;symChanged(x.symbol);getQuote()}
+  var v=function(n){return n==null?'':n},t1lock=!pend&&x.t1_done;
+  $('pedit').innerHTML='<div class=card style="border-color:#4a6fb0"><h3>Modify '+esc(x.symbol)+' <span class=m>'+x.side+(pend?' limit order':' trade')+' &middot; '+(x.product==='POSITIONAL'?'CNC':'MIS')+'</span></h3>'+
+    '<div class=f>'+(pend?'<div><label>Limit price</label><input id=e_lim type=number step=0.05 value="'+v(x.limit)+'"></div>':'')+
+    '<div><label>Stop-loss</label><input id=e_sl type=number step=0.05 value="'+v(x.sl)+'"></div>'+
+    '<div><label>Target 1'+(t1lock?' (booked)':'')+'</label><input id=e_t1 type=number step=0.05 value="'+v(x.t1)+'"'+(t1lock?' disabled':'')+'></div>'+
+    '<div><label>Target 2</label><input id=e_t2 type=number step=0.05 value="'+v(x.t2)+'"></div>'+
+    '<div style="display:flex;gap:6px"><button onclick="saveEdit('+(pend?1:0)+')" style="flex:1">Save</button><button class=gh onclick="closeEdit()" style="flex:1">Cancel</button></div></div>'+
+    '<p class=note style="margin:6px 0 0">'+(pend?'The order keeps waiting with the new values.':'Checked against the live price, so the new stop-loss / target cannot already be crossed. Leave a target empty to remove it.'+(t1lock?' Target 1 is already booked, so only the stop-loss and Target 2 can change.':''))+'</p></div>';
+  $('pedit').scrollIntoView({behavior:'smooth',block:'nearest'});
+  ['e_lim','e_sl','e_t1','e_t2'].forEach(function(k){var i=$(k);if(i)i.addEventListener('input',calc)});calc();
+}
+function closeEdit(){edId=null;$('pedit').innerHTML='';calc()}
+function saveEdit(pend){
+  var b={id:edId,sl:$('e_sl').value,t1:$('e_t1').value,t2:$('e_t2').value};if(pend)b.limit=$('e_lim').value;
+  post(pend?'/paper/api/modify_order':'/paper/api/modify',b).then(function(j){say(j.msg,j.ok);if(j.ok){closeEdit();load()}})
+}
 function load(){
   fetch('/paper/api/state').then(function(r){return r.json()}).then(function(s){
     S=s;
@@ -184,10 +212,10 @@ function load(){
     var h='';
     s.positions.forEach(function(p){
       var tg=(p.t1?fm(p.t1,2):'-')+(p.t2?' / '+fm(p.t2,2):'');
-      h+='<tr><td><b>'+esc(p.symbol)+'</b> <span class=m>'+p.side+'</span> '+tag(p.product)+(p.product==='POSITIONAL'?' <span class=m>since '+esc((p.opened||'').slice(5,10))+'</span>':'')+'</td><td>'+fm(p.qty)+'</td><td>'+fm(p.entry,2)+'</td><td>'+(p.ltp?fm(p.ltp,2):'-')+'</td><td>'+fm(p.sl,2)+(p.t1_done?' <span class=m>(cost)</span>':'')+'</td><td>'+tg+'</td><td class='+cl(p.pnl)+'>'+sg(p.pnl)+' <span class=m>('+p.pnl_pct+'%)</span></td><td><button class=sm onclick="act(\'/paper/api/close\',{id:\''+p.id+'\'})">Close</button></td></tr>'});
+      h+='<tr><td><b>'+esc(p.symbol)+'</b> <span class=m>'+p.side+'</span> '+tag(p.product)+(p.product==='POSITIONAL'?' <span class=m>since '+esc((p.opened||'').slice(5,10))+'</span>':'')+'</td><td>'+fm(p.qty)+'</td><td>'+fm(p.entry,2)+'</td><td>'+(p.ltp?fm(p.ltp,2):'-')+'</td><td>'+fm(p.sl,2)+(p.t1_done?' <span class=m>(cost)</span>':'')+'</td><td>'+tg+'</td><td class='+cl(p.pnl)+'>'+sg(p.pnl)+' <span class=m>('+p.pnl_pct+'%)</span></td><td><button class=sm onclick="openEdit(\''+p.id+'\')">Modify</button> <button class=sm onclick="act(\'/paper/api/close\',{id:\''+p.id+'\'})">Close</button></td></tr>'});
     $('pos').innerHTML=h||'<tr><td colspan=8 class=m style="text-align:left">No open trades.</td></tr>';
     var o='';
-    s.pending.forEach(function(x){o+='<tr><td><b>'+esc(x.symbol)+'</b> <span class=m>'+x.side+' limit</span> '+tag(x.product)+'</td><td>'+fm(x.qty)+'</td><td>'+fm(x.limit,2)+'</td><td>'+fm(x.sl,2)+'</td><td>'+(x.t1?fm(x.t1,2):'-')+(x.t2?' / '+fm(x.t2,2):'')+'</td><td><button class=sm onclick="act(\'/paper/api/cancel\',{id:\''+x.id+'\'})">Cancel</button></td></tr>'});
+    s.pending.forEach(function(x){o+='<tr><td><b>'+esc(x.symbol)+'</b> <span class=m>'+x.side+' limit</span> '+tag(x.product)+'</td><td>'+fm(x.qty)+'</td><td>'+fm(x.limit,2)+'</td><td>'+fm(x.sl,2)+'</td><td>'+(x.t1?fm(x.t1,2):'-')+(x.t2?' / '+fm(x.t2,2):'')+'</td><td><button class=sm onclick="openEdit(\''+x.id+'\')">Modify</button> <button class=sm onclick="act(\'/paper/api/cancel\',{id:\''+x.id+'\'})">Cancel</button></td></tr>'});
     $('pend').innerHTML=o?'<h3>Waiting limit orders</h3><div class=sc><table><tr><th>Stock</th><th>Qty</th><th>Limit</th><th>SL</th><th>Targets</th><th></th></tr>'+o+'</table></div>':'';
     $('notes').innerHTML=s.notes.map(function(n){return '<div class=note>'+esc(n.t)+' &middot; '+esc(n.m)+'</div>'}).join('');
     calc();
@@ -223,7 +251,7 @@ def trade_page(user):
 <button id=pbig class=sm>Enlarge &#9974;</button><a id=ptvlink href="https://in.tradingview.com/" target=_blank rel=noopener class=note style="color:#7db3ff">Open in TradingView &#8599;</a></div>
 <div id=plegend class=note></div><div id=pchart></div><div id=pcmsg class=note></div>
 <p class=note style="margin:6px 4px 0">Our own chart on live Dhan data. Pick a stock in the order form (or open one from your scanner pages). Choose indicators with the <b>Indicators</b> button; they are remembered on this device. Yellow circles mark candles with 5x or more volume. Green and red boxes are the support and resistance zones (order blocks) as in the indicator; your entry, SL and targets are drawn as you type them.</p></div>
-<div class=card><h3>Zones and volume (from the scanner rules)</h3><div id=info><span class=note>Pick a stock to see its support / resistance zones and volume spurt.</span></div></div>
+
 </div>
 <div>
 <div class=card><h2>New order</h2>
@@ -242,7 +270,7 @@ def trade_page(user):
 <p id=pnote class=note></p>
 <p class=note>With Target 2 set: half is booked at Target 1 and your stop-loss moves to your entry price (the trailing idea). Without Target 2 the whole trade exits at Target 1.</p></div>
 </div></div>
-<div class=card><h2>Open trades</h2><div class=sc><table><tr><th>Stock</th><th>Qty</th><th>Entry</th><th>Price now</th><th>Stop-loss</th><th>Targets</th><th>Profit / loss</th><th></th></tr><tbody id=pos></tbody></table></div>
+<div id=pedit></div><div class=card><h2>Open trades</h2><div class=sc><table><tr><th>Stock</th><th>Qty</th><th>Entry</th><th>Price now</th><th>Stop-loss</th><th>Targets</th><th>Profit / loss</th><th></th></tr><tbody id=pos></tbody></table></div>
 <div style="margin-top:8px"><button class=gh onclick="act('/paper/api/closeall')">Close all trades</button></div><div id=pend style="margin-top:12px"></div></div>
 <div class=card><h3>Recent activity</h3><div id=notes></div></div>
 {TRADE_JS}"""

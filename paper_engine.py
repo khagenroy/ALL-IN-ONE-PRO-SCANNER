@@ -697,6 +697,78 @@ def place_order(user, symbol, side, qty, sl, t1=None, t2=None, limit=None, produ
         return True, f"{_plabel(product)} {side} {qty} {symbol} filled at {ltp:g}."
 
 
+def modify_position(user, pid, sl, t1=None, t2=None):
+    """Changes the stop-loss / targets of an open trade. Checked against the LIVE price, so a new SL or target can never
+    be already crossed (that would close the trade at once). After Target 1 is booked, only the SL and Target 2 can change."""
+    sl, t1, t2 = _num(sl), _num(t1), _num(t2)
+    with _LOCK:
+        pos = next((p for p in acct(user)["positions"] if p["id"] == pid), None)
+        if not pos:
+            return False, "That trade is already closed."
+        sid = pos["sid"]
+    price = prices([sid]).get(sid)
+    if price is None:
+        return False, "Live price not available right now - try again in a moment."
+    with _LOCK:
+        a = acct(user)
+        pos = next((p for p in a["positions"] if p["id"] == pid), None)
+        if not pos:
+            return False, "That trade is already closed."
+        buy = pos["side"] == "BUY"
+        if sl is None:
+            return False, "A stop-loss is required."
+        if buy and not sl < price:
+            return False, f"For a BUY the stop-loss must be BELOW the current price ({price:g})."
+        if not buy and not sl > price:
+            return False, f"For a SELL the stop-loss must be ABOVE the current price ({price:g})."
+        if pos["t1_done"]:                                   # half already booked at T1: T1 stays as it was
+            t1 = pos["t1"]
+            if t2 is not None and ((buy and not t2 > price) or (not buy and not t2 < price)):
+                return False, f"Target 2 must be {'ABOVE' if buy else 'BELOW'} the current price ({price:g})."
+        else:
+            if t1 is not None and ((buy and not t1 > price) or (not buy and not t1 < price)):
+                return False, f"Target 1 must be {'ABOVE' if buy else 'BELOW'} the current price ({price:g})."
+            if t2 is not None and (t1 is None or (buy and not t2 > t1) or (not buy and not t2 < t1)):
+                return False, f"Target 2 must be {'above' if buy else 'below'} Target 1 (and needs Target 1 set)."
+        old = f"SL {pos['sl']:g}" + (f", T1 {pos['t1']:g}" if pos.get("t1") else "") + (f", T2 {pos['t2']:g}" if pos.get("t2") else "")
+        pos["sl"], pos["t1"], pos["t2"] = sl, t1, t2
+        new = f"SL {sl:g}" + (f", T1 {t1:g}" if t1 else "") + (f", T2 {t2:g}" if t2 else "")
+        _note(a, f"{pos['symbol']} modified: {old} -> {new}")
+        _save()
+        return True, f"{pos['symbol']} updated: {new}."
+
+
+def modify_order(user, oid, limit, sl, t1=None, t2=None):
+    """Changes a waiting limit order (limit price, stop-loss, targets)."""
+    limit, sl, t1, t2 = _num(limit), _num(sl), _num(t1), _num(t2)
+    with _LOCK:
+        o = next((x for x in acct(user)["pending"] if x["id"] == oid), None)
+        if not o:
+            return False, "That order is gone already (filled or cancelled)."
+        sid = o["sid"]
+    ltp = prices([sid]).get(sid)
+    if ltp is None:
+        return False, "Live price not available right now - try again in a moment."
+    if limit is None:
+        return False, "Enter the limit price."
+    with _LOCK:
+        a = acct(user)
+        o = next((x for x in a["pending"] if x["id"] == oid), None)
+        if not o:
+            return False, "That order is gone already (filled or cancelled)."
+        if (o["side"] == "BUY" and limit >= ltp) or (o["side"] == "SELL" and limit <= ltp):
+            return False, f"A limit {o['side']} must be {'below' if o['side'] == 'BUY' else 'above'} the current price ({ltp:g})."
+        bad = _check_levels(o["side"], limit, sl, t1, t2)
+        if bad:
+            return False, bad
+        if limit * o["qty"] / _lev(o) > a["cash"]:
+            return False, "Not enough cash for this limit price."
+        o["limit"], o["sl"], o["t1"], o["t2"] = limit, sl, t1, t2
+        _note(a, f"Limit order {o['side']} {o['symbol']} changed: limit {limit:g}, SL {sl:g}")
+        _save()
+        return True, f"Limit order {o['symbol']} updated."
+
+
 def close_position(user, pid):
     with _LOCK:
         a = acct(user)

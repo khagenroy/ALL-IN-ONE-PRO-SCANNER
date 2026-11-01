@@ -81,6 +81,16 @@ def install(app):
                                  d.get("product"))
         return jsonify({"ok": ok, "msg": msg})
 
+    def api_modify():
+        d = body()
+        ok, msg = pe.modify_position(user(), str(d.get("id", "")), d.get("sl"), d.get("t1"), d.get("t2"))
+        return jsonify({"ok": ok, "msg": msg})
+
+    def api_modify_order():
+        d = body()
+        ok, msg = pe.modify_order(user(), str(d.get("id", "")), d.get("limit"), d.get("sl"), d.get("t1"), d.get("t2"))
+        return jsonify({"ok": ok, "msg": msg})
+
     def api_close():
         ok, msg = pe.close_position(user(), str(body().get("id", "")))
         return jsonify({"ok": ok, "msg": msg})
@@ -117,7 +127,7 @@ def install(app):
     add("/paper/api/candles", api_candles)
     add("/paper/api/lw.js", _js("paper_lw.js"), name="paper_lw_js")
     add("/paper/api/chart.js", _js("paper_chart.js"), name="paper_chart_js")
-    for r, f in (("/paper/api/order", api_order), ("/paper/api/close", api_close), ("/paper/api/closeall", api_closeall),
+    for r, f in (("/paper/api/order", api_order), ("/paper/api/modify", api_modify), ("/paper/api/modify_order", api_modify_order), ("/paper/api/close", api_close), ("/paper/api/closeall", api_closeall),
                  ("/paper/api/cancel", api_cancel), ("/paper/api/reset", api_reset)):
         add(r, f, ("POST",))
     add("/admin/paper", admin_paper)
