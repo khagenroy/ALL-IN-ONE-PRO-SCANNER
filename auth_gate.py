@@ -549,7 +549,7 @@ def add_menu(app):
     def catalog():
         pages, csvs = [], []
         for r in sorted(app.url_map.iter_rules(), key=lambda x: x.rule):
-            if "GET" not in r.methods or r.arguments or r.rule in SKIP or r.rule.startswith(("/admin", "/static")):
+            if "GET" not in r.methods or r.arguments or r.rule in SKIP or r.rule.startswith(("/admin", "/static", "/paper/api")):
                 continue
             (csvs if r.rule.endswith(".csv") else pages).append(r.rule)
         owner = {}
@@ -599,15 +599,15 @@ def add_menu(app):
             cards += "<section><h3>OI zones / MCX / ORB / news CSVs</h3><div class=r>" + "".join(f"<a class=ch href='{escape(c)}'>{escape(c[1:-4])}</a>" for c in oc) + "</div></section>"
         _recent = [r for r in _feed_read(40) if "read before you trade" not in r.get("title", "")][:3]
         if _recent:
-            cards = ("<section style='grid-column:1/-1'><h3>Latest alerts <a href='/alerts' style='float:right;text-transform:none;font-weight:400'>see all &rarr;</a></h3>"
+            cards = ("<section style='grid-column:1/-1'><h3>Latest alerts <a href='/alerts' target=_blank rel=noopener style='float:right;text-transform:none;font-weight:400'>see all &rarr;</a></h3>"
                      + _feed_html(_recent) + "</section>") + cards
         else:
             cards = ("<section style='grid-column:1/-1;padding:6px 12px'><span style='font-size:13px'><b style='color:#8fb4ff;text-transform:uppercase;font-size:12px'>Latest alerts</b> &nbsp; none yet &middot; "
-                     "<a href='/alerts'>see all</a></span></section>") + cards
+                     "<a href='/alerts' target=_blank rel=noopener>see all</a></span></section>") + cards
         if not cards.count("<h3>") > 1:
             cards = cards + "<section><h3>Welcome</h3><div class=r>No pages have been allocated to your account yet. Ask the admin.</div></section>"
         who = escape(str(session.get("user", "")))
-        top = ("<a href='/alerts'>Alerts</a>" + (" &middot; <a href='/admin/users'>Manage users</a>" if admin else "") + f" &middot; <a href='/password'>Password</a> &middot; <a href='/logout'>Logout ({who})</a>")
+        top = ("<a href='/alerts' target=_blank rel=noopener>Alerts</a>" + (" &middot; <a href='/admin/users'>Manage users</a>" if admin else "") + f" &middot; <a href='/password'>Password</a> &middot; <a href='/logout'>Logout ({who})</a>")
         css = (_ART_CSS + "body{margin:0;background:" + _BG + ";background-attachment:fixed;min-height:100vh;color:#e6e9ef;font-family:system-ui,Arial,sans-serif}.t{display:flex;justify-content:space-between;align-items:center;padding:10px 16px;border-bottom:1px solid #2f3a50;background:rgba(11,15,22,.75);backdrop-filter:blur(6px);font-size:14px;gap:10px;flex-wrap:wrap}"
                ".g{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px;padding:12px 14px}section{background:rgba(24,29,39,.82);border:1px solid #2f3a50;border-radius:12px;padding:10px 12px;box-shadow:0 6px 20px rgba(0,0,0,.35);transition:transform .15s,border-color .15s}section:hover{transform:translateY(-2px);border-color:#4a6fb0}"
                "h3{margin:0 0 6px;font-size:13px;color:#8fb4ff;text-transform:uppercase;letter-spacing:.5px}.r{display:flex;flex-wrap:wrap;align-items:center;gap:4px;padding:2px 0;font-size:13px}"
@@ -699,7 +699,7 @@ def add_theme(app):
             if "ag-theme" in html or "name=ag-own" in html:
                 return resp
             links = "".join(f"<a href='{escape(u)}' target=_blank rel=noopener style='color:#9fe0b0;text-decoration:none'>{escape(n)} &#8599;</a> &middot; " for n, u in (app.config.get("AG_LINKS") or []))
-            links += "<a href='/alerts' style='color:#7db3ff;text-decoration:none'>Alerts</a>"
+            links += "<a href='/alerts' target=_blank rel=noopener style='color:#7db3ff;text-decoration:none'>Alerts</a>"
             if _admin():
                 links += " &middot; <a href='/admin/users' style='color:#7db3ff;text-decoration:none'>Users</a>"
             links += f" &middot; <a href='/password' style='color:#7db3ff;text-decoration:none'>Password</a> &middot; <a href='/logout' style='color:#7db3ff;text-decoration:none'>Logout ({escape(str(session.get('user', '')))})</a>"
