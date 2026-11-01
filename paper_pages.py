@@ -114,6 +114,7 @@ function getQuote(){
   var s=$('sym').value.trim().toUpperCase();ltp=null;$('q').textContent='';if(!s){calc();return}
   if(s!==cur&&document.activeElement!==$('sym'))symChanged(s);
   fetch('/paper/api/quote?symbol='+encodeURIComponent(s)).then(function(r){return r.json()}).then(function(j){
+    if($('sym').value.trim().toUpperCase()!==s)return;   /* a price for the stock you just left: ignore it */
     if(j.ok){ltp=j.price;$('q').innerHTML='Live price: <b>'+fm(j.price,2)+'</b>';if(window.PChart)PChart.tick(j.price)}else{$('q').textContent=j.msg}calc()})
 }
 
