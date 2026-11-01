@@ -725,6 +725,18 @@ def add_theme(app):
            "background:linear-gradient(var(--agov),var(--agov)),url(/bg/page.jpg) center/cover no-repeat}" + _FOOT_CSS + "body{padding-bottom:64px!important}"
            "@media(max-width:900px){table{display:block;max-width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch}img{max-width:100%;height:auto}}</style>")
     vp = "<meta name=viewport content='width=device-width,initial-scale=1'>"
+    # phones: the scanner pages' red "1. DON'T RUSH ..." rules banner is made smaller (about 2 lines) and no longer stays stuck
+    # over the page while scrolling. Found by its text, so it works on every page that has it; PC is not touched.
+    rules_js = ("<script id=ag-rules>(function(){function fix(){try{if(!window.matchMedia||!matchMedia('(max-width:640px)').matches)return;"
+                "var best=null,bl=1e9;document.querySelectorAll('body *').forEach(function(e){if(e.id==='ag-foot'||e.closest('#ag-bar'))return;"
+                "var t=(e.textContent||'').toUpperCase();if(t.indexOf('RUSH')>=0&&t.indexOf('EMOTIONAL')>=0&&t.length<bl){best=e;bl=t.length}});"
+                "if(!best||best.dataset.agr)return;best.dataset.agr=1;"
+                "best.style.setProperty('font-size','12px','important');best.style.setProperty('line-height','1.3','important');"
+                "best.style.setProperty('padding','6px 8px','important');best.querySelectorAll('*').forEach(function(c){c.style.setProperty('font-size','12px','important')});"
+                "for(var e=best;e&&e!==document.body;e=e.parentElement){var p=getComputedStyle(e).position;"
+                "if(p==='sticky'||p==='fixed')e.style.setProperty('position','static','important');"
+                "if(e.parentElement&&(e.parentElement.textContent||'').length>bl*1.5)break}}catch(x){}}"
+                "fix();document.addEventListener('DOMContentLoaded',fix);setTimeout(fix,800);setTimeout(fix,2500)})();</script>")
     js = ("<script id=ag-js>(function(){try{var b=document.body,c=getComputedStyle(b).backgroundColor,m=c.match(/[\\d.]+/g)||[],a=m.length>3?+m[3]:1;"
           "var dark=a>0&&m.length>=3&&(0.299*m[0]+0.587*m[1]+0.114*m[2])<110;var plain=a===0&&!document.querySelector('table,canvas,svg,img,input,button')&&(b.innerText||'').length<500;if(plain){dark=true}var s=document.createElement('style');"
           "s.textContent='html{background:'+(dark?'#0b0f16':'#e8edf5')+'!important}body{background:transparent!important}'+(plain?'body{color:#e6e9ef!important;font:16px system-ui,Arial,sans-serif!important;padding:18px!important}':'');if(!dark)document.documentElement.style.setProperty('--agov','rgba(236,241,248,.90)');"
@@ -755,7 +767,7 @@ def add_theme(app):
                 html = re.sub(r"(<body[^>]*>)", lambda m_: m_.group(1) + tb, html, count=1, flags=re.I)
             else:
                 html = tb + html
-            html = (html + css + _FOOT + js + _IDX_JS) if "</body>" not in html.lower() else re.sub(r"</body>", lambda m_: css + _FOOT + js + _IDX_JS + "</body>", html, count=1, flags=re.I)
+            html = (html + css + _FOOT + js + rules_js + _IDX_JS) if "</body>" not in html.lower() else re.sub(r"</body>", lambda m_: css + _FOOT + js + rules_js + _IDX_JS + "</body>", html, count=1, flags=re.I)
             resp.set_data(html)
         except Exception:
             pass
