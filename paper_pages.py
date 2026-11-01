@@ -18,7 +18,9 @@ label{display:block;font-size:12px;color:#9aa8bf;margin:0 0 3px}
 .f{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;align-items:end}
 button{border:0;border-radius:8px;padding:9px 16px;font:inherit;font-weight:600;cursor:pointer;color:#fff;background:#2d5bd6}
 button.buy{background:#1f9d57}button.sell{background:#d6453d}button.sm{padding:4px 10px;font-size:12px;background:#47546f}button.gh{background:#47546f}
-.seg{display:flex;gap:6px}.seg button{flex:1;background:#47546f}.seg button.on.b{background:#1f9d57}.seg button.on.s{background:#d6453d}
+.seg{display:flex;gap:6px}.seg button{flex:1;background:#47546f}.seg button.on.b{background:#1f9d57}.seg button.on.s{background:#d6453d}.seg button.on.p{background:#2d5bd6}
+.seg button:disabled{opacity:.35;cursor:not-allowed}
+.tg{display:inline-block;padding:1px 6px;border-radius:6px;font-size:11px;font-weight:700;background:#47546f;color:#fff}.tg.cnc{background:#7b4fd6}
 #msg{margin-top:8px;font-weight:600}.note{font-size:12px;color:#9aa8bf}.warn{background:#5a3b12;border:1px solid #a8741f;color:#ffe2a8;padding:8px 10px;border-radius:8px;margin:0 0 10px}
 .me td{background:rgba(45,91,214,.18)}
 .cols{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(300px,1fr);gap:12px;align-items:start}.cols>div{min-width:0}
@@ -65,24 +67,36 @@ def cls(v):
     return "g" if v > 0 else "r" if v < 0 else "m"
 
 
+def ptag(product):
+    return "<span class='tg cnc'>CNC</span>" if product == "POSITIONAL" else "<span class=tg>MIS</span>"
+
+
 TRADE_JS = r"""<script src="/paper/api/lw.js"></script>
 <script src="/paper/api/chart.js" defer></script>
 <script>
-var side='BUY',ltp=null,S=null,cur='',tvOk=false,ptf=5;window.onPTf=function(t){ptf=t;if(cur)loadInfo(cur)};
+var side='BUY',prod='INTRADAY',ltp=null,S=null,cur='',tvOk=false,ptf=5;window.onPTf=function(t){ptf=t;if(cur)loadInfo(cur)};
 function $(i){return document.getElementById(i)}
 function fm(v,d){return v==null?'-':Number(v).toLocaleString('en-IN',{maximumFractionDigits:d==null?0:d,minimumFractionDigits:d==null?0:d})}
 function sg(v){return (v>0?'+':v<0?'-':'')+'Rs '+fm(Math.abs(v))}
 function cl(v){return v>0?'g':v<0?'r':'m'}
-function setSide(s){side=s;$('bb').className='b'+(s=='BUY'?' on':'');$('bs').className='s'+(s=='SELL'?' on':'');calc()}
+function tag(p){return p==='POSITIONAL'?'<span class="tg cnc">CNC</span>':'<span class=tg>MIS</span>'}
+function setSide(s){
+  if(s=='SELL'&&prod=='POSITIONAL'){say('Positional (delivery) is BUY only. Switch to Intraday to short.',false);return}
+  side=s;$('bb').className='b'+(s=='BUY'?' on':'');$('bs').className='s'+(s=='SELL'?' on':'');calc()}
+function setProd(p){
+  prod=p;$('pmis').className='p'+(p=='INTRADAY'?' on':'');$('pcnc').className='p'+(p=='POSITIONAL'?' on':'');
+  $('bs').disabled=(p=='POSITIONAL');if(p=='POSITIONAL'&&side=='SELL')setSide('BUY');
+  $('pnote').innerHTML=p=='POSITIONAL'?'<b>Positional (CNC / delivery):</b> the full value is blocked, BUY only, carried overnight - no 15:20 square-off. SL and targets keep working every market day.':'<b>Intraday (MIS):</b> '+((S&&S.leverage)||5)+'x margin, buy or short, squared off automatically at 15:20.';
+  calc()}
 function esc(t){var d=document.createElement('div');d.textContent=t==null?'':t;return d.innerHTML}
 function say(t,ok){var m=$('msg');m.textContent=t;m.className=ok?'g':'r'}
 function post(u,b){return fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})}).then(function(r){return r.json()})}
 function calc(){
   var q=+$('qty').value,sl=+$('sl').value,t1=+$('t1').value,t2=+$('t2').value,lim=$('otype').value=='LIMIT'?+$('lim').value:0;
   $('limw').style.display=$('otype').value=='LIMIT'?'':'none';
-  var ref=lim||ltp,o='';
+  var ref=lim||ltp,o='',lev=prod=='POSITIONAL'?1:((S&&S.leverage)||5);
   if(ref&&q>0){
-    o='Margin blocked: Rs '+fm(ref*q/((S&&S.leverage)||5));
+    o=(prod=='POSITIONAL'?'Amount blocked (full value): Rs ':'Margin blocked: Rs ')+fm(ref*q/lev);
     if(sl>0){var risk=Math.abs(ref-sl)*q;o+=' &middot; Risk to SL: <b class=r>Rs '+fm(risk)+'</b>';
       if(t1>0){var rw=Math.abs(t1-ref)*q;o+=' &middot; Reward at T1: <b class=g>Rs '+fm(rw)+'</b> (1 : '+(risk?(rw/risk).toFixed(1):'-')+')'}}
   }
@@ -122,7 +136,7 @@ function suggest(){
 }
 function place(){
   say('Placing...',true);
-  post('/paper/api/order',{symbol:$('sym').value,side:side,qty:$('qty').value,sl:$('sl').value,t1:$('t1').value,t2:$('t2').value,
+  post('/paper/api/order',{symbol:$('sym').value,side:side,product:prod,qty:$('qty').value,sl:$('sl').value,t1:$('t1').value,t2:$('t2').value,
      limit:$('otype').value=='LIMIT'?$('lim').value:''}).then(function(j){say(j.msg,j.ok);if(j.ok)load()})
 }
 function act(u,b){post(u,b).then(function(j){say(j.msg,j.ok);load()})}
@@ -131,15 +145,15 @@ function load(){
     S=s;
     $('k1').innerHTML=fm(s.equity);$('k2').innerHTML='<span class='+cl(s.total_pnl)+'>'+sg(s.total_pnl)+'</span>';
     $('k3').innerHTML='<span class='+cl(s.day_pnl)+'>'+sg(s.day_pnl)+'</span>';$('k4').innerHTML=fm(s.cash);$('k5').innerHTML='<span class='+cl(s.unrealized)+'>'+sg(s.unrealized)+'</span>';
-    $('mk').innerHTML=s.market_open?'':'<div class=warn>The market is closed. Orders open at 09:15 IST (Monday to Friday); new orders stop at 15:15 and open trades are squared off at 15:20.</div>';
+    $('mk').innerHTML=s.market_open?'':'<div class=warn>The market is closed. Orders open at 09:15 IST (Monday to Friday); new orders stop at 15:15. Intraday trades are squared off at 15:20; positional trades stay open overnight.</div>';
     $('er').innerHTML=(s.symbols_loaded?'':'<div class=warn>The share list is still loading'+(s.symbols_err?' ('+esc(s.symbols_err)+')':'')+'. Try again in a minute.</div>')+(s.price_err?'<div class=warn>Live prices problem: '+esc(s.price_err)+'</div>':'');
     var h='';
     s.positions.forEach(function(p){
       var tg=(p.t1?fm(p.t1,2):'-')+(p.t2?' / '+fm(p.t2,2):'');
-      h+='<tr><td><b>'+esc(p.symbol)+'</b> <span class=m>'+p.side+'</span></td><td>'+fm(p.qty)+'</td><td>'+fm(p.entry,2)+'</td><td>'+(p.ltp?fm(p.ltp,2):'-')+'</td><td>'+fm(p.sl,2)+(p.t1_done?' <span class=m>(cost)</span>':'')+'</td><td>'+tg+'</td><td class='+cl(p.pnl)+'>'+sg(p.pnl)+' <span class=m>('+p.pnl_pct+'%)</span></td><td><button class=sm onclick="act(\'/paper/api/close\',{id:\''+p.id+'\'})">Close</button></td></tr>'});
+      h+='<tr><td><b>'+esc(p.symbol)+'</b> <span class=m>'+p.side+'</span> '+tag(p.product)+(p.product==='POSITIONAL'?' <span class=m>since '+esc((p.opened||'').slice(5,10))+'</span>':'')+'</td><td>'+fm(p.qty)+'</td><td>'+fm(p.entry,2)+'</td><td>'+(p.ltp?fm(p.ltp,2):'-')+'</td><td>'+fm(p.sl,2)+(p.t1_done?' <span class=m>(cost)</span>':'')+'</td><td>'+tg+'</td><td class='+cl(p.pnl)+'>'+sg(p.pnl)+' <span class=m>('+p.pnl_pct+'%)</span></td><td><button class=sm onclick="act(\'/paper/api/close\',{id:\''+p.id+'\'})">Close</button></td></tr>'});
     $('pos').innerHTML=h||'<tr><td colspan=8 class=m style="text-align:left">No open trades.</td></tr>';
     var o='';
-    s.pending.forEach(function(x){o+='<tr><td><b>'+esc(x.symbol)+'</b> <span class=m>'+x.side+' limit</span></td><td>'+fm(x.qty)+'</td><td>'+fm(x.limit,2)+'</td><td>'+fm(x.sl,2)+'</td><td>'+(x.t1?fm(x.t1,2):'-')+(x.t2?' / '+fm(x.t2,2):'')+'</td><td><button class=sm onclick="act(\'/paper/api/cancel\',{id:\''+x.id+'\'})">Cancel</button></td></tr>'});
+    s.pending.forEach(function(x){o+='<tr><td><b>'+esc(x.symbol)+'</b> <span class=m>'+x.side+' limit</span> '+tag(x.product)+'</td><td>'+fm(x.qty)+'</td><td>'+fm(x.limit,2)+'</td><td>'+fm(x.sl,2)+'</td><td>'+(x.t1?fm(x.t1,2):'-')+(x.t2?' / '+fm(x.t2,2):'')+'</td><td><button class=sm onclick="act(\'/paper/api/cancel\',{id:\''+x.id+'\'})">Cancel</button></td></tr>'});
     $('pend').innerHTML=o?'<h3>Waiting limit orders</h3><div class=sc><table><tr><th>Stock</th><th>Qty</th><th>Limit</th><th>SL</th><th>Targets</th><th></th></tr>'+o+'</table></div>':'';
     $('notes').innerHTML=s.notes.map(function(n){return '<div class=note>'+esc(n.t)+' &middot; '+esc(n.m)+'</div>'}).join('');
     calc();
@@ -149,7 +163,7 @@ $('sym').addEventListener('input',function(){clearTimeout(tm);tm=setTimeout(sugg
 $('sym').addEventListener('change',function(){symChanged($('sym').value);getQuote()});
 ['qty','sl','t1','t2','lim','otype'].forEach(function(i){$(i).addEventListener('input',calc)});
 $('otype').addEventListener('change',calc);
-setSide('BUY');load();cur='RELIANCE';setTimeout(function(){showChart('RELIANCE');loadInfo('RELIANCE')},300);setInterval(function(){if(cur)loadInfo(cur)},60000);setInterval(load,4000);setInterval(function(){if($('sym').value)getQuote()},8000);
+setSide('BUY');setProd('INTRADAY');load();cur='RELIANCE';setTimeout(function(){showChart('RELIANCE');loadInfo('RELIANCE')},300);setInterval(function(){if(cur)loadInfo(cur)},60000);setInterval(load,4000);setInterval(function(){if($('sym').value)getQuote()},8000);
 </script>"""
 
 
@@ -158,7 +172,7 @@ def trade_page(user):
 <div id=mk></div><div id=er></div>
 <div class=card><h2>Hello {e(user)} - your practice account</h2>
 <div class=k><div><span>Account value</span><b id=k1>-</b></div><div><span>Total profit / loss</span><b id=k2>-</b></div>
-<div><span>Today</span><b id=k3>-</b></div><div><span>Free cash (margin)</span><b id=k4>-</b></div><div><span>Open trades P&amp;L</span><b id=k5>-</b></div></div></div>
+<div><span>Today</span><b id=k3>-</b></div><div><span>Free cash</span><b id=k4>-</b></div><div><span>Open trades P&amp;L</span><b id=k5>-</b></div></div></div>
 <div class=cols>
 <div>
 <div class=card id=pcard style="padding:8px">
@@ -179,6 +193,7 @@ def trade_page(user):
 <div class=card><h2>New order</h2>
 <div class=f>
 <div style="grid-column:1/-1"><label>Stock (NSE)</label><input id=sym list=dl autocomplete=off placeholder="type e.g. RELIANCE"><datalist id=dl></datalist></div>
+<div style="grid-column:1/-1"><label>Product</label><div class=seg><button id=pmis class="p on" onclick="setProd('INTRADAY')">INTRADAY (MIS)</button><button id=pcnc class=p onclick="setProd('POSITIONAL')">POSITIONAL (CNC)</button></div></div>
 <div style="grid-column:1/-1"><label>Buy or sell</label><div class=seg><button id=bb class="b on" onclick="setSide('BUY')">BUY</button><button id=bs class=s onclick="setSide('SELL')">SELL</button></div></div>
 <div><label>Quantity</label><input id=qty type=number min=1 value=10></div>
 <div><label>Order type</label><select id=otype><option value=MARKET>Market (now)</option><option value=LIMIT>Limit (wait for price)</option></select></div>
@@ -188,6 +203,7 @@ def trade_page(user):
 <div><label>Target 2 (optional)</label><input id=t2 type=number step=0.05></div>
 <div style="grid-column:1/-1"><button onclick="place()" style="width:100%">Place order</button></div></div>
 <div id=q class=note style="margin-top:8px"></div><div id=est class=note></div><div id=msg></div>
+<p id=pnote class=note></p>
 <p class=note>With Target 2 set: half is booked at Target 1 and your stop-loss moves to your entry price (the trailing idea). Without Target 2 the whole trade exits at Target 1.</p></div>
 </div></div>
 <div class=card><h2>Open trades</h2><div class=sc><table><tr><th>Stock</th><th>Qty</th><th>Entry</th><th>Price now</th><th>Stop-loss</th><th>Targets</th><th>Profit / loss</th><th></th></tr><tbody id=pos></tbody></table></div>
@@ -226,15 +242,15 @@ def history_page(user, st):
              "A win rate below 50% can still make money if your average win is bigger than your average loss.</p>")
     rows = ""
     for c in reversed(st["closed"][-200:]):
-        rows += (f"<tr><td><b>{e(c['symbol'])}</b> <span class=m>{c['side']}</span></td><td>{c['qty0']}</td><td>{c['entry']:g}</td><td>{c.get('exit', 0):g}</td>"
+        rows += (f"<tr><td><b>{e(c['symbol'])}</b> <span class=m>{c['side']}</span></td><td>{ptag(c.get('product'))}</td><td>{c['qty0']}</td><td>{c['entry']:g}</td><td>{c.get('exit', 0):g}</td>"
                  f"<td class={cls(c['net'])}>{money(c['net'], True)}</td><td>{e(', '.join(c['reasons']))}</td><td>{e(c['opened'][5:16])}</td><td>{e(c['closed'][5:16])}</td></tr>")
     days = "".join(f"<tr><td>{e(d)}</td><td class={cls(v)}>{money(v, True)}</td></tr>" for d, v in reversed(st["by_day"]))
     br = ", ".join(f"{e(k)}: {v}" for k, v in sorted(st["by_reason"].items(), key=lambda x: -x[1]))
     body = (f"<div class=card><h2>My results</h2>{k}{teach}</div>"
             f"<div class=card><h3>Profit curve (closed trades)</h3>{_curve_svg(st['curve'])}<p class=note>How your trades ended: {br or '-'}</p></div>"
             f"<div class=card><h3>Profit by day</h3><div class=sc><table><tr><th>Day</th><th>Net</th></tr>{days or '<tr><td colspan=2 class=m>No trades yet.</td></tr>'}</table></div></div>"
-            f"<div class=card><h3>Trade list (latest 200)</h3><div class=sc><table><tr><th>Stock</th><th>Qty</th><th>Entry</th><th>Exit</th><th>Net</th><th>How it ended</th><th>Opened</th><th>Closed</th></tr>"
-            f"{rows or '<tr><td colspan=8 class=m style=text-align:left>No closed trades yet.</td></tr>'}</table></div>"
+            f"<div class=card><h3>Trade list (latest 200)</h3><div class=sc><table><tr><th>Stock</th><th>Type</th><th>Qty</th><th>Entry</th><th>Exit</th><th>Net</th><th>How it ended</th><th>Opened</th><th>Closed</th></tr>"
+            f"{rows or '<tr><td colspan=9 class=m style=text-align:left>No closed trades yet.</td></tr>'}</table></div>"
             f"<p><a href='/paper/history.csv' style='color:#7db3ff'>Download my trades (CSV)</a></p></div>"
             "<div class=card><h3>Start again</h3><p class=note>Resets your account to the starting money and clears your trade list (your old totals stay noted for the teacher). Close open trades first.</p>"
             "<button class=gh onclick=\"if(confirm('Reset your practice account?'))fetch('/paper/api/reset',{method:'POST'}).then(function(r){return r.json()}).then(function(j){alert(j.msg);location.reload()})\">Reset my account</button></div>")
@@ -254,17 +270,19 @@ def leaderboard_page(user, rows):
 
 
 def help_page():
-    from paper_engine import START_CASH, LEVERAGE, COST_PCT
+    from paper_engine import START_CASH, LEVERAGE, COST_PCT, COST_PCT_CNC
     body = f"""<div class=card><h2>How this practice app works</h2><ul style="line-height:1.7">
 <li>You start with <b>Rs {START_CASH:,.0f}</b> of virtual money. No real orders are ever placed.</li>
-<li>Prices are <b>live NSE prices</b>. Trade between 09:15 and 15:15 IST, Monday to Friday. Everything still open is closed at <b>15:20</b> (intraday style).</li>
-<li>You can <b>buy</b> (hoping the price rises) or <b>sell/short</b> (hoping it falls).</li>
-<li>Margin is {LEVERAGE}x: a trade worth Rs 1,00,000 blocks Rs {100000 // LEVERAGE:,} of your cash while it is open.</li>
+<li>Prices are <b>live NSE prices</b>. New orders between 09:15 and 15:15 IST, Monday to Friday.</li>
+<li>Every order is either <b>Intraday (MIS)</b> or <b>Positional (CNC / delivery)</b>:
+<ul>
+<li><b>Intraday:</b> margin is {LEVERAGE}x (a trade worth Rs 1,00,000 blocks Rs {100000 // LEVERAGE:,}). You can <b>buy</b> or <b>sell/short</b>. Anything still open is closed automatically at <b>15:20</b>. Cost {COST_PCT}% per side.</li>
+<li><b>Positional:</b> the <b>full value</b> is blocked (no leverage) and the trade is <b>carried overnight</b> for as many days as you like - no 15:20 square-off. <b>BUY only</b> (on NSE you cannot hold a short in delivery). Cost {COST_PCT_CNC}% per side (delivery taxes are higher). Your SL and targets keep working every market day; if the stock opens past your SL after a gap, you exit at the opening price - just like real life.</li>
+</ul></li>
 <li><b>A stop-loss is required</b> on every order. It exits the trade if the price goes against you.</li>
 <li><b>Targets:</b> Target 1 only = the whole trade exits there. Target 1 + Target 2 = half exits at Target 1, your stop-loss moves to your entry price (you can no longer lose on the rest), and the rest runs to Target 2.</li>
-<li><b>Market order</b> fills immediately at the live price. <b>Limit order</b> waits until the price reaches your level.</li>
+<li><b>Market order</b> fills immediately at the live price. <b>Limit order</b> waits until the price reaches your level (limit orders are for the day only and are cancelled at 15:20 if not filled).</li>
 <li>One trade per stock at a time.</li>
-<li>A cost of {COST_PCT}% per side is charged (an estimate of brokerage and taxes) so the results are realistic.</li>
 <li>Use <b>My results</b> to see your win rate, average win and loss, profit factor and profit curve. Judge yourself on these, not on one lucky day.</li></ul></div>"""
     return shell("How it works", "/paper/help", body)
 

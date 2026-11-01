@@ -122,6 +122,19 @@
     if (!keepRange && bars.length > 120) chart.timeScale().setVisibleLogicalRange({ from: bars.length - 110, to: bars.length + 6 });
   }
 
+  /* ---------- live price may only touch the candle that is forming right now ----------
+     FIX 2026-11-01: the live price (Dhan LTP, polled every 8 s by the order form) used to be pasted onto the last candle
+     at any time - also on weekends, holidays and after 15:30, when the last candle is an old one and the LTP is the
+     official closing price. That stretched the old candle (e.g. WIPRO 197.31 <-> 198.31) and it jumped back on every
+     20-second reload. Now the live price is used only on a weekday between 09:15 and 15:30 IST, and only when the
+     current time falls inside the last candle's own time window. Otherwise the chart shows Dhan's candles as they are. */
+  function liveCandleOpen(b) {
+    var now = Math.floor(Date.now() / 1000), ist = new Date((now + OFF) * 1000);
+    var wd = ist.getUTCDay(), m = ist.getUTCHours() * 60 + ist.getUTCMinutes();
+    if (wd === 0 || wd === 6 || m < 9 * 60 + 15 || m >= 15 * 60 + 30) return false;   // market closed
+    return now >= b.t && now < b.t + TF * 60;                                           // inside this candle's window
+  }
+
   /* ---------- data ---------- */
   var busy = false;
   function load(keep) {
@@ -137,7 +150,13 @@
     setSymbol: function (s) { sym = s; info = null; bars = []; document.getElementById('pctitle').textContent = s; var a = document.getElementById('ptvlink'); if (a) a.href = 'https://in.tradingview.com/chart/?symbol=NSE%3A' + encodeURIComponent(s.replace(/-/g, '_')); load(false); },
     setInfo: function (i) { info = i; if (bars.length) draw(true); },
     setLevels: function (l) { S.levels = l || {}; if (bars.length) { var keep = true; draw(keep); } },
-    tick: function (price) { if (!bars.length || !price) return; var b = bars[bars.length - 1]; b.c = price; b.h = Math.max(b.h, price); b.l = Math.min(b.l, price); candle.update({ time: T(bars.length - 1), open: b.o, high: b.h, low: b.l, close: price }); },
+    tick: function (price) {
+      if (!bars.length || !price) return;
+      var b = bars[bars.length - 1];
+      if (!liveCandleOpen(b)) return;                                                  // market closed or old candle: leave it alone
+      b.c = price; b.h = Math.max(b.h, price); b.l = Math.min(b.l, price);
+      candle.update({ time: T(bars.length - 1), open: b.o, high: b.h, low: b.l, close: price });
+    },
     refresh: function () { load(true); }
   };
   /* ---------- controls ---------- */

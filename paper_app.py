@@ -36,10 +36,10 @@ def install(app):
     def history_csv():
         out = io.StringIO()
         w = csv.writer(out)
-        cols = ["closed", "symbol", "side", "qty", "entry", "exit", "reason", "gross", "cost", "net", "opened"]
+        cols = ["closed", "symbol", "side", "product", "qty", "entry", "exit", "reason", "gross", "cost", "net", "opened"]
         w.writerow(cols)
         for t in pe.acct(user())["trades"]:
-            w.writerow([t.get(c) for c in cols])
+            w.writerow([t.get(c, "INTRADAY" if c == "product" else None) for c in cols])
         return Response(out.getvalue(), mimetype="text/csv", headers={"Content-Disposition": "attachment; filename=my_paper_trades.csv"})
 
     def leaderboard():
@@ -76,7 +76,8 @@ def install(app):
 
     def api_order():
         d = body()
-        ok, msg = pe.place_order(user(), d.get("symbol"), d.get("side"), d.get("qty"), d.get("sl"), d.get("t1"), d.get("t2"), d.get("limit"))
+        ok, msg = pe.place_order(user(), d.get("symbol"), d.get("side"), d.get("qty"), d.get("sl"), d.get("t1"), d.get("t2"), d.get("limit"),
+                                 d.get("product"))
         return jsonify({"ok": ok, "msg": msg})
 
     def api_close():

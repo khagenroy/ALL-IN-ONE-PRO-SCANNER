@@ -1,9 +1,13 @@
 """
 PAPER-TRADE engine - practice trading with virtual money at LIVE Dhan prices. Places no real orders, ever.
 Each approved user has a virtual account (START_CASH). Orders: market or limit, buy or sell (short), always with a stop-loss and up to two targets.
- - Intraday style: margin = value / LEVERAGE is blocked while a trade is open; everything is squared off at 15:20 IST.
+ - Two products, like a real broker:
+     INTRADAY   (MIS): margin = value / LEVERAGE is blocked, buy or short, everything squared off at 15:20 IST.
+     POSITIONAL (CNC / delivery): the full value is blocked (no leverage), BUY only (no delivery shorting on NSE),
+                carried overnight with no square-off; the SL and targets keep working every market day.
  - T1 with a T2 set: half the quantity is booked at T1 and the SL moves to the entry price; the rest runs to T2 or the SL.
- - Costs: a flat COST_PCT per side of the turnover is charged (an estimate of brokerage + taxes), so results are not flattered.
+ - Costs: a flat % per side of the turnover is charged (an estimate of brokerage + taxes), higher for delivery, so results are not flattered.
+ - SL / targets / limit fills are only checked while the market is open (09:15 - 15:30 IST, Monday to Friday).
 All data is kept in one json file on the Render disk (/var/data/paper when a disk is attached).
 """
 import os
@@ -25,8 +29,9 @@ log = logging.getLogger("paper")
 IST = ZoneInfo("Asia/Kolkata")
 
 START_CASH = 2_500_000
-LEVERAGE = 5
-COST_PCT = 0.03                     # per side, % of turnover (estimate of brokerage + STT + charges)
+LEVERAGE = 5                        # intraday (MIS) margin multiple
+COST_PCT = 0.03                     # intraday, per side, % of turnover (estimate of brokerage + STT + charges)
+COST_PCT_CNC = 0.12                 # positional / delivery, per side (delivery STT is much higher)
 OPEN_MIN = 9 * 60 + 15
 LAST_ENTRY_MIN = 15 * 60 + 15       # no new orders after this
 SQUAREOFF_MIN = 15 * 60 + 20
@@ -35,6 +40,24 @@ TICK_SECONDS = 5
 MAX_TRADES_KEPT = 5000
 PRICE_CACHE_S = 2.0
 SCRIP_URL = "https://images.dhan.co/api-data/api-scrip-master.csv"
+
+INTRADAY = "INTRADAY"
+POSITIONAL = "POSITIONAL"
+
+
+def _product(v):
+    """Order product from the form. Anything that is not clearly positional/delivery is intraday (the old default)."""
+    v = (v or "").strip().upper()
+    return POSITIONAL if v in ("POSITIONAL", "CNC", "DELIVERY") else INTRADAY
+
+
+def _lev(x):
+    """Margin multiple of a position / order (old records without a product are intraday)."""
+    return 1 if x.get("product") == POSITIONAL else LEVERAGE
+
+
+def _plabel(p):
+    return "Positional" if p == POSITIONAL else "Intraday"
 
 
 def _data_dir():
@@ -380,22 +403,24 @@ def _pnl(side, entry, exit_, qty):
     return (exit_ - entry) * qty * (1 if side == "BUY" else -1)
 
 
-def _cost(entry, exit_, qty):
-    return (entry + exit_) * qty * COST_PCT / 100.0
+def _cost(entry, exit_, qty, product=INTRADAY):
+    pct = COST_PCT_CNC if product == POSITIONAL else COST_PCT
+    return (entry + exit_) * qty * pct / 100.0
 
 
 def _exit_leg(a, pos, qty, price, reason, t):
     qty = min(int(qty), pos["qty"])
     if qty <= 0:
         return
+    product = pos.get("product", INTRADAY)
     gross = _pnl(pos["side"], pos["entry"], price, qty)
-    cost = _cost(pos["entry"], price, qty)
-    a["cash"] += pos["entry"] * qty / LEVERAGE + gross - cost
-    a["trades"].append({"pos": pos["id"], "symbol": pos["symbol"], "side": pos["side"], "qty": qty, "qty0": pos["qty0"],
+    cost = _cost(pos["entry"], price, qty, product)
+    a["cash"] += pos["entry"] * qty / _lev(pos) + gross - cost
+    a["trades"].append({"pos": pos["id"], "symbol": pos["symbol"], "side": pos["side"], "product": product, "qty": qty, "qty0": pos["qty0"],
                         "entry": round(pos["entry"], 2), "exit": round(price, 2), "opened": pos["opened"],
                         "closed": t.strftime("%Y-%m-%d %H:%M:%S"), "reason": reason,
                         "gross": round(gross, 2), "cost": round(cost, 2), "net": round(gross - cost, 2)})
-    _note(a, f"{pos['symbol']} {reason}: {qty} sold/bought back at {price:g}, net Rs {gross - cost:,.0f}")
+    _note(a, f"{pos['symbol']} ({_plabel(product)}) {reason}: {qty} sold/bought back at {price:g}, net Rs {gross - cost:,.0f}")
     pos["qty"] -= qty
     if pos["qty"] <= 0:
         a["positions"] = [p for p in a["positions"] if p["id"] != pos["id"]]
@@ -434,15 +459,18 @@ def _num(v):
         return None
 
 
-def place_order(user, symbol, side, qty, sl, t1=None, t2=None, limit=None):
-    """Returns (ok, message)."""
+def place_order(user, symbol, side, qty, sl, t1=None, t2=None, limit=None, product=None):
+    """Returns (ok, message). product = INTRADAY (default) or POSITIONAL."""
     symbol = (symbol or "").strip().upper()
     side = (side or "").upper()
+    product = _product(product)
     ent = _sym["map"].get(symbol)
     if not ent:
         return False, "Unknown symbol (NSE equities only)."
     if side not in ("BUY", "SELL"):
         return False, "Choose Buy or Sell."
+    if product == POSITIONAL and side == "SELL":
+        return False, "Positional (delivery) is BUY only - shares you do not own cannot be held short overnight. Use Intraday to short."
     try:
         qty = int(qty)
     except (TypeError, ValueError):
@@ -460,27 +488,29 @@ def place_order(user, symbol, side, qty, sl, t1=None, t2=None, limit=None):
     bad = _check_levels(side, ref, sl, t1, t2)
     if bad:
         return False, bad
+    lev = 1 if product == POSITIONAL else LEVERAGE
     with _LOCK:
         a = acct(user)
         if any(p["symbol"] == symbol for p in a["positions"]) or any(o["symbol"] == symbol for o in a["pending"]):
             return False, f"You already have an open trade or pending order in {symbol}. Close or cancel it first."
-        margin = ref * qty / LEVERAGE
+        margin = ref * qty / lev
         if margin > a["cash"]:
-            return False, f"Not enough margin: needs Rs {margin:,.0f}, you have Rs {a['cash']:,.0f} free."
+            what = "the full amount" if product == POSITIONAL else "margin"
+            return False, f"Not enough cash: needs Rs {margin:,.0f} ({what}), you have Rs {a['cash']:,.0f} free."
         if limit:
             if (side == "BUY" and limit >= ltp) or (side == "SELL" and limit <= ltp):
                 return False, f"A limit {side} must be {'below' if side == 'BUY' else 'above'} the current price ({ltp:g}). Use a market order to trade now."
-            a["pending"].append({"id": _nid(a, "O"), "symbol": symbol, "sid": ent[0], "side": side, "qty": qty, "limit": limit,
+            a["pending"].append({"id": _nid(a, "O"), "symbol": symbol, "sid": ent[0], "side": side, "product": product, "qty": qty, "limit": limit,
                                  "sl": sl, "t1": t1, "t2": t2, "created": t.strftime("%H:%M:%S")})
             _save()
-            return True, f"Limit order placed: {side} {qty} {symbol} at {limit:g}."
+            return True, f"{_plabel(product)} limit order placed: {side} {qty} {symbol} at {limit:g}."
         a["cash"] -= margin
-        a["positions"].append({"id": _nid(a, "P"), "symbol": symbol, "sid": ent[0], "side": side, "qty": qty, "qty0": qty,
+        a["positions"].append({"id": _nid(a, "P"), "symbol": symbol, "sid": ent[0], "side": side, "product": product, "qty": qty, "qty0": qty,
                                "entry": ltp, "sl": sl, "sl0": sl, "t1": t1, "t2": t2, "t1_done": False,
                                "opened": t.strftime("%Y-%m-%d %H:%M:%S")})
-        _note(a, f"{side} {qty} {symbol} filled at {ltp:g} (SL {sl:g}).")
+        _note(a, f"{_plabel(product)} {side} {qty} {symbol} filled at {ltp:g} (SL {sl:g}).")
         _save()
-        return True, f"{side} {qty} {symbol} filled at {ltp:g}."
+        return True, f"{_plabel(product)} {side} {qty} {symbol} filled at {ltp:g}."
 
 
 def close_position(user, pid):
@@ -540,9 +570,10 @@ def reset_account(user, force=False):
 
 # ------------------------------------------------------------------ the 5-second engine
 def tick():
-    """Moves every open trade and pending order forward with the latest prices: SL, targets, limit fills, 15:20 square-off."""
+    """Moves every open trade and pending order forward with the latest prices: SL, targets, limit fills,
+    15:20 square-off of INTRADAY trades. Only runs while the market is open (positional trades wait overnight)."""
     t = now_ist()
-    if t.weekday() >= 5 or _mins(t) < OPEN_MIN:
+    if t.weekday() >= 5 or _mins(t) < OPEN_MIN or _mins(t) >= CLOSE_MIN:
         return
     with _LOCK:
         sids = {x["sid"] for a in _db["users"].values() for x in a["positions"] + a["pending"]}
@@ -554,7 +585,7 @@ def tick():
     sq = _mins(t) >= SQUAREOFF_MIN
     with _LOCK:
         for user, a in _db["users"].items():
-            for o in list(a["pending"]):                                   # limit orders
+            for o in list(a["pending"]):                                   # limit orders (day orders for both products)
                 p = px.get(o["sid"])
                 if p is None:
                     continue
@@ -566,22 +597,23 @@ def tick():
                 if not hit:
                     continue
                 a["pending"].remove(o)
-                margin = p * o["qty"] / LEVERAGE
+                margin = p * o["qty"] / _lev(o)
                 bad = _check_levels(o["side"], p, o["sl"], o["t1"], o["t2"])
                 if bad or margin > a["cash"]:
-                    _note(a, f"Limit order {o['side']} {o['symbol']} was reached at {p:g} but dropped: " + (bad or "not enough margin"))
+                    _note(a, f"Limit order {o['side']} {o['symbol']} was reached at {p:g} but dropped: " + (bad or "not enough cash"))
                     continue
                 a["cash"] -= margin
-                _note(a, f"Limit order filled: {o['side']} {o['qty']} {o['symbol']} at {p:g}.")
-                a["positions"].append({"id": _nid(a, "P"), "symbol": o["symbol"], "sid": o["sid"], "side": o["side"], "qty": o["qty"],
-                                       "qty0": o["qty"], "entry": p, "sl": o["sl"], "sl0": o["sl"], "t1": o["t1"], "t2": o["t2"],
+                prod = o.get("product", INTRADAY)
+                _note(a, f"{_plabel(prod)} limit order filled: {o['side']} {o['qty']} {o['symbol']} at {p:g}.")
+                a["positions"].append({"id": _nid(a, "P"), "symbol": o["symbol"], "sid": o["sid"], "side": o["side"], "product": prod,
+                                       "qty": o["qty"], "qty0": o["qty"], "entry": p, "sl": o["sl"], "sl0": o["sl"], "t1": o["t1"], "t2": o["t2"],
                                        "t1_done": False, "opened": t.strftime("%Y-%m-%d %H:%M:%S")})
             for pos in list(a["positions"]):                               # open trades
                 p = px.get(pos["sid"])
                 if p is None:
                     continue
                 buy = pos["side"] == "BUY"
-                if sq:
+                if sq and pos.get("product", INTRADAY) != POSITIONAL:      # only intraday trades are squared off
                     _exit_leg(a, pos, pos["qty"], p, "SQUARE-OFF 15:20", t)
                     continue
                 if (buy and p <= pos["sl"]) or (not buy and p >= pos["sl"]):
@@ -627,11 +659,14 @@ def state(user):
     unreal, margin = 0.0, 0.0
     pos = []
     for p in a["positions"]:
+        p.setdefault("product", INTRADAY)
         ltp = px.get(p["sid"])
         pnl = _pnl(p["side"], p["entry"], ltp, p["qty"]) if ltp else 0.0
         unreal += pnl
-        margin += p["entry"] * p["qty"] / LEVERAGE
+        margin += p["entry"] * p["qty"] / _lev(p)
         pos.append({**p, "ltp": ltp, "pnl": round(pnl, 2), "pnl_pct": round(pnl / (p["entry"] * p["qty"]) * 100, 2) if ltp else 0})
+    for o in a["pending"]:
+        o.setdefault("product", INTRADAY)
     today = now_ist().strftime("%Y-%m-%d")
     day_net = sum(x["net"] for x in a["trades"] if x["closed"].startswith(today)) + unreal
     equity = a["cash"] + margin + unreal
@@ -639,17 +674,17 @@ def state(user):
             "start": a["start"], "total_pnl": round(equity - a["start"], 2), "day_pnl": round(day_net, 2),
             "positions": pos, "pending": a["pending"], "market_open": market_open(), "can_enter": can_enter(),
             "price_err": prices.last_err, "symbols_loaded": len(_sym["map"]), "symbols_err": _sym["err"],
-            "leverage": LEVERAGE, "cost_pct": COST_PCT, "notes": a.get("notes", [])[::-1]}
+            "leverage": LEVERAGE, "cost_pct": COST_PCT, "cost_pct_cnc": COST_PCT_CNC, "notes": a.get("notes", [])[::-1]}
 
 
 def positions_closed(trades):
-    """Legs of one trade are joined: [{pos, symbol, side, net, opened, closed, reasons}] in closing order."""
+    """Legs of one trade are joined: [{pos, symbol, side, product, net, opened, closed, reasons}] in closing order."""
     d, order = {}, []
     for x in trades:
         k = x["pos"] + "|" + x["opened"]
         if k not in d:
-            d[k] = {"pos": x["pos"], "symbol": x["symbol"], "side": x["side"], "qty0": x["qty0"], "entry": x["entry"], "net": 0.0,
-                    "gross": 0.0, "cost": 0.0, "opened": x["opened"], "closed": x["closed"], "reasons": []}
+            d[k] = {"pos": x["pos"], "symbol": x["symbol"], "side": x["side"], "product": x.get("product", INTRADAY), "qty0": x["qty0"],
+                    "entry": x["entry"], "net": 0.0, "gross": 0.0, "cost": 0.0, "opened": x["opened"], "closed": x["closed"], "reasons": []}
             order.append(k)
         r = d[k]
         r["net"] += x["net"]
@@ -704,7 +739,7 @@ def leaderboard():
             ltp = px.get(p["sid"])
             if ltp:
                 un += _pnl(p["side"], p["entry"], ltp, p["qty"])
-            mg += p["entry"] * p["qty"] / LEVERAGE
+            mg += p["entry"] * p["qty"] / _lev(p)
         eq = a["cash"] + mg + un
         st = stats(a["trades"])
         rows.append({"user": u, "equity": round(eq, 2), "pnl": round(eq - a["start"], 2), "pnl_pct": round((eq - a["start"]) / a["start"] * 100, 2),
