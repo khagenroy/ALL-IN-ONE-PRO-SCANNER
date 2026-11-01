@@ -5,7 +5,7 @@
   var OFF = 19800;                                  // show IST on the time axis
   var IND = { vol: 1, vwap: 1, ema20: 1, zones: 1, spurt: 1, ema9: 0, ema50: 0, sma200: 0, bb: 0, st: 0, rsi: 0, macd: 0, lines: 1 };
   try { var sv = JSON.parse(localStorage.getItem('pchart_ind') || 'null'); if (sv) for (var k in sv) IND[k] = sv[k]; } catch (e) {}
-  var TF = 5, sym = '', bars = [], extra = [], plines = [], info = null, S = { levels: {} };
+  var TF = '5', sym = '', bars = [], extra = [], plines = [], info = null, S = { levels: {} };
   var chart = LW.createChart(el, {
     layout: { background: { color: '#0f1520' }, textColor: '#c8d1e0', panes: { separatorColor: '#2a344a' } },
     grid: { vertLines: { color: '#182033' }, horzLines: { color: '#182033' } },
@@ -15,6 +15,10 @@
   var candle = chart.addSeries(LW.CandlestickSeries, { upColor: '#26a69a', downColor: '#ef5350', borderVisible: false, wickUpColor: '#26a69a', wickDownColor: '#ef5350' });
   var markers = LW.createSeriesMarkers(candle, []);
   var leg = document.getElementById('plegend');
+  /* timeframes: '5' '15' '30' '45' '60' '120' '180' '240' (minutes) or 'D' 'W' 'M' */
+  function htf() { return TF === 'D' || TF === 'W' || TF === 'M'; }
+  function tfMin() { return TF === 'D' ? 1440 : TF === 'W' ? 10080 : TF === 'M' ? 44640 : +TF; }
+  function tfLabel() { if (htf()) return TF; var m = +TF; return m >= 60 ? (m / 60) + 'h' : m + 'm'; }
 
   function fmt(v) { return v == null ? '-' : Number(v).toLocaleString('en-IN', { maximumFractionDigits: 2, minimumFractionDigits: 2 }); }
   chart.subscribeCrosshairMove(function (p) {
@@ -22,7 +26,7 @@
     if (!d && bars.length) { var b = bars[bars.length - 1]; d = { open: b.o, high: b.h, low: b.l, close: b.c }; }
     if (!d) return;
     var up = d.close >= d.open;
-    leg.innerHTML = '<b>' + sym + '</b> ' + TF + 'm &nbsp;O ' + fmt(d.open) + ' H ' + fmt(d.high) + ' L ' + fmt(d.low) + ' C <b style="color:' + (up ? '#26a69a' : '#ef5350') + '">' + fmt(d.close) + '</b>';
+    leg.innerHTML = '<b>' + sym + '</b> ' + tfLabel() + ' &nbsp;O ' + fmt(d.open) + ' H ' + fmt(d.high) + ' L ' + fmt(d.low) + ' C <b style="color:' + (up ? '#26a69a' : '#ef5350') + '">' + fmt(d.close) + '</b>';
   });
 
 
@@ -78,6 +82,7 @@
 
   function draw(keepRange) {
     clearExtra();
+    chart.applyOptions({ timeScale: { timeVisible: !htf() } });              // dates only on D / W / M
     var cd = bars.map(function (b, i) { return { time: T(i), open: b.o, high: b.h, low: b.l, close: b.c }; });
     candle.setData(cd);
     var closes = bars.map(function (b) { return b.c; });
@@ -90,7 +95,7 @@
     if (IND.ema20) line(ser(ema(closes, 20)), '#42a5f5', 0, 1, 'EMA20');
     if (IND.ema50) line(ser(ema(closes, 50)), '#ab47bc', 0, 1, 'EMA50');
     if (IND.sma200) line(ser(sma(closes, 200)), '#ff7043', 0, 2, 'SMA200');
-    if (IND.vwap) { var pv = 0, vv = 0, cd0 = -1, vw = []; bars.forEach(function (b, i) { var d = day(b.t); if (d !== cd0) { cd0 = d; pv = 0; vv = 0; } pv += (b.h + b.l + b.c) / 3 * b.v; vv += b.v; vw.push(vv ? pv / vv : null); }); line(ser(vw), '#ffffff', 0, 1, 'VWAP'); }
+    if (IND.vwap && !htf()) { var pv = 0, vv = 0, cd0 = -1, vw = []; bars.forEach(function (b, i) { var d = day(b.t); if (d !== cd0) { cd0 = d; pv = 0; vv = 0; } pv += (b.h + b.l + b.c) / 3 * b.v; vv += b.v; vw.push(vv ? pv / vv : null); }); line(ser(vw), '#ffffff', 0, 1, 'VWAP'); }
     if (IND.bb) { var m = sma(closes, 20), up = [], lo = []; for (var i = 0; i < closes.length; i++) { if (m[i] == null) { up.push(null); lo.push(null); continue; } var s = 0; for (var j = i - 19; j <= i; j++) s += Math.pow(closes[j] - m[i], 2); var sd = Math.sqrt(s / 20); up.push(m[i] + 2 * sd); lo.push(m[i] - 2 * sd); }
       line(ser(m), '#78909c', 0, 1, ''); line(ser(up), '#78909c', 0, 1, ''); line(ser(lo), '#78909c', 0, 1, ''); }
     if (IND.st) { var a = atr(bars, 10), fu = [], fl = [], dir = 1, stU = [], stD = []; for (i = 0; i < bars.length; i++) { if (a[i] == null) { fu.push(null); fl.push(null); continue; }
@@ -132,7 +137,7 @@
     var now = Math.floor(Date.now() / 1000), ist = new Date((now + OFF) * 1000);
     var wd = ist.getUTCDay(), m = ist.getUTCHours() * 60 + ist.getUTCMinutes();
     if (wd === 0 || wd === 6 || m < 9 * 60 + 15 || m >= 15 * 60 + 30) return false;   // market closed
-    return now >= b.t && now < b.t + TF * 60;                                           // inside this candle's window
+    return now >= b.t && now < b.t + tfMin() * 60;                                           // inside this candle's window
   }
 
   /* ---------- data ---------- */
@@ -143,7 +148,7 @@
       busy = false; var st = document.getElementById('pcmsg');
       if (!j.ok) { st.textContent = j.msg; return; } st.textContent = '';
       bars = j.bars; draw(keep);
-      var b = bars[bars.length - 1]; if (b) leg.innerHTML = '<b>' + sym + '</b> ' + TF + 'm &nbsp;O ' + fmt(b.o) + ' H ' + fmt(b.h) + ' L ' + fmt(b.l) + ' C ' + fmt(b.c);
+      var b = bars[bars.length - 1]; if (b) leg.innerHTML = '<b>' + sym + '</b> ' + tfLabel() + ' &nbsp;O ' + fmt(b.o) + ' H ' + fmt(b.h) + ' L ' + fmt(b.l) + ' C ' + fmt(b.c);
     }).catch(function () { busy = false; });
   }
   window.PChart = {
@@ -160,7 +165,7 @@
     refresh: function () { load(true); }
   };
   /* ---------- controls ---------- */
-  document.querySelectorAll('#ptf button').forEach(function (b) { b.addEventListener('click', function () { TF = +b.dataset.tf; document.querySelectorAll('#ptf button').forEach(function (x) { x.classList.toggle('on', x === b); }); info = null; load(false); if (window.onPTf) window.onPTf(TF); }); });
+  document.querySelectorAll('#ptf button').forEach(function (b) { b.addEventListener('click', function () { TF = b.dataset.tf; document.querySelectorAll('#ptf button').forEach(function (x) { x.classList.toggle('on', x === b); }); info = null; load(false); if (window.onPTf) window.onPTf(TF); }); });
   var menu = document.getElementById('pind');
   menu.querySelectorAll('input').forEach(function (c) { c.checked = !!IND[c.dataset.k]; c.addEventListener('change', function () { IND[c.dataset.k] = c.checked ? 1 : 0; try { localStorage.setItem('pchart_ind', JSON.stringify(IND)); } catch (e) {} if (bars.length) draw(true); }); });
   document.getElementById('pindbtn').addEventListener('click', function () { menu.style.display = menu.style.display === 'block' ? 'none' : 'block'; });

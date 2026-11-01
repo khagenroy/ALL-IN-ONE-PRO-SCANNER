@@ -27,7 +27,7 @@ button.buy{background:#1f9d57}button.sell{background:#d6453d}button.sm{padding:4
 @media(max-width:900px){.cols{grid-template-columns:1fr}}
 #pchart{height:520px;border-radius:8px;overflow:hidden;background:#0f1520}
 .ch{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:2px 4px 8px}.ch b{font-size:16px;margin-right:4px}
-#ptf button{background:#47546f;padding:5px 11px;border-radius:6px;font-size:12px;margin-right:3px}#ptf button.on{background:#2d5bd6}
+#ptf{display:inline-flex;flex-wrap:wrap;gap:3px}#ptf button{background:#47546f;padding:5px 9px;border-radius:6px;font-size:12px;margin-right:3px}#ptf button.on{background:#2d5bd6}
 #pind{display:none;position:absolute;left:0;top:30px;z-index:50;background:#141a26;border:1px solid #37445f;border-radius:8px;padding:8px 12px;width:230px;max-height:340px;overflow:auto}
 #pind label{display:flex;gap:8px;align-items:center;color:#e6e9ef;font-size:13px;margin:5px 0;cursor:pointer}#pind input{width:auto}
 #plegend{margin:0 4px 4px;min-height:16px;font-size:12px}
@@ -81,7 +81,7 @@ def ptag(product):
 TRADE_JS = r"""<script src="/paper/api/lw.js"></script>
 <script src="/paper/api/chart.js" defer></script>
 <script>
-var side='BUY',prod='INTRADAY',ltp=null,S=null,cur='',tvOk=false,ptf=5;window.onPTf=function(t){ptf=t;if(cur)loadInfo(cur)};
+var side='BUY',prod='INTRADAY',ltp=null,S=null,cur='',tvOk=false,ptf='5';window.onPTf=function(t){ptf=t;if(cur)loadInfo(cur)};
 function $(i){return document.getElementById(i)}
 function fm(v,d){return v==null?'-':Number(v).toLocaleString('en-IN',{maximumFractionDigits:d==null?0:d,minimumFractionDigits:d==null?0:d})}
 function sg(v){return (v>0?'+':v<0?'-':'')+'Rs '+fm(Math.abs(v))}
@@ -209,7 +209,7 @@ def trade_page(user):
 <div class=card id=pcard style="padding:8px">
 <div class=ch><b id=pctitle style="display:none">Pick a stock</b>
 <span id=pcs><span class=ic>&#128269;</span><input id=pcsearch autocomplete=off spellcheck=false placeholder="Search stock" title="Search any NSE stock"><div id=pcdd></div></span>
-<span id=ptf><button data-tf=5 class=on>5m</button><button data-tf=15>15m</button><button data-tf=60>1h</button></span>
+<span id=ptf><button data-tf=5 class=on>5m</button><button data-tf=15>15m</button><button data-tf=30>30m</button><button data-tf=45>45m</button><button data-tf=60>1h</button><button data-tf=120>2h</button><button data-tf=180>3h</button><button data-tf=240>4h</button><button data-tf=D>D</button><button data-tf=W>W</button><button data-tf=M>M</button></span>
 <span style="position:relative"><button id=pindbtn class=sm>Indicators &#9662;</button><div id=pind>
 <label><input type=checkbox data-k=vol>Volume</label><label><input type=checkbox data-k=vwap>VWAP</label>
 <label><input type=checkbox data-k=ema9>EMA 9</label><label><input type=checkbox data-k=ema20>EMA 20</label><label><input type=checkbox data-k=ema50>EMA 50</label><label><input type=checkbox data-k=sma200>SMA 200</label>

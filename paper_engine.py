@@ -16,7 +16,7 @@ import time
 import threading
 import logging
 import tempfile
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import requests
@@ -297,18 +297,13 @@ def chart_info(symbol, tf=15):
     ent = _sym["map"].get(symbol)
     if not ent:
         return None, "Unknown symbol."
-    try:
-        tf = int(tf)
-    except (TypeError, ValueError):
-        tf = 15
-    if tf not in (5, 15, 60):
-        tf = 15
+    tf = _tf(tf, "15")
     c = _ci.get((symbol, tf))
     if c and time.time() - c[0] < 120:
         return c[1], ""
     try:
         import paper_zones as spurt_zones
-        df5 = dl.candles(ent[0], "NSE_EQ", "EQUITY", 8, with_oi=False)
+        df5 = _m5(ent[0])
         asof = dl.utc_now()
         d5 = dl.drop_forming(df5, 5, asof)
         if d5 is None or len(d5) < 20:
@@ -319,7 +314,7 @@ def chart_info(symbol, tf=15):
         day_chg = round((price / float(prev.iloc[-1]) - 1) * 100, 2) if len(prev) else None
         out = {"symbol": symbol, "price": round(price, 2), "day_chg": day_chg, "support": None, "resistance": None, "at_zone": "",
                "zones": [], "spurt": None, "spurt_peak": None}
-        d15 = dl.drop_forming(dl.merge_bars(df5, tf // 5) if tf > 5 else df5, tf, asof)
+        d15 = _closed_bars(ent[0], tf, asof)          # closed candles of the timeframe selected on the chart
         if d15 is not None and len(d15) >= 30:
             zs = spurt_zones.live_zones(d15) or []
             def _t0(z):
@@ -361,31 +356,193 @@ def chart_info(symbol, tf=15):
         return None, f"Could not read candles ({e})"
 
 
-# ------------------------------------------------------------------ chart candles
+# ------------------------------------------------------------------ chart candles (every timeframe)
 _cc = {}
 CHART_DAYS = 8
+# intraday timeframe (minutes) -> (Dhan candle size used to build it, days of history loaded)
+TF_INTRA = {5: (5, 8), 15: (5, 8), 30: (15, 45), 45: (15, 75), 60: (15, 120), 120: (15, 180), 180: (15, 270), 240: (15, 365)}
+TF_HTF = ("D", "W", "M")                  # daily / weekly / monthly, built from Dhan daily candles
+DAILY_YEARS = 20                          # one daily download serves D, W and M
+TF_ALL = tuple(str(k) for k in TF_INTRA) + TF_HTF
+_bc = {}                                  # downloaded candles: key -> (time, DataFrame)
+_IST_OFF = pd.Timedelta(minutes=330)
+
+
+def _tf(tf, default="5"):
+    s = str(tf if tf is not None else "").strip().upper()
+    s = {"1D": "D", "DAY": "D", "1W": "W", "1M": "M"}.get(s, s)
+    return s if s in TF_ALL else default
+
+
+def _cached(key, ttl, fn):
+    c = _bc.get(key)
+    if c is not None and time.time() - c[0] < ttl:
+        return c[1]
+    v = fn()
+    _bc[key] = (time.time(), v)
+    if len(_bc) > 80:                     # keep memory small on the 512 MB instance: forget the oldest downloads
+        for k, _ in sorted(_bc.items(), key=lambda kv: kv[1][0])[:30]:
+            _bc.pop(k, None)
+    return v
+
+
+def _m5(sid):
+    """Last 8 days of 5-minute candles (the forming candle included), shared by the 5m/15m chart, the info panel and today's daily bar."""
+    return _cached(("m5", str(sid)), 8, lambda: dl.candles(sid, "NSE_EQ", "EQUITY", CHART_DAYS, with_oi=False))
+
+
+def _intraday(sid, interval, days):
+    """`interval`-minute Dhan candles for the last `days` days, fetched in 88-day pieces (Dhan allows 90 days per call).
+    The pieces sit on a fixed calendar grid, so 30m / 1h / 4h charts share the same downloads. Old pieces are kept for 6 hours,
+    the newest piece for 10 minutes (the live part of the chart comes from the 5-minute candles, see _bars)."""
+    end = datetime.now(IST).replace(tzinfo=None)
+    grid0 = datetime(2020, 1, 1)
+    a = grid0 + timedelta(days=88 * ((end - timedelta(days=days) - grid0).days // 88))
+    parts = []
+    while a < end:
+        b = min(a + timedelta(days=88), end)
+        recent = b >= end
+        fa, fb = a.strftime("%Y-%m-%d"), b.strftime("%Y-%m-%d")
+
+        def fetch(fa=fa, fb=fb):
+            payload = {"securityId": str(sid), "exchangeSegment": "NSE_EQ", "instrument": "EQUITY", "interval": interval,
+                       "fromDate": fa, "toDate": fb}
+            try:
+                return dl.parse_intraday(dl.post("charts/intraday", payload, f"chart {sid} {interval}m").json())
+            except ValueError:
+                return pd.DataFrame()
+        try:
+            parts.append(_cached(("i", str(sid), interval, fa, fb), 600 if recent else 6 * 3600, fetch))
+        except RuntimeError:
+            if recent:
+                raise
+        a = b
+    parts = [x for x in parts if x is not None and len(x)]
+    if not parts:
+        raise RuntimeError("no candles from Dhan for this stock")
+    df = pd.concat(parts).sort_index()
+    return df[~df.index.duplicated(keep="last")]
+
+
+def _resample_intra(df, tf):
+    """Joins intraday candles into `tf`-minute candles counted from 09:15 IST each day, like TradingView
+    (so 45m / 2h / 3h / 4h never mix two days; the last candle of the day is shorter)."""
+    if df is None or df.empty:
+        return df
+    ist = df.index + _IST_OFF
+    mins = (ist.hour * 60 + ist.minute).to_numpy() - OPEN_MIN
+    keep = (mins >= 0) & (mins < CLOSE_MIN - OPEN_MIN)
+    df, ist, mins = df[keep], ist[keep], mins[keep]
+    start = ist.normalize() + pd.to_timedelta(OPEN_MIN + (mins // tf) * tf, unit="m") - _IST_OFF
+    g = df.groupby(start.to_numpy())
+    out = pd.DataFrame({"open": g["open"].first(), "high": g["high"].max(), "low": g["low"].min(),
+                        "close": g["close"].last(), "volume": g["volume"].sum()})
+    out.index = pd.DatetimeIndex(out.index)
+    return out.sort_index()
+
+
+def _daily(sid):
+    """Daily candles (about DAILY_YEARS years), each labelled with its IST date, plus today's candle built from the 5-minute candles."""
+    def fetch():
+        now = datetime.now(IST)
+        payload = {"securityId": str(sid), "exchangeSegment": "NSE_EQ", "instrument": "EQUITY", "expiryCode": 0, "oi": False,
+                   "fromDate": (now - timedelta(days=int(365.25 * DAILY_YEARS))).strftime("%Y-%m-%d"), "toDate": now.strftime("%Y-%m-%d")}
+        try:
+            d = dl.parse_intraday(dl.post("charts/historical", payload, f"daily {sid}").json())
+        except ValueError:
+            d = pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+        if len(d):
+            dates = (d.index + _IST_OFF).normalize()
+            d = d[["open", "high", "low", "close", "volume"]].copy()
+            d.index = dates
+            d = d[~d.index.duplicated(keep="last")]
+        return d
+    d = _cached(("d", str(sid)), 1800, fetch).copy()             # index = IST date (midnight)
+    try:                                                         # today's candle (Dhan's daily list ends yesterday while the market runs)
+        m5 = _m5(sid)
+        ist = m5.index + _IST_OFF
+        today = pd.Timestamp(now_ist().date())
+        t = m5[ist.normalize() == today]
+        if len(t) and (not len(d) or d.index[-1] < today):
+            d.loc[today] = [float(t["open"].iloc[0]), float(t["high"].max()), float(t["low"].min()), float(t["close"].iloc[-1]), float(t["volume"].sum())]
+    except Exception:
+        pass
+    return d.sort_index()
+
+
+def _period(d, tf):
+    """Daily candles (IST-date index) -> weekly (week starts Monday) or monthly candles."""
+    if d is None or d.empty:
+        return d
+    if tf == "W":
+        key = d.index - pd.to_timedelta(d.index.weekday, unit="D")
+    else:
+        key = d.index.to_period("M").to_timestamp()
+    g = d.groupby(key)
+    out = pd.DataFrame({"open": g["open"].first(), "high": g["high"].max(), "low": g["low"].min(),
+                        "close": g["close"].last(), "volume": g["volume"].sum()})
+    out.index = pd.DatetimeIndex(out.index)
+    return out.sort_index()
+
+
+def _bars(sid, tf):
+    """Candles of the timeframe, forming candle included, index in UTC (like every other candle in this app)."""
+    if tf in TF_HTF:
+        d = _daily(sid)
+        if tf != "D":
+            d = _period(d, tf)
+        d = d.copy()
+        d.index = d.index - _IST_OFF                             # IST midnight -> UTC, so the chart shows the right date
+        return d
+    t = int(tf)
+    base, days = TF_INTRA[t]
+    if base == 5:
+        df = _m5(sid)
+    else:
+        df = _intraday(sid, base, days)
+        try:                               # the last 8 days come from the live 5-minute candles, so 30m..4h charts move live too
+            m5 = _m5(sid)
+            if len(m5):
+                cut = (m5.index[0] + _IST_OFF).normalize() - _IST_OFF        # start of the first full day in the 5-minute data
+                df = pd.concat([df[df.index < cut], m5[m5.index >= cut][["open", "high", "low", "close", "volume"]]]).sort_index()
+        except Exception:
+            pass
+    return df if t == base else _resample_intra(df, t)
+
+
+def _same_period(a, b, tf):
+    if tf == "D":
+        return a == b
+    if tf == "W":
+        return (a - timedelta(days=a.weekday())) == (b - timedelta(days=b.weekday()))
+    return (a.year, a.month) == (b.year, b.month)
+
+
+def _closed_bars(sid, tf, asof):
+    """Only finished candles (for the zones): the forming candle is left out."""
+    d = _bars(sid, tf)
+    if d is None or d.empty:
+        return d
+    if tf in TF_HTF:
+        last = (d.index[-1] + _IST_OFF).date()
+        if market_open() and _same_period(last, now_ist().date(), tf):
+            d = d.iloc[:-1]
+        return d
+    return dl.drop_forming(d, int(tf), asof, session_end_utc_hour=10)   # 15:30 IST = 10:00 UTC ends the day's last candle
 
 
 def candles_json(symbol, tf):
-    """Candles of one stock for the chart: tf = 5 / 15 / 60 minutes (built from Dhan 5-minute candles, the forming candle included)."""
+    """Candles of one stock for the chart: tf = 5/15/30/45/60/120/180/240 minutes or D/W/M (the forming candle included)."""
     symbol = (symbol or "").strip().upper()
     ent = _sym["map"].get(symbol)
     if not ent:
         return None, "Unknown symbol (NSE equities only)."
-    try:
-        tf = int(tf)
-    except (TypeError, ValueError):
-        tf = 5
-    if tf not in (5, 15, 60):
-        tf = 5
+    tf = _tf(tf, "5")
     c = _cc.get((symbol, tf))
     if c and time.time() - c[0] < 8:
         return c[1], ""
     try:
-        df = dl.candles(ent[0], "NSE_EQ", "EQUITY", CHART_DAYS, with_oi=False)
-        if tf > 5:
-            df = dl.merge_bars(df, tf // 5)
-        df = df.tail(700)
+        df = _bars(ent[0], tf).tail(700)
         secs = ((df.index - pd.Timestamp("1970-01-01")) // pd.Timedelta(seconds=1)).tolist()
         bars = [{"t": int(t), "o": round(float(o), 2), "h": round(float(h), 2), "l": round(float(l), 2), "c": round(float(cl), 2), "v": int(v)}
                 for t, o, h, l, cl, v in zip(secs, df["open"], df["high"], df["low"], df["close"], df["volume"])]
