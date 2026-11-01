@@ -126,6 +126,14 @@
     if (!keepRange) fitRecent();
   }
 
+  /* FIX: while the new stock / timeframe was downloading, the old candles stayed on screen under the new name
+     (e.g. RELIANCE monthly candles titled ITC M). Now the chart is emptied at once and says it is loading. */
+  function blank() {
+    bars = []; clearExtra();
+    try { candle.setData([]); markers.setMarkers([]); } catch (e) {}
+    leg.innerHTML = '<b>' + sym + '</b> ' + tfLabel() + ' &nbsp;<span style="color:#ffd54f">loading candles...</span>';
+  }
+
   /* show the latest candles with some empty space on the right, like TradingView (also used by Enlarge) */
   function fitRecent() {
     var n = bars.length; if (!n) return;
@@ -162,13 +170,13 @@
       inflight--;
       if (my !== reqId || s !== sym || t !== TF) return;   // an older answer: ignore it
       var st = document.getElementById('pcmsg');
-      if (!j.ok) { st.textContent = j.msg; return; } st.textContent = '';
+      if (!j.ok) { st.textContent = j.msg; leg.innerHTML = '<b>' + sym + '</b> ' + tfLabel() + ' &nbsp;<span style="color:#ff6b6b">' + j.msg + '</span>'; return; } st.textContent = '';
       bars = j.bars; draw(!needFit); needFit = false;
       var b = bars[bars.length - 1]; if (b) leg.innerHTML = '<b>' + sym + '</b> ' + tfLabel() + ' &nbsp;O ' + fmt(b.o) + ' H ' + fmt(b.h) + ' L ' + fmt(b.l) + ' C ' + fmt(b.c);
     }).catch(function () { inflight--; });
   }
   window.PChart = {
-    setSymbol: function (s) { sym = s; info = null; bars = []; document.getElementById('pctitle').textContent = s; var a = document.getElementById('ptvlink'); if (a) a.href = 'https://in.tradingview.com/chart/?symbol=NSE%3A' + encodeURIComponent(s.replace(/-/g, '_')); load(false); },
+    setSymbol: function (s) { sym = s; info = null; blank(); document.getElementById('pctitle').textContent = s; var a = document.getElementById('ptvlink'); if (a) a.href = 'https://in.tradingview.com/chart/?symbol=NSE%3A' + encodeURIComponent(s.replace(/-/g, '_')); load(false); },
     setInfo: function (i) { info = i; if (bars.length) draw(true); },
     setLevels: function (l) { S.levels = l || {}; if (bars.length) { var keep = true; draw(keep); } },
     tick: function (price) {
@@ -181,7 +189,7 @@
     refresh: function () { load(true); }
   };
   /* ---------- controls ---------- */
-  document.querySelectorAll('#ptf button').forEach(function (b) { b.addEventListener('click', function () { TF = b.dataset.tf; document.querySelectorAll('#ptf button').forEach(function (x) { x.classList.toggle('on', x === b); }); info = null; load(false); if (window.onPTf) window.onPTf(TF); }); });
+  document.querySelectorAll('#ptf button').forEach(function (b) { b.addEventListener('click', function () { TF = b.dataset.tf; document.querySelectorAll('#ptf button').forEach(function (x) { x.classList.toggle('on', x === b); }); info = null; blank(); load(false); if (window.onPTf) window.onPTf(TF); }); });
   var menu = document.getElementById('pind');
   menu.querySelectorAll('input').forEach(function (c) { c.checked = !!IND[c.dataset.k]; c.addEventListener('change', function () { IND[c.dataset.k] = c.checked ? 1 : 0; try { localStorage.setItem('pchart_ind', JSON.stringify(IND)); } catch (e) {} if (bars.length) draw(true); }); });
   document.getElementById('pindbtn').addEventListener('click', function () { menu.style.display = menu.style.display === 'block' ? 'none' : 'block'; });
