@@ -1125,6 +1125,11 @@ for _r, _f, _t in _TABLE_PAGES:
 import indices_strip
 indices_strip.install(app)   # NIFTY / BANKNIFTY / ... strip at the top of every page
 app.config["AG_LINKS"] = [("F&O scanner", "https://f-o-scanner-42tp.onrender.com")]   # button on the home page and in the top bar
+try:                                                            # ADDED: practice (paper) trading for students at /paper - a failure here never stops the scanner
+    import paper_app
+    paper_app.install(app)
+except Exception as _pe:
+    logging.getLogger("paper").warning(f"Practice trading not started: {_pe}")
 auth_gate.add_menu(app)   # "/" home page that lists every page after login
 
 

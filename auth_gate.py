@@ -533,6 +533,7 @@ def add_menu(app):
     app.config["AG_RESTRICT"] = True
     GROUPS = [
         ("Spurt scanners", ["/spurt10", "/spurt10_history", "/zone_touch", "/spurt_daily", "/spurt_sell", "/spurt_paper", "/spurtpb", "/volspurt", "/spz"]),
+        ("Practice trading", ["/paper", "/paper/history", "/paper/leaderboard", "/paper/help"]),
         ("Spurt10 sections", ["/spurt10_main", "/spurt10_ob", "/spurt10_wick", "/spurt10_watch", "/spurt10_news", "/spurt10_thin", "/depth"]),
         ("SMA / Trend", ["/sma200", "/sma200now", "/trendnow"]),
         ("Best setups", ["/best", "/bestnow"]),
