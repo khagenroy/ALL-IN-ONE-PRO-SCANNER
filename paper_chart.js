@@ -9,7 +9,7 @@
   var chart = LW.createChart(el, {
     layout: { background: { color: '#0f1520' }, textColor: '#c8d1e0', panes: { separatorColor: '#2a344a' } },
     grid: { vertLines: { color: '#182033' }, horzLines: { color: '#182033' } },
-    timeScale: { timeVisible: true, secondsVisible: false, borderColor: '#2a344a' }, rightPriceScale: { borderColor: '#2a344a' },
+    timeScale: { timeVisible: true, secondsVisible: false, borderColor: '#2a344a', rightOffset: 8 }, rightPriceScale: { borderColor: '#2a344a' },
     crosshair: { mode: 0 }, autoSize: true
   });
   var candle = chart.addSeries(LW.CandlestickSeries, { upColor: '#26a69a', downColor: '#ef5350', borderVisible: false, wickUpColor: '#26a69a', wickDownColor: '#ef5350' });
@@ -123,8 +123,14 @@
     if (IND.lines) {
       var L = S.levels; if (L.entry) pl(L.entry, '#fdd835', 'ENTRY', 0); if (L.sl) pl(L.sl, '#ff5252', 'SL', 0); if (L.t1) pl(L.t1, '#69f0ae', 'T1', 0); if (L.t2) pl(L.t2, '#00e676', 'T2', 0);
     }
-    if (!keepRange) chart.timeScale().fitContent();
-    if (!keepRange && bars.length > 120) chart.timeScale().setVisibleLogicalRange({ from: bars.length - 110, to: bars.length + 6 });
+    if (!keepRange) fitRecent();
+  }
+
+  /* show the latest candles with some empty space on the right, like TradingView (also used by Enlarge) */
+  function fitRecent() {
+    var n = bars.length; if (!n) return;
+    var show = TF === 'D' ? 160 : htf() ? 120 : 110;
+    chart.timeScale().setVisibleLogicalRange({ from: Math.max(-2, n - show), to: n + 8 });
   }
 
   /* ---------- live price may only touch the candle that is forming right now ----------
@@ -179,7 +185,7 @@
   menu.querySelectorAll('input').forEach(function (c) { c.checked = !!IND[c.dataset.k]; c.addEventListener('change', function () { IND[c.dataset.k] = c.checked ? 1 : 0; try { localStorage.setItem('pchart_ind', JSON.stringify(IND)); } catch (e) {} if (bars.length) draw(true); }); });
   document.getElementById('pindbtn').addEventListener('click', function () { menu.style.display = menu.style.display === 'block' ? 'none' : 'block'; });
   var card = document.getElementById('pcard');
-  document.getElementById('pbig').addEventListener('click', function () { card.classList.toggle('big'); document.body.style.overflow = card.classList.contains('big') ? 'hidden' : ''; this.textContent = card.classList.contains('big') ? 'Close ✕' : 'Enlarge ⛶'; setTimeout(function () { chart.timeScale().fitContent(); }, 80); });
+  document.getElementById('pbig').addEventListener('click', function () { card.classList.toggle('big'); document.body.style.overflow = card.classList.contains('big') ? 'hidden' : ''; this.textContent = card.classList.contains('big') ? 'Close ✕' : 'Enlarge ⛶'; setTimeout(fitRecent, 80); });
   document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && card.classList.contains('big')) document.getElementById('pbig').click(); });
   setInterval(function () { if (sym) load(true); }, 20000);
   if (window.onPChartReady) { try { window.onPChartReady(); } catch (e) {} }   // draw the stock the page already picked
