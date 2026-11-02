@@ -472,12 +472,33 @@ def _daily(sid):
     """Daily candles (about DAILY_YEARS years), each labelled with its IST date, plus today's candle built from the 5-minute candles."""
     def fetch():
         now = datetime.now(IST)
-        payload = {"securityId": str(sid), "exchangeSegment": "NSE_EQ", "instrument": "EQUITY", "expiryCode": 0, "oi": False,
-                   "fromDate": (now - timedelta(days=int(365.25 * DAILY_YEARS))).strftime("%Y-%m-%d"), "toDate": now.strftime("%Y-%m-%d")}
-        try:
-            d = dl.parse_intraday(dl.post("charts/historical", payload, f"daily {sid}").json())
-        except ValueError:
-            d = pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+        empty = pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+        d, last_err = None, None
+        # A recently listed stock has no history before its listing date and Dhan answers 400 when the start date is too early.
+        # So the start date is moved closer step by step until Dhan accepts it: the chart then shows whatever history exists.
+        for back in [int(365.25 * DAILY_YEARS), 3650, 1825, 1095, 730, 365, 180, 90, 30, 10]:
+            payload = {"securityId": str(sid), "exchangeSegment": "NSE_EQ", "instrument": "EQUITY", "expiryCode": 0, "oi": False,
+                       "fromDate": (now - timedelta(days=back)).strftime("%Y-%m-%d"), "toDate": now.strftime("%Y-%m-%d")}
+            try:
+                d = dl.parse_intraday(dl.post("charts/historical", payload, f"daily {sid}").json())
+                break
+            except ValueError:
+                d = empty
+                break
+            except RuntimeError as e:
+                last_err = e
+                if "400 from Dhan" not in str(e):         # token problem / rate limit: not a date problem, report it as it is
+                    raise
+        if d is None:                                      # Dhan refused every date range: build daily candles from the last days of 5-minute candles
+            try:
+                m5 = _m5(sid)
+                ist = m5.index + _IST_OFF
+                g = m5.groupby(ist.normalize())
+                d = pd.DataFrame({"open": g["open"].first(), "high": g["high"].max(), "low": g["low"].min(),
+                                  "close": g["close"].last(), "volume": g["volume"].sum()})
+                d.index = d.index - _IST_OFF
+            except Exception:
+                raise last_err
         if len(d):
             dates = (d.index + _IST_OFF).normalize()
             d = d[["open", "high", "low", "close", "volume"]].copy()
