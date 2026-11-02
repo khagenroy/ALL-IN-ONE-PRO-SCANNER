@@ -365,6 +365,7 @@ def _score_symbol(sym, sid):
         "candle": _ist(df.index[-1]).strftime("%H:%M"),
         "candle_chg_pct": round((close / float(last["open"]) - 1) * 100, 2) if last["open"] else None,
         "ohlc": (float(last["open"]), float(last["high"]), float(last["low"]), float(last["close"])),
+        "prev": ((float(df.iloc[-2]["open"]), float(df.iloc[-2]["high"]), float(df.iloc[-2]["low"]), float(df.iloc[-2]["close"]), float(vol[-2])) if len(df) >= 2 else None),   # ADDED: previous closed 10-min candle (engulfing sections)
         "candle_vol": int(vol[-1]),
         "sma_vol": int(round(base)),
         "multiple": round(float(vol[-1] / base), 2),
@@ -653,6 +654,9 @@ WICK_UNTIL_MIN = 15 * 60 + 15  # no wick alerts after 15:15 IST
 WICK_WATCH_MAX = 100         # most spurt stocks followed at once
 WICK_ALERT_MAX = 40          # safety cap on these notifications per day
 _wick = {"date": None, "syms": {}, "keys": set(), "count": 0, "hits": []}
+# ADDED: state of the clean-rejection and engulfing sections (defined here because the saved state is loaded just below)
+_clean = {"date": None, "keys": set(), "count": {"R": 0, "S": 0}, "hits": []}
+_engulf = {"date": None, "keys": set(), "count": {"B": 0, "E": 0}, "hits": []}
 
 
 # ADDED: today's watch list, wick rejections and "already alerted" memory are saved to the results folder (the Render disk), so a restart or an
@@ -665,7 +669,9 @@ def _state_save():
         os.makedirs(RESULTS_DIR, exist_ok=True)
         d = {"watch": _watch,
              "wick": {**_wick, "keys": [list(k) for k in _wick["keys"]]},
-             "zone": {**_zone_alerted, "keys": [list(k) for k in _zone_alerted["keys"]]}}
+             "zone": {**_zone_alerted, "keys": [list(k) for k in _zone_alerted["keys"]]},
+             "clean": {**_clean, "keys": [list(k) for k in _clean["keys"]]},
+             "engulf": {**_engulf, "keys": [list(k) for k in _engulf["keys"]]}}
         tmp = STATE_PATH + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(d, f, default=str)
@@ -685,6 +691,10 @@ def _state_load():
                      count=w.get("count", 0), hits=w.get("hits") or [])
         z = d.get("zone") or {}
         _zone_alerted.update(date=z.get("date"), keys={tuple(k) for k in (z.get("keys") or [])}, count=z.get("count", 0))
+        cl = d.get("clean") or {}
+        _clean.update(date=cl.get("date"), keys={tuple(k) for k in (cl.get("keys") or [])}, count=cl.get("count", {"R": 0, "S": 0}) if isinstance(cl.get("count"), dict) else {"R": 0, "S": 0}, hits=cl.get("hits") or [])
+        eg = d.get("engulf") or {}
+        _engulf.update(date=eg.get("date"), keys={tuple(k) for k in (eg.get("keys") or [])}, count=eg.get("count") if isinstance(eg.get("count"), dict) else {"B": 0, "E": 0}, hits=eg.get("hits") or [])
         log.info(f"Spurt10 state restored: {len((_watch.get('syms') or {}))} watched, {len(_wick['hits'])} wick hits, {len(_zone_alerted['keys'])} zone alerts")
     except FileNotFoundError:
         pass
@@ -711,10 +721,15 @@ def _wick_eval(o, h, l, c, res):
     return None
 
 
+_cands_last = []            # (symbol, candle, o, h, l, c, price, resistance, support) of the followed spurt stocks, filled by _wick_alerts each cycle
+_cands_last_meta = {"syms": {}}
+
+
 def _wick_alerts(top, now_ist, sid_of):
     """ADDED: stocks that reached WICK_SPURT_MULT x today are followed until 15:15. When the latest CLOSED 10-min candle of such a stock touched its
     resistance zone (the same zones as the zone columns), has an upper wick of WICK_PCT % or more of its range and closed at / below the zone top,
     one phone alert is sent (once per stock per candle) and the stock is listed in the table on /spurt10. Read-only - it changes no signal."""
+    _cands_last.clear()
     if not WICK_ON:
         return
     today = now_ist.strftime("%Y-%m-%d")
@@ -738,8 +753,8 @@ def _wick_alerts(top, now_ist, sid_of):
         r = in_top.get(sym)
         if r is not None:
             oh = r.get("ohlc")
-            if oh and r.get("resistance"):
-                cands.append((sym, r["candle"], oh[0], oh[1], oh[2], oh[3], r["price"], r["resistance"]))
+            if oh and (r.get("resistance") or r.get("support")):
+                cands.append((sym, r["candle"], oh[0], oh[1], oh[2], oh[3], r["price"], r["resistance"], r.get("support", ""), {"prev": r.get("prev"), "vol": float(r.get("candle_vol") or 0)}))
         elif sym in sid_of:
             todo.append(sym)
     if todo:
@@ -755,7 +770,8 @@ def _wick_alerts(top, now_ist, sid_of):
                 last = d10.iloc[-1]
                 px = float(last["close"])
                 f = _zone_fields(_secA_zones(zdf), px, None)
-                return (sym, _ist(d10.index[-1]).strftime("%H:%M"), float(last["open"]), float(last["high"]), float(last["low"]), px, round(px, 2), f.get("resistance", ""))
+                return (sym, _ist(d10.index[-1]).strftime("%H:%M"), float(last["open"]), float(last["high"]), float(last["low"]), px, round(px, 2), f.get("resistance", ""), f.get("support", ""),
+                        {"prev": ((float(d10.iloc[-2]["open"]), float(d10.iloc[-2]["high"]), float(d10.iloc[-2]["low"]), float(d10.iloc[-2]["close"]), float(d10.iloc[-2]["volume"])) if len(d10) >= 2 else None), "vol": float(last["volume"])})
             except Exception as e:
                 log.warning(f"Spurt10 wick check failed for {sym}: {e}")
                 return None
@@ -763,8 +779,12 @@ def _wick_alerts(top, now_ist, sid_of):
             for c_ in ex.map(one, todo):
                 if c_:
                     cands.append(c_)
+    _cands_last[:] = list(cands)   # shared with the clean-rejection sections below
+    _cands_last_meta["syms"] = syms
     hits = []
-    for sym, cndl, o, h, l, c, price, res in cands:
+    for sym, cndl, o, h, l, c, price, res, _sup, _x in cands:
+        if not res:
+            continue
         key = (sym, cndl)
         if key in _wick["keys"]:
             continue
@@ -812,6 +832,208 @@ def _wick_html():
                        f"<td>{x['mult']:.1f}x</td><td>{x['since']}</td><td>{x['alert']}</td></tr>" for x in reversed(rows))
         return (head + '<div class="w"><table class="sp"><tr><th>Candle</th><th>Symbol</th><th>Price</th><th>Upper wick</th><th>Resistance zone</th>'
                 '<th>Best spurt</th><th>Spurt at</th><th>Alert</th></tr>' + body + '</table></div>')
+    except Exception:
+        return ""
+
+
+# ---------------------------------------------------------------- ADDED: clean rejection candles at resistance / support (spurt stocks)
+CLEAN_ON = True              # phone alert + table: a followed spurt stock's closed 10-min candle touches a zone and shows a clean rejection. False = off
+CLEAN_WICK_PCT = 60.0        # the rejection wick must be MORE than this % of the candle's high-low range
+CLEAN_OPP_MAX_PCT = 5.0      # the opposite wick must be at most this % of the range ("no wick on the other side"; 0 = strictly none)
+CLEAN_VOL_X = 1.0           # the rejection candle's volume must be MORE than this x the previous candle's volume (1.0 = any increase)
+CLEAN_ALERT_MAX = 40         # safety cap on these notifications per day (each kind)
+
+
+def _clean_eval(o, h, l, c, zone, kind, vol=None, prev=None):
+    """kind "R": touched the resistance zone, upper wick > CLEAN_WICK_PCT, lower wick <= CLEAN_OPP_MAX_PCT, closed at / below the zone top.
+    kind "S": touched the support zone, lower wick > CLEAN_WICK_PCT, upper wick <= CLEAN_OPP_MAX_PCT, closed at / above the zone bottom.
+    Also the candle's volume must be more than CLEAN_VOL_X x the previous candle's volume.
+    Returns (wick %, opposite wick %, volume ratio) or None."""
+    try:
+        rng = h - l
+        if rng <= 0 or not zone or not vol or not prev or not prev[4] or vol <= prev[4] * CLEAN_VOL_X:
+            return None
+        vr = round(vol / prev[4], 2)
+        lo, hi = (float(x) for x in str(zone).split("-"))
+        up = (h - max(o, c)) / rng * 100.0
+        dn = (min(o, c) - l) / rng * 100.0
+        near = ZONE_NEAR_PCT / 100.0
+        if kind == "R" and up > CLEAN_WICK_PCT and dn <= CLEAN_OPP_MAX_PCT and h >= lo * (1 - near) and c <= hi:
+            return round(up, 1), round(dn, 1), vr
+        if kind == "S" and dn > CLEAN_WICK_PCT and up <= CLEAN_OPP_MAX_PCT and l <= hi * (1 + near) and c >= lo:
+            return round(dn, 1), round(up, 1), vr
+    except Exception:
+        pass
+    return None
+
+
+def _clean_alerts(now_ist):
+    """ADDED: uses the closed 10-min candles of the spurt stocks already read by _wick_alerts (no extra Dhan call). One phone alert per stock per
+    candle and kind. Read-only - it changes no signal."""
+    if not CLEAN_ON or not _cands_last:
+        return
+    today = now_ist.strftime("%Y-%m-%d")
+    if _clean["date"] != today:
+        _clean.update(date=today, keys=set(), count={"R": 0, "S": 0}, hits=[])
+    syms = _cands_last_meta.get("syms") or {}
+    hits = {"R": [], "S": []}
+    for sym, cndl, o, h, l, c, price, res, sup, _x in _cands_last:
+        for kind, zone in (("R", res), ("S", sup)):
+            key = (sym, cndl, kind)
+            if key in _clean["keys"]:
+                continue
+            e = _clean_eval(o, h, l, c, zone, kind, (_x or {}).get("vol"), (_x or {}).get("prev"))
+            if e is None:
+                continue
+            _clean["keys"].add(key)
+            hit = {"kind": kind, "candle": cndl, "symbol": sym, "price": price, "wick": e[0], "opp": e[1], "ratio": e[2], "zone": zone,
+                   "mult": (syms.get(sym) or {}).get("mult", 0.0), "since": (syms.get(sym) or {}).get("since", ""), "alert": now_ist.strftime("%H:%M")}
+            hits[kind].append(hit)
+            _clean["hits"].append(hit)
+    topic = os.environ.get("NTFY_TOPIC", "").strip()
+    for kind, title, tag in (("R", "Clean rejection at RESISTANCE (upper wick, no lower wick)", "chart_with_downwards_trend"),
+                             ("S", "Clean rejection at SUPPORT (lower wick, no upper wick)", "chart_with_upwards_trend")):
+        hs = hits[kind]
+        if not hs:
+            continue
+        log.info(f"Spurt10 clean rejection {kind}: {[x['symbol'] for x in hs]}")
+        if not (NTFY_ON and topic) or _clean["count"].get(kind, 0) >= CLEAN_ALERT_MAX:
+            continue
+        hs.sort(key=lambda x: -x["mult"])
+        lines = [f"{x['symbol']}  Rs {x['price']:.2f}  wick {x['wick']:.0f}% (other side {x['opp']:.0f}%)  volume {x['ratio']:.1f}x previous  zone {x['zone']}  spurt {x['mult']:.1f}x  candle {x['candle']}" for x in hs[:12]]
+        extra = f"\n+{len(hs) - 12} more on the scanner page" if len(hs) > 12 else ""
+        try:
+            import requests
+            resp = requests.post(f"https://ntfy.sh/{topic}", data=("\n".join(lines) + extra).encode("utf-8"), timeout=8,
+                                 headers={"Title": f"{title} ({len(hs)})", "Priority": "high", "Tags": tag})
+            if resp.status_code >= 300:
+                log.warning(f"Spurt10 clean ntfy refused: {resp.status_code} {resp.text[:150]}")
+                continue
+        except Exception as ex:
+            log.warning(f"Spurt10 clean ntfy failed: {ex}")
+            continue
+        _clean["count"][kind] = _clean["count"].get(kind, 0) + 1
+
+
+def _clean_html():
+    """Two tables: clean rejections at resistance and at support today (kept on the results folder). Never raises."""
+    try:
+        out = ""
+        for kind, head, wl, zl, note in (
+                ("R", "Clean top rejection at resistance", "Upper wick", "Resistance zone",
+                 f"candle touched the resistance zone, upper wick more than {CLEAN_WICK_PCT:g}% of the candle and almost no lower wick (at most {CLEAN_OPP_MAX_PCT:g}%), and volume more than {CLEAN_VOL_X:g}x the previous candle"),
+                ("S", "Clean bottom rejection at support", "Lower wick", "Support zone",
+                 f"candle touched the support zone, lower wick more than {CLEAN_WICK_PCT:g}% of the candle and almost no upper wick (at most {CLEAN_OPP_MAX_PCT:g}%), and volume more than {CLEAN_VOL_X:g}x the previous candle")):
+            rows = [x for x in _clean["hits"] if x.get("kind") == kind]
+            out += (f'<h2>{head} &mdash; spurt stocks &ge; {WICK_SPURT_MULT:g}x ({len(rows)})</h2>'
+                    f'<div class="m">Closed 10-min candle of a stock that reached {WICK_SPURT_MULT:g}x today: {note}. Zones are the {ZONE_TF}m order-block zones. '
+                    f'A phone alert is sent for each (until 15:15 IST). Information only.</div>')
+            if not rows:
+                out += '<div class="m">None yet today.</div>'
+                continue
+            body = "".join(f"<tr><td>{x['candle']}</td><td>{_tvl(x['symbol'])}</td><td>{x['price']:.2f}</td><td><b>{x['wick']:.0f}%</b></td><td>{x['opp']:.0f}%</td><td><b>{x.get('ratio', 0):.1f}x</b></td><td>{x['zone']}</td>"
+                           f"<td>{x['mult']:.1f}x</td><td>{x['since']}</td><td>{x['alert']}</td></tr>" for x in reversed(rows))
+            other = "Lower wick" if kind == "R" else "Upper wick"
+            out += (f'<div class="w"><table class="sp"><tr><th>Candle</th><th>Symbol</th><th>Price</th><th>{wl}</th><th>{other}</th><th>Volume vs previous</th><th>{zl}</th>'
+                    '<th>Best spurt</th><th>Spurt at</th><th>Alert</th></tr>' + body + '</table></div>')
+        return out
+    except Exception:
+        return ""
+
+
+# ---------------------------------------------------------------- ADDED: engulfing candles at support / resistance with rising volume (spurt stocks)
+ENGULF_ON = True             # phone alert + table: bullish engulfing at support / bearish engulfing at resistance on a followed spurt stock. False = off
+ENGULF_VOL_X = 1.0           # the engulfing candle's volume must be MORE than this x the previous candle's volume (1.0 = any increase)
+ENGULF_ALERT_MAX = 40        # safety cap on these notifications per day (each kind)
+
+
+def _engulf_eval(o, h, l, c, vol, prev, support, resistance):
+    """Returns ("B" bullish at support / "E" bearish at resistance, volume ratio) or None.
+    Bullish: previous candle red, this one green, its body covers the previous body (open <= prev close, close >= prev open), either candle touched the
+    support zone, it closed at / above the zone bottom, volume > ENGULF_VOL_X x previous volume. Bearish: the mirror image at the resistance zone."""
+    try:
+        if not prev or not vol or not prev[4] or vol <= prev[4] * ENGULF_VOL_X:
+            return None
+        po, ph, pl, pc, pv = prev
+        near = ZONE_NEAR_PCT / 100.0
+        ratio = round(vol / pv, 2)
+        if pc < po and c > o and o <= pc and c >= po and support:
+            lo, hi = (float(x) for x in str(support).split("-"))
+            if min(l, pl) <= hi * (1 + near) and c >= lo:
+                return "B", ratio
+        if pc > po and c < o and o >= pc and c <= po and resistance:
+            lo, hi = (float(x) for x in str(resistance).split("-"))
+            if max(h, ph) >= lo * (1 - near) and c <= hi:
+                return "E", ratio
+    except Exception:
+        pass
+    return None
+
+
+def _engulf_alerts(now_ist):
+    """ADDED: uses the closed 10-min candles of the spurt stocks already read by _wick_alerts (no extra Dhan call). One phone alert per stock per candle and kind."""
+    if not ENGULF_ON or not _cands_last:
+        return
+    today = now_ist.strftime("%Y-%m-%d")
+    if _engulf["date"] != today:
+        _engulf.update(date=today, keys=set(), count={"B": 0, "E": 0}, hits=[])
+    syms = _cands_last_meta.get("syms") or {}
+    hits = {"B": [], "E": []}
+    for sym, cndl, o, h, l, c, price, res, sup, x in _cands_last:
+        e = _engulf_eval(o, h, l, c, (x or {}).get("vol"), (x or {}).get("prev"), sup, res)
+        if e is None or (sym, cndl, e[0]) in _engulf["keys"]:
+            continue
+        _engulf["keys"].add((sym, cndl, e[0]))
+        hit = {"kind": e[0], "candle": cndl, "symbol": sym, "price": price, "ratio": e[1], "zone": sup if e[0] == "B" else res,
+               "mult": (syms.get(sym) or {}).get("mult", 0.0), "since": (syms.get(sym) or {}).get("since", ""), "alert": now_ist.strftime("%H:%M")}
+        hits[e[0]].append(hit)
+        _engulf["hits"].append(hit)
+    topic = os.environ.get("NTFY_TOPIC", "").strip()
+    for kind, title, tag in (("B", "Bullish ENGULFING at SUPPORT + volume up", "chart_with_upwards_trend"),
+                             ("E", "Bearish ENGULFING at RESISTANCE + volume up", "chart_with_downwards_trend")):
+        hs = hits[kind]
+        if not hs:
+            continue
+        log.info(f"Spurt10 engulfing {kind}: {[y['symbol'] for y in hs]}")
+        if not (NTFY_ON and topic) or _engulf["count"].get(kind, 0) >= ENGULF_ALERT_MAX:
+            continue
+        hs.sort(key=lambda y: -y["mult"])
+        lines = [f"{y['symbol']}  Rs {y['price']:.2f}  volume {y['ratio']:.1f}x previous candle  zone {y['zone']}  spurt {y['mult']:.1f}x  candle {y['candle']}" for y in hs[:12]]
+        extra = f"\n+{len(hs) - 12} more on the scanner page" if len(hs) > 12 else ""
+        try:
+            import requests
+            resp = requests.post(f"https://ntfy.sh/{topic}", data=("\n".join(lines) + extra).encode("utf-8"), timeout=8,
+                                 headers={"Title": f"{title} ({len(hs)})", "Priority": "high", "Tags": tag})
+            if resp.status_code >= 300:
+                log.warning(f"Spurt10 engulfing ntfy refused: {resp.status_code} {resp.text[:150]}")
+                continue
+        except Exception as ex:
+            log.warning(f"Spurt10 engulfing ntfy failed: {ex}")
+            continue
+        _engulf["count"][kind] = _engulf["count"].get(kind, 0) + 1
+
+
+def _engulf_html():
+    """Two tables: bullish engulfing at support and bearish engulfing at resistance today. Never raises."""
+    try:
+        out = ""
+        for kind, head, zl, note in (
+                ("B", "Bullish engulfing at support", "Support zone",
+                 "previous candle red, this candle green and its body covers the previous body, touching the support zone"),
+                ("E", "Bearish engulfing at resistance", "Resistance zone",
+                 "previous candle green, this candle red and its body covers the previous body, touching the resistance zone")):
+            rows = [x for x in _engulf["hits"] if x.get("kind") == kind]
+            out += (f'<h2>{head} &mdash; with rising volume &middot; spurt stocks &ge; {WICK_SPURT_MULT:g}x ({len(rows)})</h2>'
+                    f'<div class="m">Closed 10-min candle of a stock that reached {WICK_SPURT_MULT:g}x today: {note}, and its volume is more than {ENGULF_VOL_X:g}x the previous candle. '
+                    f'Zones are the {ZONE_TF}m order-block zones. A phone alert is sent for each (until 15:15 IST). Information only.</div>')
+            if not rows:
+                out += '<div class="m">None yet today.</div>'
+                continue
+            body = "".join(f"<tr><td>{x['candle']}</td><td>{_tvl(x['symbol'])}</td><td>{x['price']:.2f}</td><td><b>{x['ratio']:.1f}x</b></td><td>{x['zone']}</td>"
+                           f"<td>{x['mult']:.1f}x</td><td>{x['since']}</td><td>{x['alert']}</td></tr>" for x in reversed(rows))
+            out += (f'<div class="w"><table class="sp"><tr><th>Candle</th><th>Symbol</th><th>Price</th><th>Volume vs previous</th><th>{zl}</th>'
+                    '<th>Best spurt</th><th>Spurt at</th><th>Alert</th></tr>' + body + '</table></div>')
+        return out
     except Exception:
         return ""
 
@@ -1092,6 +1314,14 @@ def run_once():
         _wick_alerts(top, now_ist, sid_of)
     except Exception as e:
         log.warning(f"Spurt10 wick step failed: {e}")
+    try:
+        _clean_alerts(now_ist)
+    except Exception as e:
+        log.warning(f"Spurt10 clean-rejection step failed: {e}")
+    try:
+        _engulf_alerts(now_ist)
+    except Exception as e:
+        log.warning(f"Spurt10 engulfing step failed: {e}")
     _state_save()
     try:                                                            # ADDED: link Section A OB_BUY / OB_SELL signals with spurt stocks (spurt_link.py)
         import spurt_link
@@ -1612,6 +1842,8 @@ th,td{{border:1px solid #ddd;padding:6px 8px;text-align:right;font-size:14px}}th
 <th>Candle volume</th><th>{meta['sma_len']}-candle avg vol</th><th>Multiple</th><th><a href="/depth" target="_blank" rel="noopener" title="open the Bids / Offers page" style="color:#fff;text-decoration:underline">Bids %</a></th><th><a href="/depth" target="_blank" rel="noopener" title="open the Bids / Offers page" style="color:#fff;text-decoration:underline">Offers %</a></th><th>Day volume</th><th>Support zone ({ZONE_TF}m)</th><th>Resistance zone ({ZONE_TF}m)</th><th>Zone view</th></tr>{body}</table></div>
 {_link_html()}
 {_wick_html()}
+{_clean_html()}
+{_engulf_html()}
 {_watch_html(meta)}
 {_news_html(meta)}
 {_thin_html(meta)}
