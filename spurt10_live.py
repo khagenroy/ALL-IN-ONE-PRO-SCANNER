@@ -1248,6 +1248,67 @@ def _news_day_update(items, now_ist):
         return sorted(items, key=lambda t: -t["multiple"])
 
 
+# ---------------------------------------------------------------- ADDED: phone alert for stocks that spurt AND have important news
+NEWS_ALERT_ON = True         # one phone alert per stock per day, the first time a stock with an important NSE announcement reaches NEWS_LIST_MIN_MULT x volume. False = off
+NEWS_ALERT_MAX = 40          # safety cap on these notifications per day
+NEWS_ALERT_STATE = os.path.join(RESULTS_DIR, "news_alert_state.json")   # on the disk: a restart / update does not repeat the alerts
+_news_alerted = {"date": None, "syms": [], "count": 0}
+
+
+def _news_alerts(news_list, now_ist):
+    """Tells you which spurt stocks are in the news (these are taken out of the normal list and alerts, so without this you would not hear about them).
+    Read-only. Never raises."""
+    try:
+        if not NEWS_ALERT_ON or not news_list:
+            return
+        today = now_ist.strftime("%Y-%m-%d")
+        if _news_alerted["date"] != today:
+            _news_alerted.update(date=today, syms=[], count=0)
+            try:
+                with open(NEWS_ALERT_STATE) as fh:
+                    d = json.load(fh)
+                if d.get("date") == today:
+                    _news_alerted.update(syms=list(d.get("syms") or []), count=int(d.get("count") or 0))
+            except Exception:
+                pass
+        if now_ist.hour * 60 + now_ist.minute > 15 * 60 + 15:
+            return
+        done = set(_news_alerted["syms"])
+        new = [r for r in news_list if r["symbol"] not in done]
+        if not new:
+            return
+        for r in new:
+            _news_alerted["syms"].append(r["symbol"])
+        topic = os.environ.get("NTFY_TOPIC", "").strip()
+        sent = bool(NTFY_ON and topic and _news_alerted["count"] < NEWS_ALERT_MAX)
+        if sent:
+            new.sort(key=lambda r: -r["best"])
+            lines = [f"{r['symbol']}  Rs {r['price']:g}  spurt {r['best']:.1f}x (first {r['first']})  NEWS: {str(r['title'])[:110]}" for r in new[:12]]
+            extra = f"\n+{len(new) - 12} more on the spurt10_news page" if len(new) > 12 else ""
+            try:
+                import requests
+                resp = requests.post(f"https://ntfy.sh/{topic}", data=("\n".join(lines) + extra).encode("utf-8"), timeout=8,
+                                     headers={"Title": f"Spurt stock WITH NEWS ({len(new)}) - left out of the normal list", "Priority": "high", "Tags": "newspaper"})
+                if resp.status_code >= 300:
+                    log.warning(f"Spurt10 news alert refused: {resp.status_code} {resp.text[:150]}")
+                    for r in new:
+                        _news_alerted["syms"].remove(r["symbol"])
+                    return
+                _news_alerted["count"] += 1
+            except Exception as ex:
+                log.warning(f"Spurt10 news alert failed: {ex}")
+                for r in new:
+                    _news_alerted["syms"].remove(r["symbol"])
+                return
+        log.info(f"Spurt10 news alert: {[r['symbol'] for r in new]}")
+        os.makedirs(RESULTS_DIR, exist_ok=True)
+        with open(NEWS_ALERT_STATE + ".tmp", "w") as fh:
+            json.dump(_news_alerted, fh)
+        os.replace(NEWS_ALERT_STATE + ".tmp", NEWS_ALERT_STATE)
+    except Exception as e:
+        log.warning(f"Spurt10 news alert step failed: {e}")
+
+
 def news_symbols():
     """{symbol: announcement title} of the stocks with important news (for the other alert modules). {} when the filter is off or the feed is not readable. Never raises."""
     try:
@@ -1337,6 +1398,7 @@ def run_once():
         if _nsyms:
             news_list = _news_day_update([{"symbol": _r["symbol"], "price": _r["price"], "candle": _r["candle"], "multiple": _r["multiple"], "title": _nsyms[_r["symbol"]]}
                                           for _r in rows if _r["symbol"] in _nsyms and _r["multiple"] >= NEWS_LIST_MIN_MULT], now_ist)
+            _news_alerts(news_list, now_ist)
             rows = [_r for _r in rows if _r["symbol"] not in _nsyms]
             try:                                                    # also stop following stocks that spurted earlier today and now have news (zone / wick alerts keep checking those)
                 for _d in (_watch.get("syms"), _wick.get("syms")):
