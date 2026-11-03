@@ -23,7 +23,7 @@ import threading
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from flask import Flask, send_file, request, redirect
+from flask import Flask, send_file, request, redirect, Response
 
 
 def _link_results_to_disk(disks=("/var/data", "/data")):
@@ -807,6 +807,29 @@ def spurt10_track_csv():
 @app.route("/spurt10_patterns.csv", methods=["GET"])
 def spurt10_patterns_csv():
     return _serve_csv("spurt10_patterns.csv", "spurt10_rejection_engulfing_followup.csv")
+
+
+def _pattern_csv_route(page, pattern):
+    """/spurt10_rejres.csv etc.: the rows of ONE pattern from spurt10_patterns.csv, so the download chip shows beside that section on the home page."""
+    def view():
+        import csv, io
+        path = os.path.join(RESULTS_DIR, "spurt10_patterns.csv")
+        if not os.path.exists(path):
+            return "No pattern alert has been logged yet.", 404
+        out = io.StringIO()
+        w = csv.writer(out)
+        with open(path, newline="", encoding="utf-8") as f:
+            rd = csv.reader(f)
+            w.writerow(next(rd, []))
+            w.writerows(r for r in rd if len(r) > 1 and r[1] == pattern)
+        return Response(out.getvalue(), mimetype="text/csv", headers={"Content-Disposition": f"attachment; filename={page}_followup.csv"})
+    view.__name__ = "pattern_csv_" + page
+    app.add_url_rule(f"/{page}.csv", view_func=view, methods=["GET"])
+
+
+for _pg, _pn in (("spurt10_rejres", "TOP REJECTION"), ("spurt10_rejsup", "BOTTOM REJECTION"),
+                 ("spurt10_engbull", "BULLISH ENGULFING"), ("spurt10_engbear", "BEARISH ENGULFING")):
+    _pattern_csv_route(_pg, _pn)
 
 
 @app.route("/zone_touch.csv", methods=["GET"])
