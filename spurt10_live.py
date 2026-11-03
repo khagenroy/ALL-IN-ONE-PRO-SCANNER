@@ -927,7 +927,7 @@ def _clean_html():
             rows = [x for x in _clean["hits"] if x.get("kind") == kind]
             out += (f'<h2>{head} &mdash; spurt stocks &ge; {WICK_SPURT_MULT:g}x ({len(rows)})</h2>'
                     f'<div class="m">Closed 10-min candle of a stock that reached {WICK_SPURT_MULT:g}x today: {note}. Zones are the {ZONE_TF}m order-block zones. '
-                    f'A phone alert is sent for each (until 15:15 IST). Information only.</div>')
+                    f'A phone alert is sent for each (until 15:15 IST). Information only. <a href="/spurt10_patterns.csv">CSV with follow-up (all days)</a></div>')
             if not rows:
                 out += '<div class="m">None yet today.</div>'
                 continue
@@ -1025,7 +1025,7 @@ def _engulf_html():
             rows = [x for x in _engulf["hits"] if x.get("kind") == kind]
             out += (f'<h2>{head} &mdash; with rising volume &middot; spurt stocks &ge; {WICK_SPURT_MULT:g}x ({len(rows)})</h2>'
                     f'<div class="m">Closed 10-min candle of a stock that reached {WICK_SPURT_MULT:g}x today: {note}, and its volume is more than {ENGULF_VOL_X:g}x the previous candle. '
-                    f'Zones are the {ZONE_TF}m order-block zones. A phone alert is sent for each (until 15:15 IST). Information only.</div>')
+                    f'Zones are the {ZONE_TF}m order-block zones. A phone alert is sent for each (until 15:15 IST). Information only. <a href="/spurt10_patterns.csv">CSV with follow-up (all days)</a></div>')
             if not rows:
                 out += '<div class="m">None yet today.</div>'
                 continue
@@ -1036,6 +1036,90 @@ def _engulf_html():
         return out
     except Exception:
         return ""
+
+
+
+# ---------------------------------------------------------------- ADDED: csv of the clean-rejection / engulfing alerts with the price follow-up
+# results/spurt10_patterns.csv (all days). One row per alert; the follow-up columns are the move AFTER the alert counted in the direction the signal
+# expected (+ = it worked: price fell after a top rejection / bearish engulfing, rose after a bottom rejection / bullish engulfing). Read-only.
+PAT_CSV = os.path.join(RESULTS_DIR, "spurt10_patterns.csv")
+_PAT_NAME = {"R": "TOP REJECTION", "S": "BOTTOM REJECTION", "B": "BULLISH ENGULFING", "E": "BEARISH ENGULFING"}
+_PAT_SIGN = {"S": 1, "B": 1, "R": -1, "E": -1}
+_PAT_COLS = ["date", "pattern", "symbol", "candle", "alert_time", "price", "zone", "wick_pct", "other_wick_pct", "vol_vs_prev", "spurt_mult", "spurt_since",
+             "ret_10m", "ret_30m", "ret_60m", "best_pct", "worst_pct", "last_pct", "last_time", "result"]
+
+
+def _pat_mins(hm):
+    try:
+        return int(str(hm)[:2]) * 60 + int(str(hm)[3:5])
+    except Exception:
+        return None
+
+
+def _pat_row(day, x):
+    last = x.get("last")
+    res = "open" if (last is None or x.get("r60") is None) else ("WORKED" if last >= 0.3 else "FAILED" if last <= -0.3 else "FLAT")
+    g = lambda k: "" if x.get(k) is None else x[k]
+    return [day, _PAT_NAME[x["kind"]], x["symbol"], x["candle"], x["alert"], x["price"], x["zone"], g("wick"), g("opp"), g("ratio"), x["mult"], x["since"],
+            g("r10"), g("r30"), g("r60"), g("best"), g("worst"), g("last"), g("last_t"), res]
+
+
+def _pat_write(day, hits):
+    """Rows of other days stay as they are, rows of `day` are replaced by the current hits (so the follow-up columns keep updating)."""
+    try:
+        import csv
+        old = []
+        if os.path.exists(PAT_CSV):
+            with open(PAT_CSV, newline="", encoding="utf-8") as f:
+                rd = csv.reader(f)
+                next(rd, None)
+                old = [r for r in rd if r and r[0] != day]
+        os.makedirs(RESULTS_DIR, exist_ok=True)
+        tmp = PAT_CSV + ".tmp"
+        with open(tmp, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(_PAT_COLS)
+            w.writerows(old)
+            w.writerows(_pat_row(day, x) for x in hits)
+        os.replace(tmp, PAT_CSV)
+    except Exception as e:
+        log.warning(f"Spurt10 pattern csv write failed: {e}")
+
+
+def _pat_roll(now_ist):
+    """Called BEFORE the two sections run: on a new day, yesterday's alerts are saved to the csv before the lists are cleared."""
+    try:
+        today = now_ist.strftime("%Y-%m-%d")
+        old = _clean.get("date") or _engulf.get("date")
+        if old and old != today:
+            _pat_write(_clean.get("date") or old, list(_clean["hits"]) + list(_engulf["hits"]))
+    except Exception as e:
+        log.warning(f"Spurt10 pattern roll failed: {e}")
+
+
+def _pat_follow(now_ist):
+    """Called AFTER the two sections: move every alert of today forward with the latest price of the stock, then rewrite today's rows."""
+    try:
+        hm = now_ist.strftime("%H:%M")
+        now_m = _pat_mins(hm)
+        px = {c[0]: float(c[6]) for c in _cands_last if c[6]}
+        hits = list(_clean["hits"]) + list(_engulf["hits"])
+        for x in hits:
+            if not x.get("p0"):
+                x["p0"] = x["price"]
+            p, a = px.get(x["symbol"]), _pat_mins(x["alert"])
+            if p is None or a is None or now_m is None or not x["p0"]:
+                continue
+            mv = round((p / x["p0"] - 1.0) * 100.0 * _PAT_SIGN[x["kind"]], 2)
+            x["best"] = mv if x.get("best") is None else max(x["best"], mv)
+            x["worst"] = mv if x.get("worst") is None else min(x["worst"], mv)
+            x["last"], x["last_t"] = mv, hm
+            for lab, mm in (("r10", 10), ("r30", 30), ("r60", 60)):
+                if x.get(lab) is None and now_m - a >= mm:
+                    x[lab] = mv
+        _pat_write(now_ist.strftime("%Y-%m-%d"), hits)
+    except Exception as e:
+        log.warning(f"Spurt10 pattern follow-up failed: {e}")
 
 
 # ---------------------------------------------------------------- stocks with news (NSE corporate announcements) are left out
@@ -1314,6 +1398,7 @@ def run_once():
         _wick_alerts(top, now_ist, sid_of)
     except Exception as e:
         log.warning(f"Spurt10 wick step failed: {e}")
+    _pat_roll(now_ist)
     try:
         _clean_alerts(now_ist)
     except Exception as e:
@@ -1322,6 +1407,7 @@ def run_once():
         _engulf_alerts(now_ist)
     except Exception as e:
         log.warning(f"Spurt10 engulfing step failed: {e}")
+    _pat_follow(now_ist)
     _state_save()
     try:                                                            # ADDED: link Section A OB_BUY / OB_SELL signals with spurt stocks (spurt_link.py)
         import spurt_link

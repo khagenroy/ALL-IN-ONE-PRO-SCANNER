@@ -804,6 +804,11 @@ def spurt10_track_csv():
     return _serve_csv("spurt10_track.csv", "volume_spurt_every_candle_track.csv")
 
 
+@app.route("/spurt10_patterns.csv", methods=["GET"])
+def spurt10_patterns_csv():
+    return _serve_csv("spurt10_patterns.csv", "spurt10_rejection_engulfing_followup.csv")
+
+
 @app.route("/zone_touch.csv", methods=["GET"])
 def zone_touch_csv():
     return _serve_csv("zone_touch_followup.csv", "zone_touch_followup.csv")
