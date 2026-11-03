@@ -599,7 +599,7 @@ def add_menu(app):
             for c in csvs:
                 if owner.get(c) == p and ok(c):
                     lab = c[len(p):-4].lstrip("/_") or "csv"
-                    out += f"<a class=ch href='{escape(c)}' title='{escape(c)}'>{escape(lab)}{'' if lab == 'csv' else ' csv'}</a>"
+                    out += f"<a class=ch href='{escape(c)}' title='{escape(c)}' target=_blank rel=noopener>{escape(lab)}{'' if lab == 'csv' else ' csv'}</a>"
             return out
 
         cards = ""
@@ -615,7 +615,7 @@ def add_menu(app):
             cards += "<section><h3>Risk management</h3><div class=r><a class=pg href='/risk_mgmt' target=_blank rel=noopener>Open here (both)</a></div>" + "".join(f"<div class=r><a class=pg href='{escape(u)}' target=_blank rel=noopener>{escape(n)} &#8599;</a></div>" for n, u in _rk) + "</section>"
         oc = [c for c in orphan if ok(c)]
         if oc:
-            cards += "<section><h3>OI zones / MCX / ORB / news CSVs</h3><div class=r>" + "".join(f"<a class=ch href='{escape(c)}'>{escape(c[1:-4])}</a>" for c in oc) + "</div></section>"
+            cards += "<section><h3>OI zones / MCX / ORB / news CSVs</h3><div class=r>" + "".join(f"<a class=ch href='{escape(c)}' target=_blank rel=noopener>{escape(c[1:-4])}</a>" for c in oc) + "</div></section>"
         _recent = [r for r in _feed_read(40) if "read before you trade" not in r.get("title", "")][:3]
         if _recent:
             _first = escape(str(_recent[0].get("title", "")))
