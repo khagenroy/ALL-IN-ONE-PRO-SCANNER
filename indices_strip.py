@@ -22,7 +22,9 @@ IST = ZoneInfo("Asia/Kolkata")
 BASE = os.environ.get("DHAN_BASE_URL", "https://api.dhan.co/v2").rstrip("/")
 # (shown name, Dhan security id) - all in the IDX_I segment
 INDICES = [("NIFTY", 13), ("BANKNIFTY", 25), ("FINNIFTY", 27), ("MIDCPNIFTY", 442), ("SENSEX", 51), ("INDIA VIX", 21)]
-REFRESH_SECONDS = 20
+REFRESH_SECONDS = 45         # was 20: every service that uses this Dhan token (stock scanner, F&O scanner ...) runs its own strip, and Dhan allows only about 1 quote call a second per account
+import random
+_BACKOFF = {"until": 0.0}   # after a 429 the strip waits before it asks again
 RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
 FILE = os.path.join(RESULTS_DIR, "indices.json")
 _data = {"asof": "", "rows": []}
@@ -41,11 +43,18 @@ def _fetch():
     if not (cid and tok):
         return None
     proxy = os.environ.get("DHAN_PROXY_URL", "").strip()
-    r = requests.post(f"{BASE}/marketfeed/quote", json={"IDX_I": [i for _n, i in INDICES]},
-                      headers={"access-token": tok, "client-id": cid, "Content-Type": "application/json", "Accept": "application/json"},
-                      timeout=10, proxies=({"https": proxy, "http": proxy} if proxy else None))
+    r = None
+    for attempt in range(3):                         # Dhan answers 429 when another service used the quote call in the same second: wait a little and try again
+        r = requests.post(f"{BASE}/marketfeed/quote", json={"IDX_I": [i for _n, i in INDICES]},
+                          headers={"access-token": tok, "client-id": cid, "Content-Type": "application/json", "Accept": "application/json"},
+                          timeout=10, proxies=({"https": proxy, "http": proxy} if proxy else None))
+        if r.status_code != 429:
+            break
+        time.sleep(2.5 + random.random() * 2.5)
     if not r.ok:
         log.warning(f"indices fetch HTTP {r.status_code}: {r.text[:120]}")
+        if r.status_code == 429:
+            _BACKOFF["until"] = time.time() + 60     # rest for a minute so the strip does not add to the load
         return None
     seg = ((r.json() or {}).get("data") or {}).get("IDX_I") or {}
     rows = []
@@ -87,14 +96,14 @@ def _loop():
             _data.update(json.load(f))
     except Exception:
         pass
-    last_try = 0.0
+    last_try = time.time() - random.random() * 15   # random start so the services do not all ask in the same second
     while True:
         try:
             now = datetime.now(IST)
             stale = not _data["rows"] or all(r.get("price") is None for r in _data["rows"])
             # while the market is open every REFRESH_SECONDS; otherwise once at start and then every 30 min (keeps the last close fresh)
             gap = REFRESH_SECONDS if _market_open(now) else (30 if stale else 1800)
-            if time.time() - last_try >= gap:
+            if time.time() - last_try >= gap and time.time() >= _BACKOFF["until"]:
                 last_try = time.time()
                 rows = _fetch()
                 if rows and any(r.get("price") is not None for r in rows):

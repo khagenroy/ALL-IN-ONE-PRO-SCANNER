@@ -618,8 +618,15 @@ def add_menu(app):
             cards += "<section><h3>OI zones / MCX / ORB / news CSVs</h3><div class=r>" + "".join(f"<a class=ch href='{escape(c)}'>{escape(c[1:-4])}</a>" for c in oc) + "</div></section>"
         _recent = [r for r in _feed_read(40) if "read before you trade" not in r.get("title", "")][:3]
         if _recent:
-            cards = ("<section style='grid-column:1/-1'><h3>Latest alerts <a href='/alerts' target=_blank rel=noopener style='float:right;text-transform:none;font-weight:400'>see all &rarr;</a></h3>"
-                     + _feed_html(_recent) + "</section>") + cards
+            _first = escape(str(_recent[0].get("title", "")))
+            cards = ("<section style='grid-column:1/-1;padding:6px 12px'><details id=ag-al><summary style='cursor:pointer;list-style:none;font-size:13px;display:flex;gap:10px;align-items:center;flex-wrap:wrap'>"
+                     f"<b style='color:#8fb4ff;text-transform:uppercase;font-size:12px'>Latest alerts ({len(_recent)}) <span class=agar>&#9656;</span></b>"
+                     f"<span style='color:#cfd8e6;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'>{_recent[0].get('t') and escape(_ist(_recent[0].get('t', 0)))} &middot; {_first}</span>"
+                     "<a href='/alerts' target=_blank rel=noopener style='text-transform:none;font-weight:400'>see all &rarr;</a></summary>"
+                     + _feed_html(_recent) + "</details>"
+                     "<script>(function(){var d=document.getElementById('ag-al');if(!d)return;var a=d.querySelector('.agar');function s(){if(a)a.innerHTML=d.open?'&#9662;':'&#9656;'}"
+                     "try{if(localStorage.getItem('ag-al-open')==='1')d.open=true}catch(e){}s();"
+                     "d.addEventListener('toggle',function(){s();try{localStorage.setItem('ag-al-open',d.open?'1':'0')}catch(e){}});})();</script></section>") + cards
         else:
             cards = ("<section style='grid-column:1/-1;padding:6px 12px'><span style='font-size:13px'><b style='color:#8fb4ff;text-transform:uppercase;font-size:12px'>Latest alerts</b> &nbsp; none yet &middot; "
                      "<a href='/alerts' target=_blank rel=noopener>see all</a></span></section>") + cards
