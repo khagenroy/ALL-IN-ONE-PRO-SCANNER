@@ -166,9 +166,12 @@ def _roll(day):
     _st.update(fresh)
 
 
+MCX_PHONE_ALERTS = False   # MCX phone alerts now come from the separate F&O scanner; the watch tables on the page still work
+
+
 def _ntfy(title, lines, tags):
     topic = os.environ.get("NTFY_TOPIC", "").strip()
-    if not topic:
+    if not topic or not MCX_PHONE_ALERTS:
         return
     try:
         import requests

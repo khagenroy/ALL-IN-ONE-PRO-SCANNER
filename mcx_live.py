@@ -47,7 +47,7 @@ SPURT_TF = os.environ.get("MCX_SPURT_TF", "15m").strip()
 CONF_TF = {"15m": "30m", "30m": "1H"}.get(SPURT_TF, "")      # higher time frame whose zones are compared with the spurt time frame (zone confluence)
 SMA_LEN = int(os.environ.get("MCX_SMA_LEN", "50") or "50")
 ALERT_MULT = float(os.environ.get("MCX_ALERT_MULT", "3.0") or "3.0")
-NTFY_ON = os.environ.get("MCX_NTFY", "true").strip().lower() == "true"
+NTFY_ON = False   # MCX phone alerts now come from the separate F&O scanner (which scans the MCX futures); the commodity page and CSVs here still work
 NTFY_MAX_PER_DAY = int(os.environ.get("MCX_NTFY_MAX_PER_DAY", "40") or "40")
 ZONE_DAYS = int(os.environ.get("MCX_ZONE_DAYS", "120") or "120")
 BAR_GRACE_S = 5
@@ -226,7 +226,7 @@ def _frames(sym, sid):
 
 
 # ======================================================================================= volume spurt
-def _candle_svg(o, h, l, c):
+def _candle_svg(o, h, l, c, ref=None):
     """Small Japanese candle (body + wick) with its O/H/L/C written beside it."""
     try:
         o, h, l, c = float(o), float(h), float(l), float(c)
@@ -236,7 +236,14 @@ def _candle_svg(o, h, l, c):
         return "-"
     col = "#089981" if c > o else "#F23645" if c < o else "#888"
     rng = (h - l) or 1e-9
-    y = lambda v: 2 + (h - v) / rng * 32
+    # real size: a candle whose high-low range is 3x the stock's usual candle range (or more) fills the whole box; a normal one is about a third of it
+    try:
+        frac = min(1.0, max(0.12, (h - l) / (3.0 * float(ref)))) if ref and float(ref) > 0 else 1.0
+    except Exception:
+        frac = 1.0
+    hh = 32.0 * frac
+    y0 = 2 + (32.0 - hh) / 2                                  # centred vertically
+    y = lambda v: y0 + (h - v) / rng * hh
     top, bot = min(y(o), y(c)), max(y(o), y(c))
     fm = (lambda v: f"{v:.2f}") if h >= 1 else (lambda v: f"{v:.5f}")
     svg = (f'<svg width="22" height="40" viewBox="0 0 22 36" preserveAspectRatio="none" style="vertical-align:middle">'
@@ -273,7 +280,7 @@ def _score(sym, df):
         "candle": _ist(df.index[-1]).strftime("%H:%M"),
         "candle_chg_pct": round((close / opn - 1) * 100, 2) if opn else None,
         "candle_type": "GREEN" if close > opn else "RED" if close < opn else "DOJI",
-        "ohlc": (opn, float(last["high"]), float(last["low"]), close),
+        "ohlc": (opn, float(last["high"]), float(last["low"]), close, float((df["high"] - df["low"]).iloc[-(SMA_LEN + 1):-1].mean())),
         "candle_vol": int(vol[-1]), "sma_vol": int(round(base)), "multiple": round(float(vol[-1] / base), 2),
         "day_vol": int(vol[today_mask].sum()),
     }
@@ -570,13 +577,6 @@ def _load():
         return None
 
 
-_RULES_BANNER = ('<style>@keyframes rb{0%,49%{background:#fff176;color:#d50000}50%,100%{background:#d50000;color:#fff}}</style>'
-                 '<div style="animation:rb 1s step-end infinite;position:sticky;top:0;z-index:99999;background:#fff176;border:3px solid #d50000;border-radius:6px;'
-                 'padding:10px 14px;margin:0 0 14px;color:#d50000;font-weight:900;font-size:22px;line-height:1.5;text-align:center">'
-                 '1. DON\'T RUSH &nbsp;&nbsp;|&nbsp;&nbsp; 2. DON\'T TRADE WITHOUT VALID SET UP &nbsp;&nbsp;|&nbsp;&nbsp; 3. 1 VALID SETUP ENOUGH TO EARN MONEY&nbsp;&nbsp;|&nbsp;&nbsp; 4. DON&#39;T BE EMOTIONAL ATTACHED</div>')
-
-
-
 def page_html():
     d = _load()
     head = ('<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
@@ -584,7 +584,7 @@ def page_html():
             '<style>body{background:#0e1117;color:#e6e6e6;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:0;padding:24px}'
             'table{border-collapse:collapse;width:100%;font-size:13px;margin-bottom:8px}th,td{padding:8px 10px;text-align:left;border-bottom:1px solid #262b36}'
             'th{background:#161b22;color:#9aa0a6;font-weight:600}tr:hover{background:#161b22}a{color:#58a6ff}.m{color:#9aa0a6;font-size:13px;margin:6px 0 12px}'
-            'h2{margin:30px 0 4px}h3{margin:18px 0 6px}</style></head><body>' + _RULES_BANNER)
+            'h2{margin:30px 0 4px}h3{margin:18px 0 6px}</style></head><body>')
     if not d:
         return (head + "<h2>Commodity scanner (MCX)</h2><p>No cycle has run yet. It starts at 09:10 IST on a trading day (Mon-Fri) and refreshes every 15 minutes "
                 "until the MCX session ends.</p></body></html>")

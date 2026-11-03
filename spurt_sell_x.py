@@ -414,7 +414,7 @@ def _log_signals(key, sells, day, now_ist):
         path, mode="a", header=not os.path.exists(path), index=False)
     log.info(f"SpurtSellX {key}: {len(new)} new SELL signal(s): {[r['symbol'] for r in new]}")
     topic = os.environ.get("NTFY_TOPIC", "").strip()          # the scanner's existing phone-alert topic (no new variable)
-    if not topic:
+    if not topic or key == "mcx":                              # MCX phone alerts now come from the separate F&O scanner (the page and CSV still record the signals)
         return
     try:
         import requests
