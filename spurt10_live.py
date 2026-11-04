@@ -689,9 +689,10 @@ def _send_offers_alerts(top, now_ist):
 
 
 # ---------------------------------------------------------------- spurt stock rejected at resistance (long upper wick)
-WICK_ON = True               # ADDED: phone alert + table when a spurt stock's closed 10-min candle is rejected at a resistance zone with a long upper wick
+CAND_TF = 15                 # ADDED 4 Nov: candle size (minutes, 10 or 15) used by the rejected-at-resistance, clean rejection and engulfing sections (15 = closed 15-min candles, 10 = as before)
+WICK_ON = True               # ADDED: phone alert + table when a spurt stock's closed 15 (CAND_TF)-min candle is rejected at a resistance zone with a long upper wick
 WICK_SPURT_MULT = 10.0       # a "spurt stock" = reached this multiple (x the 50-candle volume average) at any time today
-WICK_PCT = 60.0              # upper wick of the 10-min candle >= this % of its high-low range
+WICK_PCT = 60.0              # upper wick of the CAND_TF-min candle >= this % of its high-low range
 WICK_UNTIL_MIN = 15 * 60 + 15  # no wick alerts after 15:15 IST
 WICK_WATCH_MAX = 100         # most spurt stocks followed at once
 WICK_ALERT_MAX = 40          # safety cap on these notifications per day
@@ -795,7 +796,12 @@ def _wick_alerts(top, now_ist, sid_of):
         r = in_top.get(sym)
         if r is not None:
             oh = r.get("ohlc")
-            if oh and (r.get("resistance") or r.get("support")):
+            c15 = r.get("c15")
+            if CAND_TF == 15 and (r.get("resistance") or r.get("support")):
+                if c15:
+                    cands.append((sym, c15["t"], c15["o"], c15["h"], c15["l"], c15["c"], r["price"], r["resistance"], r.get("support", ""),
+                                  {"prev": (c15["po"], c15["ph"], c15["pl"], c15["pc"], c15["pv"]), "vol": c15["v"]}))
+            elif oh and (r.get("resistance") or r.get("support")):
                 cands.append((sym, r["candle"], oh[0], oh[1], oh[2], oh[3], r["price"], r["resistance"], r.get("support", ""), {"prev": r.get("prev"), "vol": float(r.get("candle_vol") or 0)}))
         elif sym in sid_of and not _thin_now(sym):      # a followed stock that became thin / hit a circuit gets no wick / rejection / engulfing alert
             todo.append(sym)
@@ -805,7 +811,7 @@ def _wick_alerts(top, now_ist, sid_of):
         def one(sym):
             try:
                 df5 = ls.fetch_intraday_history(sid_of[sym], "NSE_EQ", 5, HISTORY_DAYS)
-                d10 = ls.drop_forming_bars(ls.build_merged_bars(df5, 2), 10, as_of)
+                d10 = ls.drop_forming_bars(ls.build_merged_bars(df5, CAND_TF // 5), CAND_TF, as_of)
                 zdf = ls.drop_forming_bars(ls.build_merged_bars(df5, ZONE_TF // 5), ZONE_TF, as_of)
                 if zdf is None or len(zdf) < 30 or d10 is None or len(d10) == 0:
                     return None
@@ -866,7 +872,7 @@ def _wick_html():
     try:
         rows = list(_wick["hits"])
         head = (f'<h2>Spurt stocks rejected at resistance &mdash; upper wick &ge; {WICK_PCT:g}% &middot; spurt &ge; {WICK_SPURT_MULT:g}x ({len(rows)})</h2>'
-                f'<div class="m">A stock that reached {WICK_SPURT_MULT:g}x today, whose closed 10-min candle touched its resistance zone ({ZONE_TF}m zones), has an upper wick of '
+                f'<div class="m">A stock that reached {WICK_SPURT_MULT:g}x today, whose closed {CAND_TF}-min candle touched its resistance zone ({ZONE_TF}m zones), has an upper wick of '
                 f'{WICK_PCT:g}% or more of the candle and closed at / below the zone top. A phone alert is sent for each (until 15:15 IST). Information only.</div>')
         if not rows:
             return head + '<div class="m">None yet today.</div>'
@@ -968,7 +974,7 @@ def _clean_html():
                  f"candle touched the support zone, lower wick more than {CLEAN_WICK_PCT:g}% of the candle and almost no upper wick (at most {CLEAN_OPP_MAX_PCT:g}%), and volume more than {CLEAN_VOL_X:g}x the previous candle")):
             rows = [x for x in _clean["hits"] if x.get("kind") == kind]
             out += (f'<h2>{head} &mdash; spurt stocks &ge; {WICK_SPURT_MULT:g}x ({len(rows)})</h2>'
-                    f'<div class="m">Closed 10-min candle of a stock that reached {WICK_SPURT_MULT:g}x today: {note}. Zones are the {ZONE_TF}m order-block zones. '
+                    f'<div class="m">Closed {CAND_TF}-min candle of a stock that reached {WICK_SPURT_MULT:g}x today: {note}. Zones are the {ZONE_TF}m order-block zones. '
                     f'A phone alert is sent for each (until 15:15 IST). Information only. <a href="/spurt10_patterns.csv">CSV with follow-up (all days)</a></div>')
             if not rows:
                 out += '<div class="m">None yet today.</div>'
@@ -1066,7 +1072,7 @@ def _engulf_html():
                  "previous candle green, this candle red and its body covers the previous body, touching the resistance zone")):
             rows = [x for x in _engulf["hits"] if x.get("kind") == kind]
             out += (f'<h2>{head} &mdash; with rising volume &middot; spurt stocks &ge; {WICK_SPURT_MULT:g}x ({len(rows)})</h2>'
-                    f'<div class="m">Closed 10-min candle of a stock that reached {WICK_SPURT_MULT:g}x today: {note}, and its volume is more than {ENGULF_VOL_X:g}x the previous candle. '
+                    f'<div class="m">Closed {CAND_TF}-min candle of a stock that reached {WICK_SPURT_MULT:g}x today: {note}, and its volume is more than {ENGULF_VOL_X:g}x the previous candle. '
                     f'Zones are the {ZONE_TF}m order-block zones. A phone alert is sent for each (until 15:15 IST). Information only. <a href="/spurt10_patterns.csv">CSV with follow-up (all days)</a></div>')
             if not rows:
                 out += '<div class="m">None yet today.</div>'
@@ -1788,7 +1794,8 @@ def run_once():
                 if d15 is not None and len(d15) >= 2:
                     a_, b_ = d15.iloc[-1], d15.iloc[-2]
                     r["c15"] = {"t": _ist(d15.index[-1]).strftime("%H:%M"), "o": float(a_["open"]), "h": float(a_["high"]), "l": float(a_["low"]), "c": float(a_["close"]),
-                                "v": float(a_["volume"]), "pv": float(b_["volume"])}
+                                "v": float(a_["volume"]), "pv": float(b_["volume"]),
+                                "po": float(b_["open"]), "ph": float(b_["high"]), "pl": float(b_["low"]), "pc": float(b_["close"])}
             except Exception:
                 pass
             if r.get("zone_src"):
