@@ -293,6 +293,244 @@ def _send_alert(rows, meta):
     raise RuntimeError(f"ntfy not reachable after 4 tries: {last}")
 
 
+# ---------------------------------------------------------------- ADDED: SAME-DAY alert - stock with daily volume spurt touches its DAILY resistance zone
+TOUCH_ON = True              # phone alert, the same day, when a stock whose volume so far today is TOUCH_MIN_MULT x its 50-day average touches its daily resistance zone. False = off
+TOUCH_MIN_MULT = MIN_MULT    # volume so far today / 50-day average volume (2x = the same as the /spurt_daily list)
+TOUCH_NEAR_PCT = sp.ZONE_NEAR_PCT   # "touched" = the day's high reached the zone bottom less this % (same 'near' rule as the other zone alerts)
+TOUCH_EVERY_S = 30           # seconds between two looks (one quote call per 1000 stocks; the day high catches a touch between two looks)
+PREP_FROM_MIN = 8 * 60 + 45  # the 50-day average and the daily zones of every stock are prepared from this time (earlier days only, ~10 min), once a day
+TOUCH_FROM_MIN = 9 * 60 + 20
+TOUCH_TO_MIN = 15 * 60 + 25
+TOUCH_MAX_LINES = 12
+PREP_PATH = os.path.join(RESULTS_DIR, "spurt_daily_prep.json")           # today's 50-day averages + daily resistance zones (small; a restart does not redo it)
+TOUCH_PATH = os.path.join(RESULTS_DIR, "spurt_daily_touch.csv")          # one line per stock per day (history stays)
+TOUCH_STATE = os.path.join(RESULTS_DIR, "spurt_daily_touch_state.json")  # stocks already alerted today (a restart does not repeat the alert)
+TOUCH_COLS = ["date", "time", "symbol", "price", "day_high", "resistance", "daily_spurt_x", "day_vol", "avg_vol", "day_chg_pct", "where",
+              "ret_10m", "ret_30m", "ret_60m", "max_up_pct", "max_down_pct", "last_pct", "last_time", "result"]   # last 8 = follow-up after the alert (+ = price up from the alert price)
+
+
+def _zone_nums(txt):
+    try:
+        lo, hi = str(txt).split("-")
+        lo, hi = float(lo), float(hi)
+        return (lo, hi) if lo > 0 and hi >= lo else None
+    except Exception:
+        return None
+
+
+def _prep_one(sym, sid, today):
+    """{avg, close, resistance 'lo-hi'} from the EARLIER daily candles of a stock (same cleaning as _score), or None. Never raises."""
+    try:
+        raw = _daily_candles(sym, sid, today)
+        if raw is None:
+            return {"_nodata": True}
+        _oc = ["open", "high", "low", "close", "volume"]
+        df = raw[raw["d"] < today][_oc + ["d"]].reset_index(drop=True)
+        df[_oc] = df[_oc].astype(float)
+        cl = df["close"].to_numpy(dtype=float)
+        if len(cl) > 1:
+            with np.errstate(divide="ignore", invalid="ignore"):
+                chg = np.abs(cl[1:] / cl[:-1] - 1.0)
+            jumps = np.where(np.isfinite(chg) & (chg > SPLIT_JUMP))[0]
+            if len(jumps):
+                df = df.iloc[jumps[-1] + 1:].reset_index(drop=True)
+        if len(df) < MIN_HISTORY:
+            return None
+        avg = float(df["volume"].tail(AVG_LEN).mean())
+        close = float(df["close"].iloc[-1])
+        if avg < MIN_AVG_VOL or close < sp.MIN_PRICE * 0.8 or avg * close < MIN_TURNOVER / TOUCH_MIN_MULT * 0.8:
+            return None
+        zdf = df[_oc].copy()
+        try:
+            zdf.index = pd.DatetimeIndex(pd.to_datetime(list(df["d"])))
+        except Exception:
+            zdf = zdf.reset_index(drop=True)
+        zs = [z for z in (spurt_zones.live_zones(zdf) or []) if (z["hi"] - z["lo"]) <= MAX_ZONE_PCT * close]
+        res = [z for z in zs if z["type"] == "RESISTANCE" and z["lo"] >= close * 0.97]      # nearest resistance above the last close (a little tolerance for a gap down)
+        if not res:
+            return None
+        z = min(res, key=lambda z: z["lo"])
+        return {"avg": avg, "close": close, "resistance": f"{z['lo']:g}-{z['hi']:g}"}
+    except Exception as e:
+        log.warning(f"Spurt daily prep {sym} failed: {e}")
+        return None
+
+
+def _prep_today(today):
+    """Prepares (once a day) the 50-day average volume and the daily resistance zone of every stock. Returns {symbol: {...}} or None."""
+    today_s = today.strftime("%Y-%m-%d")
+    try:
+        with open(PREP_PATH) as f:
+            d = json.load(f)
+        if d.get("date") == today_s and d.get("stocks"):
+            return d["stocks"]
+    except Exception:
+        pass
+    uni = sp._load_universe()
+    out, scanned, nodata = {}, 0, 0
+    for sym, sid in uni:
+        r = _prep_one(sym, sid, today)
+        scanned += 1
+        if r and r.get("_nodata"):
+            nodata += 1
+        elif r:
+            out[sym] = r
+        time.sleep(0.15)
+        if scanned == 60 and nodata >= 54:
+            raise RuntimeError("Dhan sent no daily candles (HTTP / token problem?)")
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    with open(PREP_PATH + ".tmp", "w") as f:
+        json.dump({"date": today_s, "stocks": out}, f)
+    os.replace(PREP_PATH + ".tmp", PREP_PATH)
+    log.info(f"Spurt daily touch: prepared {len(out)} stocks (of {len(uni)}) with a 50-day average and a daily resistance zone")
+    return out
+
+
+def _touch_notify(hits):
+    topic = os.environ.get("NTFY_TOPIC", "").strip()
+    if not (sp.NTFY_ON and topic and hits):
+        return
+    import requests
+    lines = [f"{h['symbol']}  Rs {h['price']:.2f}  (day high {h['day_high']:.2f})  daily resistance {h['resistance']}  volume today {h['daily_spurt_x']:.1f}x of 50-day avg ({h['where']})"
+             for h in hits[:TOUCH_MAX_LINES]]
+    extra = f"\n+{len(hits) - TOUCH_MAX_LINES} more on /spurt_daily_touch.csv" if len(hits) > TOUCH_MAX_LINES else ""
+    try:
+        resp = requests.post(f"https://ntfy.sh/{topic}", data=("\n".join(lines) + extra).encode("utf-8"), timeout=8,
+                             headers={"Title": f"Volume spurt stock at DAILY resistance ({len(hits)})", "Priority": "high", "Tags": "chart_with_upwards_trend"})
+        if resp.status_code >= 300:
+            log.warning(f"Spurt daily touch ntfy refused: {resp.status_code} {resp.text[:150]}")
+    except Exception as e:
+        log.warning(f"Spurt daily touch ntfy failed: {e}")
+
+
+TRACK_MOVE = 0.3             # % move from the price at the alert: at least this much DOWN = REJECTED, UP = BROKE_OUT, in between = FLAT
+
+
+def _touch_follow(row, px, now):
+    """ADDED: follow-up of a stock after it reached the daily resistance: % move from the price at the alert (+ = up). Never raises."""
+    try:
+        mv = round((px / row["price"] - 1.0) * 100.0, 2)
+        el = now.hour * 60 + now.minute - (int(row["time"][:2]) * 60 + int(row["time"][3:5]))
+        row["max_up_pct"] = mv if row.get("max_up_pct") in (None, "") else max(row["max_up_pct"], mv)
+        row["max_down_pct"] = mv if row.get("max_down_pct") in (None, "") else min(row["max_down_pct"], mv)
+        row["last_pct"], row["last_time"] = mv, now.strftime("%H:%M")
+        for lab, mm in (("ret_10m", 10), ("ret_30m", 30), ("ret_60m", 60)):
+            if row.get(lab) in (None, "") and el >= mm:
+                row[lab] = mv
+        done = row.get("ret_60m") not in (None, "") or now.hour * 60 + now.minute >= TOUCH_TO_MIN
+        row["result"] = ("open" if not done else "BROKE_OUT" if mv >= TRACK_MOVE else "REJECTED" if mv <= -TRACK_MOVE else "FLAT")
+    except Exception as e:
+        log.warning(f"Spurt daily touch follow-up failed: {e}")
+
+
+def _touch_write(state, today_s):
+    """Today's rows are rewritten every cycle (older days stay)."""
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    df = pd.DataFrame(list(state["track"].values()), columns=TOUCH_COLS)
+    if os.path.exists(TOUCH_PATH):
+        try:
+            old = pd.read_csv(TOUCH_PATH)
+            df = pd.concat([old[old["date"].astype(str) != today_s], df], ignore_index=True)
+        except Exception as e:
+            log.warning(f"Spurt daily touch csv could not be read, appending anyway: {e}")
+    df.to_csv(TOUCH_PATH + ".tmp", index=False)
+    os.replace(TOUCH_PATH + ".tmp", TOUCH_PATH)
+    with open(TOUCH_STATE + ".tmp", "w") as f:
+        json.dump({"date": today_s, "done": state["done"], "track": state["track"]}, f)
+    os.replace(TOUCH_STATE + ".tmp", TOUCH_STATE)
+
+
+def _touch_cycle(state, now, prep):
+    today_s = now.strftime("%Y-%m-%d")
+    uni = dict(sp._load_universe())
+    pairs = [(s_, uni[s_]) for s_ in prep if s_ in uni]
+    if not pairs:
+        return
+    quotes = _fetch_quotes(pairs)                         # price, day volume, day high of the prepared stocks (1000 per call)
+    try:
+        _nws = sp.news_symbols()                          # same as the daily alert: a stock with important news is left to the news section
+    except Exception:
+        _nws = set()
+    near = TOUCH_NEAR_PCT / 100.0
+    new, changed = [], False
+    for sym, q in quotes.items():
+        if sym in state["track"]:                         # already alerted today: follow it
+            if state["track"][sym].get("result") in (None, "", "open"):
+                _touch_follow(state["track"][sym], q["px"], now)
+                changed = True
+            continue
+        if sym in _nws:
+            continue
+        p = prep.get(sym)
+        if not p or q["px"] < sp.MIN_PRICE or q["px"] * q["vol"] < MIN_TURNOVER:
+            continue
+        if q["spread"] is not None and q["spread"] > sp.LIQ_SPREAD_THIN:
+            continue
+        mult = q["vol"] / p["avg"]
+        if mult < TOUCH_MIN_MULT:
+            continue
+        lo, zhi = _zone_nums(p["resistance"])
+        hi = max(q["high"], q["px"])
+        if hi < lo * (1 - near):
+            continue
+        chg = (q["px"] / p["close"] - 1) * 100
+        if abs(chg) > SPLIT_JUMP * 100:                   # ex-date of a split / demerger, not a real move
+            continue
+        where = "above the zone" if q["px"] > zhi * (1 + near) else "in the zone" if q["px"] >= lo * (1 - near) else "touched, now below"
+        row = {c: "" for c in TOUCH_COLS}
+        row.update({"date": today_s, "time": now.strftime("%H:%M"), "symbol": sym, "price": round(q["px"], 2), "day_high": round(hi, 2), "resistance": p["resistance"],
+                    "daily_spurt_x": round(mult, 2), "day_vol": int(q["vol"]), "avg_vol": int(p["avg"]), "day_chg_pct": round(chg, 2), "where": where, "result": "open", "max_up_pct": 0, "max_down_pct": 0})
+        state["track"][sym] = row
+        state["done"][sym] = row["time"]
+        new.append(row)
+    if new or changed:
+        _touch_write(state, today_s)
+    if new:
+        _touch_notify(new)
+        log.info(f"Spurt daily touch: {[h['symbol'] for h in new]} volume spurt + reached the daily resistance zone")
+
+
+def touch_loop():
+    """Same-day watch: from 08:45 prepares every stock's 50-day average volume and daily resistance zone (earlier days), then from 09:20 to 15:25 looks every
+    TOUCH_EVERY_S seconds; alerts once per stock per day when the volume so far today is TOUCH_MIN_MULT x the average AND the day's high reached the zone.
+    Read-only; never raises."""
+    if not TOUCH_ON:
+        return
+    log.info("Spurt daily touch watch started - same-day alert when a 2x volume stock reaches its DAILY resistance zone (09:20-15:25).")
+    time.sleep(120)
+    state = {"date": None, "done": {}, "track": {}}
+    prep, prep_date, fails = None, None, 0
+    while True:
+        try:
+            now = datetime.now(IST)
+            m = now.hour * 60 + now.minute
+            if now.weekday() < 5 and PREP_FROM_MIN <= m <= TOUCH_TO_MIN:
+                today_s = now.strftime("%Y-%m-%d")
+                if state["date"] != today_s:
+                    state = {"date": today_s, "done": {}, "track": {}}
+                    try:
+                        with open(TOUCH_STATE) as f:
+                            _s = json.load(f)
+                        if _s.get("date") == today_s:
+                            state["done"] = dict(_s.get("done") or {})
+                            state["track"] = dict(_s.get("track") or {})
+                    except Exception:
+                        pass
+                if prep_date != today_s:
+                    prep = _prep_today(now.date())
+                    prep_date = today_s if prep else None
+                if prep and m >= TOUCH_FROM_MIN:
+                    _touch_cycle(state, now, prep)
+                fails = 0
+        except Exception as e:
+            fails += 1
+            if fails <= 3 or fails % 30 == 0:
+                log.warning(f"Spurt daily touch watch failed ({fails}): {e}")
+            if fails <= 3:
+                time.sleep(300)
+        time.sleep(TOUCH_EVERY_S)
+
+
 # ---------------------------------------------------------------- page
 _LEGEND = sp.LEGEND.split(' <span style="background:#f08d84;padding:2px 8px;border:1px solid #c9564c">Offers')[0]      # same colour key as /spurt10, without the Offers % entry
 
@@ -344,7 +582,7 @@ def page_html():
                 f'<div class="m">Scan of {meta["date"]}: {meta["run"]} (took {meta["took_s"]}s) &middot; {meta["liquid"]} liquid NSE stocks scanned '
                 f'(price &ge; {sp.MIN_PRICE:.0f}, traded &ge; Rs {MIN_TURNOVER / 1e7:g} crore, thin spreads left out), {meta["listed"]} at {meta["min_mult"]:g}x or more '
                 f'&middot; runs once a day after 16:45 IST &middot; phone alert at {meta["alert_mult"]:g}x or more when the price is AT a daily zone &middot; {_LEGEND} &middot; '
-                f'zones = ALL IN ONE PRO order-block zones on the DAILY chart &middot; <a href="/spurt_daily.csv">CSV</a> &middot; <a href="/spurt_daily_history.csv">history CSV</a> &middot; '
+                f'zones = ALL IN ONE PRO order-block zones on the DAILY chart &middot; <a href="/spurt_daily.csv">CSV</a> &middot; <a href="/spurt_daily_history.csv">history CSV</a> &middot; <a href="/spurt_daily_touch.csv">resistance-touch CSV</a> &middot; '
                 f'<a href="/spurt10">10-min volume spurt</a> &middot; <a href="/scanner">Scanner</a></div>'
                 '<div class="w"><table class="sp"><tr><th>#</th><th>Symbol</th><th>Price</th><th>Day %</th><th>Day candle</th><th>Day volume</th>'
                 f'<th>{meta["avg_len"]}-day avg vol</th><th>Multiple</th><th>Support zone (daily)</th><th>Resistance zone (daily)</th><th>Zone view</th></tr>{body}</table></div>'
@@ -365,6 +603,8 @@ def _have_today(today_s):
 
 def loop():
     log.info("Spurt daily autorun started - once a day after 16:45 IST (Mon-Fri); catch-up 15 min after a restart if today's scan is missing.")
+    import threading
+    threading.Thread(target=touch_loop, daemon=True, name="spurt-daily-touch").start()      # ADDED: live resistance-touch watch
     time.sleep(900)                                       # stay out of the way of the start-up scans
     fails = 0
     while True:

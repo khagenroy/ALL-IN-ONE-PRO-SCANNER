@@ -626,6 +626,11 @@ def spurt_daily_csv():
     return _serve_csv("spurt_daily.csv", "volume_spurt_daily.csv")
 
 
+@app.route("/spurt_daily_touch.csv", methods=["GET"])
+def spurt_daily_touch_csv():
+    return _serve_csv("spurt_daily_touch.csv", "volume_spurt_daily_touch.csv")
+
+
 @app.route("/spurt_daily_history.csv", methods=["GET"])
 def spurt_daily_history_csv():
     return _serve_csv("spurt_daily_history.csv", "volume_spurt_daily_history.csv")

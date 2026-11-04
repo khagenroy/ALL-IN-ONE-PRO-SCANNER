@@ -327,7 +327,14 @@ def _tvl(sym):
     import html as _h
     s = str(sym)
     u = "https://www.tradingview.com/chart/b3scGnZI/?symbol=" + _up.quote("NSE:" + s.replace("-", "_"), safe=":_")
-    return '<a href="{u}" target="_blank" rel="noopener" title="open chart in TradingView" style="color:inherit;text-decoration:none;border-bottom:1px dotted #888"><b>{t}</b></a>'.format(u=u, t=_h.escape(s))
+    _nb = ""
+    try:                                                    # ADDED: NEWS tag beside every stock that has an important announcement (hover shows it)
+        _nt = (_news.get("syms") or {}).get(s) if (NEWS_FILTER_ON and not NEWS_LEAVE_OUT) else None
+        if _nt:
+            _nb = ' <span title="{t}" style="background:#fff3cd;color:#8a5a00;border:1px solid #e0b000;border-radius:3px;padding:0 3px;font-size:10px;font-weight:700">NEWS</span>'.format(t=_h.escape(str(_nt), quote=True))
+    except Exception:
+        _nb = ""
+    return '<a href="{u}" target="_blank" rel="noopener" title="open chart in TradingView" style="color:inherit;text-decoration:none;border-bottom:1px dotted #888"><b>{t}</b></a>'.format(u=u, t=_h.escape(s)) + _nb
 
 
 def _score_symbol(sym, sid):
@@ -1124,6 +1131,7 @@ def _pat_follow(now_ist):
 
 # ---------------------------------------------------------------- stocks with news (NSE corporate announcements) are left out
 NEWS_FILTER_ON = True        # ADDED: spurt stocks with an important NSE corporate announcement since the previous close are taken out of the list / alerts / /depth and shown in a list at the bottom. False = off
+NEWS_LEAVE_OUT = True        # True = (as before) stocks with news are taken out of the normal list / alerts / sell scans and only shown in the news list + the news phone alert. False = they stay in with a NEWS tag
 NEWS_REFRESH_SEC = 600       # the announcements are read again after this many seconds (one request per refresh)
 NEWS_KEEP_WORDS = ("result", "outcome of board", "board meeting", "acquisition", "acquire", "order", "contract", "award", "bagging", "fund raising", "fundraising",
                    "preferential", "qip", "rights issue", "bonus", "split", "dividend", "buy back", "buyback", "merger", "demerger", "amalgamation",
@@ -1204,9 +1212,61 @@ NEWS_DAY_CSV = os.path.join(RESULTS_DIR, "news_day.csv")
 _news_day = {"date": None, "rows": {}}
 
 
-def _news_day_update(items, now_ist):
+_NEWS_DAY_COLS = ["date", "first_spurt_candle", "symbol", "best_spurt_x", "last_price", "announcement",
+                  "first_seen", "first_price", "spurt_dir", "spurt_candle_chg_pct", "day_chg_at_first",
+                  "ret_10m", "ret_30m", "ret_60m", "best_pct", "worst_pct", "last_pct", "last_time", "result"]   # the first six are the old columns, same order
+
+
+def _news_follow(rows, quotes, now_ist):
+    """ADDED: whole-day follow-up of every stock in the news day list. Price = live quote of the stock (the quotes of the whole market are read every cycle anyway),
+    so a stock keeps being followed after its spurt has ended. Moves are in % from the price when it was first seen (+ = price went up). Read-only. Never raises."""
+    try:
+        hm = now_ist.strftime("%H:%M")
+        now_m = now_ist.hour * 60 + now_ist.minute
+        for r in rows.values():
+            if not r.get("p0"):
+                r["p0"] = r.get("price")
+            if not r.get("seen"):
+                r["seen"] = r.get("first") or hm
+            q = (quotes or {}).get(r["symbol"])
+            p = float(q[0]) if q and q[0] else None
+            if p:
+                r["price"] = p
+            p = r.get("price")
+            a = _pat_mins(r["seen"])
+            if not p or not r.get("p0") or a is None:
+                continue
+            mv = round((float(p) / float(r["p0"]) - 1.0) * 100.0, 2)
+            r["best_pct"] = mv if r.get("best_pct") is None else max(r["best_pct"], mv)
+            r["worst_pct"] = mv if r.get("worst_pct") is None else min(r["worst_pct"], mv)
+            r["last_pct"], r["last_time"] = mv, hm
+            for lab, mm in (("r10", 10), ("r30", 30), ("r60", 60)):
+                if r.get(lab) is None and now_m - a >= mm:
+                    r[lab] = mv
+    except Exception as e:
+        log.warning(f"Spurt10 news follow-up failed: {e}")
+
+
+def _news_row(day, r, now_m):
+    """One csv row of the news day list. result = did the price keep going the way the spurt candle went (CONTINUED), come back (FADED) or stay (FLAT);
+    'open' until 60 min after the stock was first seen, or until 15:25 (end of the day) whichever is first."""
+    g = lambda k: "" if r.get(k) is None else r[k]
+    up = (r.get("chg0") is None) or (r["chg0"] >= 0)
+    last = r.get("last_pct")
+    done = r.get("r60") is not None or now_m >= 15 * 60 + 25
+    res = "open"
+    if last is not None and done:
+        m = last if up else -last
+        res = "CONTINUED" if m >= 0.3 else "FADED" if m <= -0.3 else "FLAT"
+    return [day, r["first"], r["symbol"], r["best"], r["price"], r["title"],
+            g("seen"), g("p0"), "UP" if up else "DOWN", g("chg0"), g("dchg0"),
+            g("r10"), g("r30"), g("r60"), g("best_pct"), g("worst_pct"), g("last_pct"), g("last_time"), res]
+
+
+def _news_day_update(items, now_ist, quotes=None):
     """Adds this cycle's news stocks (spurt >= NEWS_LIST_MIN_MULT) to the day list (first spurt time stays, best multiple / last price update), saves it to disk
-    (json for a restart, csv for download; older days stay in the csv) and returns the day list, biggest best-spurt first. Never raises."""
+    (json for a restart, csv for download; older days stay in the csv) and returns the day list, biggest best-spurt first. Never raises.
+    ADDED: every stock in the list is also followed for the whole day with the live quotes (see _news_follow) and the csv carries the follow-up columns."""
     today = now_ist.strftime("%Y-%m-%d")
     try:
         if _news_day["date"] != today:
@@ -1222,18 +1282,20 @@ def _news_day_update(items, now_ist):
         for it in items:
             cur = rows.get(it["symbol"])
             if cur is None:
-                rows[it["symbol"]] = {"symbol": it["symbol"], "first": it["candle"], "best": it["multiple"], "price": it["price"], "title": it["title"]}
+                rows[it["symbol"]] = {"symbol": it["symbol"], "first": it["candle"], "best": it["multiple"], "price": it["price"], "title": it["title"],
+                                      "seen": now_ist.strftime("%H:%M"), "p0": it["price"], "chg0": it.get("candle_chg_pct"), "dchg0": it.get("day_chg_pct")}
             else:
                 cur["best"] = max(cur["best"], it["multiple"])
                 cur["price"] = it["price"]
                 cur["title"] = it["title"]
-        if items:
+        _news_follow(rows, quotes, now_ist)
+        if rows:
             os.makedirs(RESULTS_DIR, exist_ok=True)
             with open(NEWS_DAY_JSON + ".tmp", "w") as fh:
                 json.dump({"date": today, "rows": rows}, fh)
             os.replace(NEWS_DAY_JSON + ".tmp", NEWS_DAY_JSON)
-            new = pd.DataFrame([{"date": today, "first_spurt_candle": r["first"], "symbol": r["symbol"], "best_spurt_x": r["best"], "last_price": r["price"],
-                                 "announcement": r["title"]} for r in rows.values()])
+            _nm = now_ist.hour * 60 + now_ist.minute
+            new = pd.DataFrame([_news_row(today, r, _nm) for r in rows.values()], columns=_NEWS_DAY_COLS)
             if os.path.exists(NEWS_DAY_CSV):
                 try:
                     old = pd.read_csv(NEWS_DAY_CSV)
@@ -1271,7 +1333,7 @@ def _news_alerts(news_list, now_ist):
                     _news_alerted.update(syms=list(d.get("syms") or []), count=int(d.get("count") or 0))
             except Exception:
                 pass
-        if now_ist.hour * 60 + now_ist.minute > 15 * 60 + 15:
+        if now_ist.hour * 60 + now_ist.minute > 15 * 60 + 30:      # the news alert runs the whole market day
             return
         done = set(_news_alerted["syms"])
         new = [r for r in news_list if r["symbol"] not in done]
@@ -1288,7 +1350,7 @@ def _news_alerts(news_list, now_ist):
             try:
                 import requests
                 resp = requests.post(f"https://ntfy.sh/{topic}", data=("\n".join(lines) + extra).encode("utf-8"), timeout=8,
-                                     headers={"Title": f"Spurt stock WITH NEWS ({len(new)}) - left out of the normal list", "Priority": "high", "Tags": "newspaper"})
+                                     headers={"Title": f"Spurt stock WITH NEWS ({len(new)})", "Priority": "high", "Tags": "newspaper"})
                 if resp.status_code >= 300:
                     log.warning(f"Spurt10 news alert refused: {resp.status_code} {resp.text[:150]}")
                     for r in new:
@@ -1312,7 +1374,7 @@ def _news_alerts(news_list, now_ist):
 def news_symbols():
     """{symbol: announcement title} of the stocks with important news (for the other alert modules). {} when the filter is off or the feed is not readable. Never raises."""
     try:
-        return _news_get(datetime.now(IST)) if NEWS_FILTER_ON else {}
+        return _news_get(datetime.now(IST)) if (NEWS_FILTER_ON and NEWS_LEAVE_OUT) else {}
     except Exception:
         return {}
 
@@ -1346,7 +1408,7 @@ def _news_html(meta):
             return ""
         nl = meta.get("news_list") or []
         status = meta.get("news_status") or ""
-        head = (f'<h3 style="margin:22px 0 4px">Spurt stocks left out because of news today &mdash; {len(nl)}</h3>'
+        head = (f'<h3 style="margin:22px 0 4px">Spurt stocks with news today &mdash; {len(nl)}{" (left out of the list above)" if NEWS_LEAVE_OUT else " (kept in the list above, tagged NEWS)"}</h3>'
                 f'<div class="m">Important NSE corporate announcement since the previous close (results, board meeting, orders, deals, fund raising, dividend, rating ...). Whole day: every stock that reached a volume spurt of {NEWS_LIST_MIN_MULT:g}x or more, kept until the day ends &middot; <a href="/news_day.csv">CSV</a>. {status}</div>')
         if not nl:
             return head + '<div class="m">None right now.</div>'
@@ -1396,12 +1458,14 @@ def run_once():
         elif _news["ok_at"]:
             news_status = f'News feed OK (read {_news["ok_at"]} IST, {len(_nsyms)} stocks with news).'
         if _nsyms:
-            news_list = _news_day_update([{"symbol": _r["symbol"], "price": _r["price"], "candle": _r["candle"], "multiple": _r["multiple"], "title": _nsyms[_r["symbol"]]}
-                                          for _r in rows if _r["symbol"] in _nsyms and _r["multiple"] >= NEWS_LIST_MIN_MULT], now_ist)
+            news_list = _news_day_update([{"symbol": _r["symbol"], "price": _r["price"], "candle": _r["candle"], "multiple": _r["multiple"], "title": _nsyms[_r["symbol"]],
+                                           "candle_chg_pct": _r.get("candle_chg_pct"), "day_chg_pct": _r.get("day_chg_pct")}
+                                          for _r in rows if _r["symbol"] in _nsyms and _r["multiple"] >= NEWS_LIST_MIN_MULT], now_ist, quotes)
             _news_alerts(news_list, now_ist)
-            rows = [_r for _r in rows if _r["symbol"] not in _nsyms]
+            if NEWS_LEAVE_OUT:
+                rows = [_r for _r in rows if _r["symbol"] not in _nsyms]
             try:                                                    # also stop following stocks that spurted earlier today and now have news (zone / wick alerts keep checking those)
-                for _d in (_watch.get("syms"), _wick.get("syms")):
+                for _d in ((_watch.get("syms"), _wick.get("syms")) if NEWS_LEAVE_OUT else ()):
                     for _k in [k for k in (_d or {}) if k in _nsyms]:
                         _d.pop(_k, None)
             except Exception:
@@ -1479,7 +1543,7 @@ def run_once():
         log.warning(f"Spurt link step failed: {e}")
     try:                                                            # ADDED: spurt -> red candle SELL signals (own page, own ntfy topic)
         import spurt_sell_live
-        _news_purge_tracker(_news.get("syms") if NEWS_FILTER_ON else None)
+        _news_purge_tracker(_news.get("syms") if (NEWS_FILTER_ON and NEWS_LEAVE_OUT) else None)
         spurt_sell_live.update_tracker(trk_items, now_ist)
         spurt_sell_live.process(sell_hits, now_ist)
     except Exception as e:
