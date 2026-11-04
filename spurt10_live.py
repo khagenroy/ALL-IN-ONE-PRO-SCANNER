@@ -154,7 +154,7 @@ LIQ_REMOVE_THIN = True     # True = THIN stocks (wide bid-ask spread) are taken 
 THIN_LIST_MIN_MULT = 10.0  # the illiquid list at the bottom of /spurt10 shows thin stocks with a spurt of at least this multiple
 THIN_LIST_MAX = 30
 LIQ_MIN_DEPTH_QTY = 50000   # ADDED 4 Nov: a stock whose total waiting BID quantity or total waiting ASK quantity (shares) is below this counts as THIN too and is left out like a wide-spread stock (a stock with no depth data stays). 0 = off
-CIRCUIT_NEAR_PCT = 1.0      # ADDED 4 Nov: a stock whose price is within this % of its UPPER or LOWER CIRCUIT price counts as THIN too (it can lock any moment, then you cannot get out) and is left out of every list and alert. 0 = off
+CIRCUIT_NEAR_PCT = 2.0      # ADDED 4 Nov: a stock whose price is within this % of its UPPER or LOWER CIRCUIT price counts as THIN too (it can lock any moment, then you cannot get out) and is left out of every list and alert. 0 = off
 LIQ_SPREAD_THIN = 0.25     # above this = THIN (wide spread: hard to get in / out at the shown price); in between = OK
 _dsnap = {}                # {symbol: {px, chg, vol, spread, offers}} - the latest cycle, used by depth_html() (/depth page)
 _dsnap_meta = {"run": None, "spurt": {}, "zone": {}}
@@ -244,6 +244,14 @@ def _liq_fields(sym):
     sp = v[0]
     return {"spread_pct": sp, "bs_ratio": v[1], "offers_pct": (v[2] if len(v) > 2 else None),
             "liq": "THIN" if low_qty else "LIQUID" if sp <= LIQ_SPREAD_OK else "THIN" if sp > LIQ_SPREAD_THIN else "OK"}
+
+
+def _thin_now(sym):
+    """True when the stock is THIN right now (bid / ask quantity below the minimum, near a circuit, or wide spread). Followed stocks that left the table are checked with this too."""
+    try:
+        return bool(LIQ_REMOVE_THIN and _depth and _liq_fields(sym).get("liq") == "THIN")
+    except Exception:
+        return False
 
 
 def _fetch_quotes(uni):
@@ -525,7 +533,7 @@ def _watch_rows(top, now_ist, sid_of):
                                          "at_zone": r.get("at_zone", ""), "in_table": True,
                                          "conf_support": r.get("conf_support", ""), "conf_resistance": r.get("conf_resistance", ""),
                                          "time": now_ist.strftime("%H:%M")}
-    todo = [x for x in syms if x not in in_top and x in sid_of]
+    todo = [x for x in syms if x not in in_top and x in sid_of and not _thin_now(x)]      # a followed stock that became thin / hit a circuit is skipped
     if not todo:
         return []
     as_of = pd.Timestamp(datetime.now(timezone.utc).replace(tzinfo=None))
@@ -789,7 +797,7 @@ def _wick_alerts(top, now_ist, sid_of):
             oh = r.get("ohlc")
             if oh and (r.get("resistance") or r.get("support")):
                 cands.append((sym, r["candle"], oh[0], oh[1], oh[2], oh[3], r["price"], r["resistance"], r.get("support", ""), {"prev": r.get("prev"), "vol": float(r.get("candle_vol") or 0)}))
-        elif sym in sid_of:
+        elif sym in sid_of and not _thin_now(sym):      # a followed stock that became thin / hit a circuit gets no wick / rejection / engulfing alert
             todo.append(sym)
     if todo:
         as_of = pd.Timestamp(datetime.now(timezone.utc).replace(tzinfo=None))
