@@ -1082,7 +1082,7 @@ def sma200_trades_csv():
 # ---- /spurt10 split into separate pages (one per section), built from the same saved spurt10.html - nothing is recomputed
 _S10_PARTS = [("main", "Top 30 spurt", None), ("ob", "OB signals", "OB mitigation signals on spurt stocks"),
               ("wick", "Rejected at resistance", "Spurt stocks rejected at resistance"), ("rejres", "Clean rejection: resistance", "Clean top rejection at resistance"), ("rejsup", "Clean rejection: support", "Clean bottom rejection at support"), ("engbull", "Bullish engulfing", "Bullish engulfing at support"), ("engbear", "Bearish engulfing", "Bearish engulfing at resistance"), ("room", "Breakout with room (BUY)", "Breakout with room"), ("roomdown", "Breakdown with room (SELL)", "Breakdown with room"), ("zsell", "SELL at 15m+30m zone", "SELL at 15m+30m resistance zone"), ("watch", "Watch list", "Watch list &mdash;"),
-              ("news", "Left out: news", "Spurt stocks left out because of news"), ("thin", "Illiquid", "Illiquid stocks with a volume spurt")]
+              ("news", "Left out: news", "Spurt stocks with news today"), ("thin", "Illiquid", "Illiquid stocks with a volume spurt")]
 
 
 def _s10_part(key: str):
