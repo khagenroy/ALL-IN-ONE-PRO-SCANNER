@@ -534,16 +534,49 @@ def touch_loop():
 # ---------------------------------------------------------------- page
 _LEGEND = sp.LEGEND.split(' <span style="background:#f08d84;padding:2px 8px;border:1px solid #c9564c">Offers')[0]      # same colour key as /spurt10, without the Offers % entry
 
+def _touch_html():
+    """ADDED: today's stocks that reached their daily resistance zone (live, with the follow-up after the alert) for the top of /spurt_daily. Never raises."""
+    try:
+        today_s = datetime.now(IST).strftime("%Y-%m-%d")
+        rows = []
+        if os.path.exists(TOUCH_PATH):
+            df = pd.read_csv(TOUCH_PATH)
+            df = df[df["date"].astype(str) == today_s].fillna("")
+            rows = df.to_dict("records")
+        def pc(v):
+            if v == "" or v is None:
+                return "-"
+            v = float(v)
+            return f'<span style="color:{"#0a7d33" if v > 0 else "#c62828" if v < 0 else "#555"}">{v:+.2f}%</span>'
+        def rs(v):
+            c = {"REJECTED": "#c62828", "BROKE_OUT": "#0a7d33"}.get(v, "#555")
+            return f'<b style="color:{c}">{v}</b>'
+        body = "".join(
+            f"<tr><td>{r['time']}</td><td>{sp._tvl(r['symbol'])}</td><td>{float(r['price']):.2f}</td><td>{float(r['day_high']):.2f}</td><td>{r['resistance']}</td>"
+            f"<td>{float(r['daily_spurt_x']):.2f}x</td><td>{r['where']}</td><td>{pc(r['ret_10m'])}</td><td>{pc(r['ret_30m'])}</td><td>{pc(r['ret_60m'])}</td>"
+            f"<td>{pc(r['max_up_pct'])}</td><td>{pc(r['max_down_pct'])}</td><td>{pc(r['last_pct'])}</td><td>{rs(r['result'])}</td></tr>"
+            for r in reversed(rows)) or '<tr><td colspan="14" style="text-align:center">No stock with a 2x volume spurt has reached its daily resistance zone yet today.</td></tr>'
+        return (f'<h2>Live today &mdash; volume spurt stocks that reached their DAILY resistance ({len(rows)})</h2>'
+                f'<div class="m">Alert when the volume so far today is {TOUCH_MIN_MULT:g}x the 50-day average and the day high reaches the daily resistance zone (checked every {TOUCH_EVERY_S}s, 09:20-15:25). '
+                f'Moves are from the price at the alert (+ = up). REJECTED = down {TRACK_MOVE:g}% or more after 60 min, BROKE_OUT = up {TRACK_MOVE:g}% or more, FLAT = in between. '
+                f'<a href="/spurt_daily_touch.csv" target="_blank" rel="noopener">touch CSV</a></div>'
+                '<div class="w"><table class="sp"><tr><th>Alert time</th><th>Symbol</th><th>Price</th><th>Day high</th><th>Resistance (daily)</th><th>Volume x</th><th>Where</th>'
+                '<th>10 min</th><th>30 min</th><th>60 min</th><th>Max up</th><th>Max down</th><th>Last</th><th>Result</th></tr>' + body + '</table></div><hr>')
+    except Exception as e:
+        log.warning(f"Spurt daily touch table failed: {e}")
+        return ""
+
+
 def page_html():
     """The /spurt_daily page, read from the last saved scan. Never raises."""
     head = ('<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
-            '<meta http-equiv="refresh" content="300"><title>Daily Volume Spurt</title>'
+            '<meta http-equiv="refresh" content="60"><title>Daily Volume Spurt</title>'
             '<style>body{font-family:Arial,sans-serif;margin:12px;background:#fafafa}table{border-collapse:collapse;width:100%;background:#fff}'
             'th,td{border:1px solid #ddd;padding:6px 8px;text-align:right;font-size:14px}th{background:#222;color:#fff}td:nth-child(2){text-align:left}'
             '.m{color:#555;font-size:13px;margin:6px 0 12px}th{position:sticky;top:0;z-index:5;box-shadow:0 1px 0 #555}</style></head><body>')      # no overflow wrapper: it would stop the heading row from freezing
     try:
         if not os.path.exists(JSON_PATH):
-            return (head + "<h2>Daily Volume Spurt</h2><p>No daily scan has run yet. It runs once a day after the market closes (16:45 IST, Mon-Fri) "
+            return (head + _touch_html() + "<h2>Daily Volume Spurt</h2><p>No daily scan has run yet. It runs once a day after the market closes (16:45 IST, Mon-Fri) "
                     "and shows the stocks whose volume today is 2x or more of their 50-day average, with daily support / resistance zones.</p></body></html>")
         with open(JSON_PATH) as f:
             d = json.load(f)
@@ -578,7 +611,7 @@ def page_html():
             f"<td{sp._zbg(r.get('at_zone'), 'SUPPORT')}>{sp._zc(r, 'support')}</td><td{sp._zbg(r.get('at_zone'), 'RESISTANCE')}>{sp._zc(r, 'resistance')}</td>"
             f"<td>{sp._zv(r.get('zone_view'), r.get('zone_src'))}</td></tr>"
             for i, r in enumerate(shown, 1)) or '<tr><td colspan="11">No stock reached the daily spurt today.</td></tr>'
-        return (head + f'<h2>Daily Volume Spurt &mdash; today\'s volume vs the {meta["avg_len"]}-day average volume</h2>'
+        return (head + _touch_html() + f'<h2>Daily Volume Spurt &mdash; today\'s volume vs the {meta["avg_len"]}-day average volume</h2>'
                 f'<div class="m">Scan of {meta["date"]}: {meta["run"]} (took {meta["took_s"]}s) &middot; {meta["liquid"]} liquid NSE stocks scanned '
                 f'(price &ge; {sp.MIN_PRICE:.0f}, traded &ge; Rs {MIN_TURNOVER / 1e7:g} crore, thin spreads left out), {meta["listed"]} at {meta["min_mult"]:g}x or more '
                 f'&middot; runs once a day after 16:45 IST &middot; phone alert at {meta["alert_mult"]:g}x or more when the price is AT a daily zone &middot; {_LEGEND} &middot; '
