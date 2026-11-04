@@ -809,6 +809,11 @@ def spurt10_track_csv():
     return _serve_csv("spurt10_track.csv", "volume_spurt_every_candle_track.csv")
 
 
+@app.route("/spurt10_room.csv", methods=["GET"])
+def spurt10_room_csv():
+    return _serve_csv("spurt10_room.csv", "spurt10_room_followup.csv")
+
+
 @app.route("/spurt10_patterns.csv", methods=["GET"])
 def spurt10_patterns_csv():
     return _serve_csv("spurt10_patterns.csv", "spurt10_rejection_engulfing_followup.csv")
@@ -1054,7 +1059,7 @@ def sma200_trades_csv():
 
 # ---- /spurt10 split into separate pages (one per section), built from the same saved spurt10.html - nothing is recomputed
 _S10_PARTS = [("main", "Top 30 spurt", None), ("ob", "OB signals", "OB mitigation signals on spurt stocks"),
-              ("wick", "Rejected at resistance", "Spurt stocks rejected at resistance"), ("rejres", "Clean rejection: resistance", "Clean top rejection at resistance"), ("rejsup", "Clean rejection: support", "Clean bottom rejection at support"), ("engbull", "Bullish engulfing", "Bullish engulfing at support"), ("engbear", "Bearish engulfing", "Bearish engulfing at resistance"), ("watch", "Watch list", "Watch list &mdash;"),
+              ("wick", "Rejected at resistance", "Spurt stocks rejected at resistance"), ("rejres", "Clean rejection: resistance", "Clean top rejection at resistance"), ("rejsup", "Clean rejection: support", "Clean bottom rejection at support"), ("engbull", "Bullish engulfing", "Bullish engulfing at support"), ("engbear", "Bearish engulfing", "Bearish engulfing at resistance"), ("room", "Breakout / breakdown with room", "Breakout with room"), ("watch", "Watch list", "Watch list &mdash;"),
               ("news", "Left out: news", "Spurt stocks left out because of news"), ("thin", "Illiquid", "Illiquid stocks with a volume spurt")]
 
 

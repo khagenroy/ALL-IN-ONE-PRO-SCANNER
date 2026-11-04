@@ -1156,6 +1156,200 @@ def _pat_follow(now_ist):
         log.warning(f"Spurt10 pattern follow-up failed: {e}")
 
 
+# ---------------------------------------------------------------- ADDED: breakout / breakdown WITH ROOM (BUY + SELL phone alerts, own page, own csv)
+# A spurt stock whose price has just moved ABOVE the resistance zone it was under in the previous cycle (breakout) with the NEXT resistance still far away
+# (or none), or just moved BELOW the support zone it was above (breakdown) with the NEXT support still far away. Zones = the same Section A zones as the table.
+# Information only. Follow-up (10/30/60 min, best/worst/last, NIFTY baseline) is written to results/spurt10_room.csv (all days).
+ROOM_ON = True
+ROOM_MIN_MULT = 3.0           # candle volume at least this many times the average
+ROOM_MIN_PCT = 2.0            # the next zone must be at least this % away (or there is no next zone)
+ROOM_BREAK_PCT = 0.1          # price must be this % beyond the broken zone
+ROOM_ALERT_MAX = 40           # phone alerts per kind per day
+ROOM_CSV = os.path.join(RESULTS_DIR, "spurt10_room.csv")
+ROOM_COLS = ["date", "side", "symbol", "candle", "alert_time", "price", "broken_zone", "next_zone", "room_pct", "candle_pct", "multiple",
+             "ret_10m", "ret_30m", "ret_60m", "best_pct", "worst_pct", "last_pct", "last_time", "result",
+             "nifty_at_alert", "nifty_10m", "nifty_30m", "nifty_60m", "nifty_last", "rel_last"]
+_room = {"date": "", "mem": {}, "keys": set(), "hits": [], "count": {"BUY": 0, "SELL": 0}}
+
+
+def _room_zone(s):
+    try:
+        a, b = str(s).split("-")
+        return float(a), float(b)
+    except Exception:
+        return None
+
+
+def _room_load(today):
+    """After a restart: take today's rows back from the csv so nothing is lost or alerted twice."""
+    try:
+        import csv
+        if not os.path.exists(ROOM_CSV):
+            return
+        with open(ROOM_CSV, newline="", encoding="utf-8") as f:
+            for r in csv.DictReader(f):
+                if r.get("date") != today:
+                    continue
+                x = {"side": r["side"], "symbol": r["symbol"], "candle": r["candle"], "alert": r["alert_time"], "price": float(r["price"] or 0),
+                     "broken": r["broken_zone"], "next": r["next_zone"], "room": r["room_pct"], "cpct": r["candle_pct"], "mult": r["multiple"], "p0": float(r["price"] or 0)}
+                for k, c in (("r10", "ret_10m"), ("r30", "ret_30m"), ("r60", "ret_60m"), ("best", "best_pct"), ("worst", "worst_pct"), ("last", "last_pct"),
+                             ("n0", "nifty_at_alert"), ("n10", "nifty_10m"), ("n30", "nifty_30m"), ("n60", "nifty_60m"), ("nlast", "nifty_last")):
+                    try:
+                        x[k] = float(r[c]) if r.get(c) not in (None, "") else None
+                    except Exception:
+                        x[k] = None
+                x["last_t"] = r.get("last_time", "")
+                _room["hits"].append(x)
+                _room["keys"].add((x["symbol"], x["side"]))
+    except Exception as e:
+        log.warning(f"Spurt10 room load failed: {e}")
+
+
+def _room_row(day, x):
+    g = lambda k: "" if x.get(k) is None else x[k]
+    last = x.get("last")
+    res = "open" if (last is None or x.get("r60") is None) else ("WORKED" if last >= 0.3 else "FAILED" if last <= -0.3 else "FLAT")
+    rel = "" if (x.get("last") is None or x.get("nlast") is None) else round(x["last"] - x["nlast"], 2)
+    return [day, x["side"], x["symbol"], x["candle"], x["alert"], x["price"], x["broken"], x["next"], x["room"], x["cpct"], x["mult"],
+            g("r10"), g("r30"), g("r60"), g("best"), g("worst"), g("last"), g("last_t"), res, g("n0"), g("n10"), g("n30"), g("n60"), g("nlast"), rel]
+
+
+def _room_write(day, hits):
+    try:
+        import csv
+        old = []
+        if os.path.exists(ROOM_CSV):
+            with open(ROOM_CSV, newline="", encoding="utf-8") as f:
+                rd = csv.reader(f)
+                next(rd, None)
+                old = [r for r in rd if r and r[0] != day]
+        os.makedirs(RESULTS_DIR, exist_ok=True)
+        tmp = ROOM_CSV + ".tmp"
+        with open(tmp, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(ROOM_COLS)
+            w.writerows(old)
+            w.writerows(_room_row(day, x) for x in hits)
+        os.replace(tmp, ROOM_CSV)
+    except Exception as e:
+        log.warning(f"Spurt10 room csv write failed: {e}")
+
+
+def _room_send(side, hs):
+    topic = os.environ.get("NTFY_TOPIC", "").strip()
+    if not hs or not (NTFY_ON and topic) or _room["count"].get(side, 0) >= ROOM_ALERT_MAX:
+        return
+    title, tag = (("BREAKOUT with room (BUY side)", "rocket") if side == "BUY" else ("BREAKDOWN with room (SELL side)", "small_red_triangle_down"))
+    hs.sort(key=lambda y: -float(y["mult"] or 0))
+    lines = [f"{y['symbol']}  Rs {y['price']:.2f}  {'above' if side == 'BUY' else 'below'} {y['broken']}  next zone {y['next'] or 'none'}  room {y['room']}{'' if y['room'] == 'no zone' else '%'}  volume {float(y['mult']):.1f}x" for y in hs[:12]]
+    extra = f"\n+{len(hs) - 12} more on the scanner page" if len(hs) > 12 else ""
+    try:
+        import requests
+        resp = requests.post(f"https://ntfy.sh/{topic}", data=("\n".join(lines) + extra).encode("utf-8"), timeout=8,
+                             headers={"Title": f"{title} ({len(hs)})", "Priority": "high", "Tags": tag})
+        if resp.status_code < 300:
+            _room["count"][side] = _room["count"].get(side, 0) + 1
+        else:
+            log.warning(f"Spurt10 room ntfy refused: {resp.status_code}")
+    except Exception as ex:
+        log.warning(f"Spurt10 room ntfy failed: {ex}")
+
+
+def _room_update(top, quotes, now_ist):
+    """Called once per cycle with the table rows and the live quotes. Never raises."""
+    if not ROOM_ON:
+        return
+    try:
+        today = now_ist.strftime("%Y-%m-%d")
+        if _room["date"] != today:
+            if _room["date"] and _room["hits"]:
+                _room_write(_room["date"], _room["hits"])
+            _room.update(date=today, mem={}, keys=set(), hits=[], count={"BUY": 0, "SELL": 0})
+            _room_load(today)
+        hm = now_ist.strftime("%H:%M")
+        new = {"BUY": [], "SELL": []}
+        for r in top:
+            sym, px = r.get("symbol"), r.get("price")
+            if not sym or not px:
+                continue
+            prev = _room["mem"].get(sym)
+            res, sup = _room_zone(r.get("resistance")), _room_zone(r.get("support"))
+            mult, cc = float(r.get("multiple") or 0), r.get("candle_chg_pct")
+            if prev and mult >= ROOM_MIN_MULT and cc is not None:
+                for side, key in (("BUY", "res"), ("SELL", "sup")):
+                    z = prev.get(key)
+                    if not z or (sym, side) in _room["keys"]:
+                        continue
+                    if side == "BUY":
+                        ok = px > z[1] * (1 + ROOM_BREAK_PCT / 100.0) and cc > 0
+                        nxt = [t for t in [res] if t and t[0] > z[1]]
+                        room = (res[0] - px) / px * 100.0 if (res and res[0] > px) else (None if res else 99.0)
+                    else:
+                        ok = px < z[0] * (1 - ROOM_BREAK_PCT / 100.0) and cc < 0
+                        room = (px - sup[1]) / px * 100.0 if (sup and sup[1] < px) else (None if sup else 99.0)
+                    if not ok or room is None or room < ROOM_MIN_PCT:
+                        continue
+                    n0 = _nifty_px()[0]
+                    nz = r.get("resistance") if side == "BUY" else r.get("support")
+                    x = {"side": side, "symbol": sym, "candle": r.get("candle", ""), "alert": hm, "price": float(px), "p0": float(px),
+                         "broken": f"{z[0]:g}-{z[1]:g}", "next": nz or "", "room": round(min(room, 99.0), 2) if room < 99 else "no zone",
+                         "cpct": round(float(cc), 2), "mult": round(mult, 1), "n0": n0}
+                    _room["keys"].add((sym, side))
+                    _room["hits"].append(x)
+                    new[side].append(x)
+            _room["mem"][sym] = {"res": res, "sup": sup}
+        # follow-up of every hit of today with the live quote
+        now_m = now_ist.hour * 60 + now_ist.minute
+        nf = _nifty_px()[0]
+        for x in _room["hits"]:
+            q = (quotes or {}).get(x["symbol"])
+            p = q[0] if q else None
+            a = _pat_mins(x["alert"])
+            if not p or not x.get("p0") or a is None:
+                continue
+            sg = 1 if x["side"] == "BUY" else -1
+            mv = round((p / x["p0"] - 1.0) * 100.0 * sg, 2)
+            x["best"] = mv if x.get("best") is None else max(x["best"], mv)
+            x["worst"] = mv if x.get("worst") is None else min(x["worst"], mv)
+            x["last"], x["last_t"] = mv, hm
+            nm = round((nf / x["n0"] - 1.0) * 100.0, 2) if (nf and x.get("n0")) else None
+            if nm is not None:
+                x["nlast"] = nm
+            for lab, nlab, mm in (("r10", "n10", 10), ("r30", "n30", 30), ("r60", "n60", 60)):
+                if x.get(lab) is None and now_m - a >= mm:
+                    x[lab] = mv
+                    x[nlab] = nm
+        if _room["hits"]:
+            _room_write(today, _room["hits"])
+        for side in ("BUY", "SELL"):
+            if new[side]:
+                log.info(f"Spurt10 room {side}: {[y['symbol'] for y in new[side]]}")
+                _room_send(side, new[side])
+    except Exception as e:
+        log.warning(f"Spurt10 room step failed: {e}")
+
+
+def _room_html():
+    try:
+        out = ""
+        for side, head, word in (("BUY", "Breakout with room", "above the resistance zone it was under"), ("SELL", "Breakdown with room", "below the support zone it was above")):
+            rows = [x for x in _room["hits"] if x["side"] == side]
+            out += (f'<h2>{head} &mdash; {"BUY" if side == "BUY" else "SELL"} side &middot; volume &ge; {ROOM_MIN_MULT:g}x &middot; next zone &ge; {ROOM_MIN_PCT:g}% away ({len(rows)})</h2>'
+                    f'<div class="m">Spurt stock whose price moved {word} in the previous cycle, with the next zone still far away. Only liquid stocks: buy-side and sell-side waiting quantity each at least {LIQ_MIN_DEPTH_QTY:,} shares, not near a circuit, no news. Phone alert for each. Information only. '
+                    f'<a href="/spurt10_room.csv">CSV with follow-up and NIFTY baseline (all days)</a></div>')
+            if not rows:
+                out += '<div class="m">None yet today.</div>'
+                continue
+            body = "".join(
+                f"<tr><td>{x['candle']}</td><td>{_tvl(x['symbol'])}</td><td>{x['price']:.2f}</td><td>{x['broken']}</td><td>{x['next'] or 'none'}</td><td>{x['room']}</td>"
+                f"<td>{x['mult']}x</td><td>{x['alert']}</td><td>{'' if x.get('last') is None else x['last']}</td><td>{'' if x.get('best') is None else x['best']}</td></tr>" for x in reversed(rows))
+            out += ('<div class="w"><table class="sp"><tr><th>Candle</th><th>Symbol</th><th>Price</th><th>Broken zone</th><th>Next zone</th><th>Room %</th>'
+                    '<th>Volume</th><th>Alert</th><th>Move now %</th><th>Best %</th></tr>' + body + '</table></div>')
+        return out
+    except Exception:
+        return ""
+
+
 # ---------------------------------------------------------------- stocks with news (NSE corporate announcements) are left out
 NEWS_FILTER_ON = True        # ADDED: spurt stocks with an important NSE corporate announcement since the previous close are taken out of the list / alerts / /depth and shown in a list at the bottom. False = off
 NEWS_LEAVE_OUT = True        # True = (as before) stocks with news are taken out of the normal list / alerts / sell scans and only shown in the news list + the news phone alert. False = they stay in with a NEWS tag
@@ -1594,6 +1788,7 @@ def run_once():
     except Exception as e:
         log.warning(f"Spurt10 engulfing step failed: {e}")
     _pat_follow(now_ist)
+    _room_update(top, quotes, now_ist)
     _state_save()
     try:                                                            # ADDED: link Section A OB_BUY / OB_SELL signals with spurt stocks (spurt_link.py)
         import spurt_link
@@ -2119,6 +2314,7 @@ th,td{{border:1px solid #ddd;padding:6px 8px;text-align:right;font-size:14px}}th
 {_wick_html()}
 {_clean_html()}
 {_engulf_html()}
+{_room_html()}
 {_watch_html(meta)}
 {_news_html(meta)}
 {_thin_html(meta)}
