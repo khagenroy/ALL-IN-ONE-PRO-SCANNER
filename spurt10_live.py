@@ -856,8 +856,8 @@ def _wick_alerts(top, now_ist, sid_of):
     try:
         import requests
         resp = requests.post(f"https://ntfy.sh/{topic}", data=("\n".join(lines) + extra).encode("utf-8"), timeout=8,
-                             headers={"Title": f"Spurt stock rejected at resistance - wick >= {WICK_PCT:g}% ({len(hits)})", "Priority": "high",
-                                      "Tags": "chart_with_downwards_trend"})
+                             headers={"Title": f"Spurt stock rejected at resistance - wick >= {WICK_PCT:g}% ({len(hits)})", "Priority": "urgent",
+                                      "Tags": "rotating_light,chart_with_downwards_trend"})
         if resp.status_code >= 300:
             log.warning(f"Spurt10 wick ntfy refused: {resp.status_code} {resp.text[:150]}")
             return
@@ -953,7 +953,7 @@ def _clean_alerts(now_ist):
         try:
             import requests
             resp = requests.post(f"https://ntfy.sh/{topic}", data=("\n".join(lines) + extra).encode("utf-8"), timeout=8,
-                                 headers={"Title": f"{title} ({len(hs)})", "Priority": "high", "Tags": tag})
+                                 headers={"Title": f"{title} ({len(hs)})", "Priority": "urgent", "Tags": "rotating_light," + tag})
             if resp.status_code >= 300:
                 log.warning(f"Spurt10 clean ntfy refused: {resp.status_code} {resp.text[:150]}")
                 continue
@@ -1183,8 +1183,10 @@ ROOM_CSV = os.path.join(RESULTS_DIR, "spurt10_room.csv")
 ROOM_COLS = ["date", "side", "symbol", "candle", "alert_time", "price", "broken_zone", "next_zone", "room_pct", "candle_pct", "multiple",
              "ret_10m", "ret_30m", "ret_60m", "best_pct", "worst_pct", "last_pct", "last_time", "result",
              "nifty_at_alert", "nifty_10m", "nifty_30m", "nifty_60m", "nifty_last", "rel_last"]
-_room = {"date": "", "mem": {}, "keys": set(), "hits": [], "count": {"BUY": 0, "SELL": 0, "ZSELL": 0}}
+_room = {"date": "", "mem": {}, "keys": set(), "hits": [], "count": {"BUY": 0, "SELL": 0, "ZSELL": 0, "UREJ": 0}}
 
+UREJ_ON = True               # rejected at the UPPER part of a resistance zone: closed CAND_TF-min candle of a followed spurt stock reaches the upper part of the zone and is rejected
+UREJ_FROM = 0.5              # the "upper part" starts this far up the zone (0.5 = the top half of the zone, 0.75 = the top quarter); the high must reach it
 ZSELL_ON = True              # SELL alert: spurt stock (>= ALERT_MULT) with a RED candle at a resistance zone that is also a 30m zone (15m+30m), candle volume above the previous candle
 
 
@@ -1256,9 +1258,12 @@ def _room_send(side, hs):
     if not hs or not (NTFY_ON and topic) or _room["count"].get(side, 0) >= ROOM_ALERT_MAX:
         return
     title, tag = {"BUY": ("BREAKOUT with room (BUY side)", "rocket"), "SELL": ("BREAKDOWN with room (SELL side)", "small_red_triangle_down"),
-                  "ZSELL": ("SELL at 15m+30m zone + volume up", "chart_with_downwards_trend")}[side]
+                  "ZSELL": ("SELL at 15m+30m zone + volume up", "chart_with_downwards_trend"),
+                  "UREJ": ("REJECTED at UPPER part of resistance zone", "chart_with_downwards_trend")}[side]
     hs.sort(key=lambda y: -float(y["mult"] or 0))
-    if side == "ZSELL":
+    if side == "UREJ":
+        lines = [f"{y['symbol']}  Rs {y['price']:.2f}  high reached the upper part of resistance {y['broken']}  upper wick {y['room']}%  spurt {float(y['mult']):.1f}x  candle {y['candle']}" for y in hs[:12]]
+    elif side == "ZSELL":
         lines = [f"{y['symbol']}  Rs {y['price']:.2f}  red 15m candle at resistance {y['broken']} (15m+30m {y['next']})  volume {y['room']}x previous  spurt {float(y['mult']):.1f}x" for y in hs[:12]]
     else:
       lines = [f"{y['symbol']}  Rs {y['price']:.2f}  {'above' if side == 'BUY' else 'below'} {y['broken']}  next zone {y['next'] or 'none'}  room {y['room']}{'' if y['room'] == 'no zone' else '%'}  volume {float(y['mult']):.1f}x" for y in hs[:12]]
@@ -1266,7 +1271,7 @@ def _room_send(side, hs):
     try:
         import requests
         resp = requests.post(f"https://ntfy.sh/{topic}", data=("\n".join(lines) + extra).encode("utf-8"), timeout=8,
-                             headers={"Title": f"{title} ({len(hs)})", "Priority": "high", "Tags": tag})
+                             headers={"Title": f"{title} ({len(hs)})", "Priority": ("urgent" if side == "UREJ" else "high"), "Tags": ("rotating_light," + tag if side == "UREJ" else tag)})
         if resp.status_code < 300:
             _room["count"][side] = _room["count"].get(side, 0) + 1
         else:
@@ -1284,10 +1289,10 @@ def _room_update(top, quotes, now_ist):
         if _room["date"] != today:
             if _room["date"] and _room["hits"]:
                 _room_write(_room["date"], _room["hits"])
-            _room.update(date=today, mem={}, keys=set(), hits=[], count={"BUY": 0, "SELL": 0, "ZSELL": 0})
+            _room.update(date=today, mem={}, keys=set(), hits=[], count={"BUY": 0, "SELL": 0, "ZSELL": 0, "UREJ": 0})
             _room_load(today)
         hm = now_ist.strftime("%H:%M")
-        new = {"BUY": [], "SELL": [], "ZSELL": []}
+        new = {"BUY": [], "SELL": [], "ZSELL": [], "UREJ": []}
         for r in top:
             sym, px = r.get("symbol"), r.get("price")
             if not sym or not px:
@@ -1330,6 +1335,21 @@ def _room_update(top, quotes, now_ist):
             except Exception:
                 pass
             _room["mem"][sym] = {"res": res, "sup": sup}
+        try:                                                           # rejected at the UPPER part of the resistance zone (followed spurt stocks, CAND_TF-min candles)
+            symsm = _cands_last_meta.get("syms") or {}
+            for sym, cndl, o, h, l, c, price, res_z, _sp, _x in (_cands_last if UREJ_ON else []):
+                z = _room_zone(res_z)
+                if not z or (sym, "UREJ", cndl) in _room["keys"] or h - l <= 0:
+                    continue
+                wick = (h - max(o, c)) / (h - l) * 100.0
+                if wick >= WICK_PCT and h >= z[0] + UREJ_FROM * (z[1] - z[0]) and c <= z[1]:
+                    _room["keys"].add((sym, "UREJ", cndl))
+                    x = {"side": "UREJ", "symbol": sym, "candle": cndl, "alert": hm, "price": float(price), "p0": float(price), "broken": f"{z[0]:g}-{z[1]:g}", "next": "",
+                         "room": round(wick, 1), "cpct": round((c / o - 1) * 100, 2) if o else 0.0, "mult": round(float((symsm.get(sym) or {}).get("mult", 0.0)), 1), "n0": _nifty_px()[0]}
+                    _room["hits"].append(x)
+                    new["UREJ"].append(x)
+        except Exception as e:
+            log.warning(f"Spurt10 upper-zone step failed: {e}")
         # follow-up of every hit of today with the live quote
         now_m = now_ist.hour * 60 + now_ist.minute
         nf = _nifty_px()[0]
@@ -1353,7 +1373,7 @@ def _room_update(top, quotes, now_ist):
                     x[nlab] = nm
         if _room["hits"]:
             _room_write(today, _room["hits"])
-        for side in ("BUY", "SELL", "ZSELL"):
+        for side in ("BUY", "SELL", "ZSELL", "UREJ"):
             if new[side]:
                 log.info(f"Spurt10 room {side}: {[y['symbol'] for y in new[side]]}")
                 _room_send(side, new[side])
@@ -1386,6 +1406,18 @@ def _room_html():
                             f"<td>{x['mult']}x</td><td>{x['alert']}</td><td>{'' if x.get('last') is None else x['last']}</td><td>{'' if x.get('best') is None else x['best']}</td></tr>" for x in reversed(rows))
             out += ('<div class="w"><table class="sp"><tr><th>Candle</th><th>Symbol</th><th>Price</th><th>Resistance zone</th><th>30m zone</th><th>Volume vs previous</th>'
                     '<th>Spurt</th><th>Alert</th><th>Move now % (fall = +)</th><th>Best %</th></tr>' + body + '</table></div>')
+        else:
+            out += '<div class="m">None yet today.</div>'
+        rows = [x for x in _room["hits"] if x["side"] == "UREJ"]
+        out += (f'<h2>Rejected at the UPPER part of the resistance zone &mdash; {CAND_TF}-min candle, upper wick &ge; {WICK_PCT:g}% ({len(rows)})</h2>'
+                f'<div class="m">A stock that reached {WICK_SPURT_MULT:g}x today whose closed {CAND_TF}-min candle pushed into the upper part of its resistance zone (the high reached at least {UREJ_FROM * 100:.0f}% of the way up the zone), '
+                f'has an upper wick of {WICK_PCT:g}% or more and closed at / below the zone top. Price went deep into the zone and was still pushed back. Phone alert for each. Information only. '
+                '<a href="/spurt10_upper.csv">CSV with follow-up (all days)</a></div>')
+        if rows:
+            body = "".join(f"<tr><td>{x['candle']}</td><td>{_tvl(x['symbol'])}</td><td>{x['price']:.2f}</td><td>{x['broken']}</td><td><b>{x['room']}%</b></td>"
+                            f"<td>{x['mult']}x</td><td>{x['alert']}</td><td>{'' if x.get('last') is None else x['last']}</td><td>{'' if x.get('best') is None else x['best']}</td></tr>" for x in reversed(rows))
+            out += ('<div class="w"><table class="sp"><tr><th>Candle</th><th>Symbol</th><th>Price</th><th>Resistance zone</th><th>Upper wick</th>'
+                    '<th>Best spurt</th><th>Alert</th><th>Move now % (fall = +)</th><th>Best %</th></tr>' + body + '</table></div>')
         else:
             out += '<div class="m">None yet today.</div>'
         return out

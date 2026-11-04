@@ -476,6 +476,17 @@ def _touch_cycle(state, now, prep):
     near = TOUCH_NEAR_PCT / 100.0
     nifty, _np = sp._nifty_px()                           # NIFTY baseline (from the indices strip, no extra Dhan call)
     new, changed = [], False
+    rej_c = {}                                            # ADDED: stocks that qualify for the rejection check (same filters as the touch alert)
+    for sym, q in quotes.items():
+        try:
+            _p = prep.get(sym)
+            if _p and sym not in _nws and q["px"] >= sp.MIN_PRICE and q["px"] * q["vol"] >= MIN_TURNOVER and not (q["spread"] is not None and q["spread"] > sp.LIQ_SPREAD_THIN) \
+                    and not _low_depth(q) and q["vol"] / _p["avg"] >= TOUCH_MIN_MULT:
+                _lo, _zh = _zone_nums(_p["resistance"])
+                if max(q["high"], q["px"]) >= _lo * (1 - near):
+                    rej_c[sym] = (_p["resistance"], q["vol"] / _p["avg"], (q["px"] / _p["close"] - 1) * 100)
+        except Exception:
+            pass
     for sym, q in quotes.items():
         if sym in state["track"]:                         # already alerted today: follow it
             if state["track"][sym].get("result") in (None, "", "open"):
@@ -511,9 +522,198 @@ def _touch_cycle(state, now, prep):
         new.append(row)
     if new or changed:
         _touch_write(state, today_s)
+    _rej_cycle(now, rej_c, quotes, nifty, uni)
     if new:
         _touch_notify(new)
         log.info(f"Spurt daily touch: {[h['symbol'] for h in new]} volume spurt + reached the daily resistance zone")
+
+
+# ---------------------------------------------------------------- ADDED: spurt stock REJECTED at the DAILY resistance zone on a closed 15-min candle
+# Same stocks as the live touch watch above (volume so far today >= TOUCH_MIN_MULT x the 50-day average, liquid, no news) whose day high has reached the daily
+# resistance zone. For each of them every closed 15-min candle is checked: it touches the daily zone, has an upper wick of REJ_WICK_PCT % or more of its range and
+# closes at / below the zone top  ->  phone alert + row in the table on /spurt_daily + results/spurt_daily_rejection.csv (all days, with follow-up and NIFTY baseline).
+REJ_ON = True
+REJ_TF = 15                  # candle size in minutes (multiple of 5)
+REJ_WICK_PCT = 60.0          # upper wick >= this % of the candle's high-low range
+REJ_UPPER_FROM = 0.5        # "upper part" of the daily zone = from this share of the zone height upwards (0.5 = top half); a rejection whose high reached it is also listed in the UPPER table
+REJ_DAYS = 4                 # calendar days of 5-min candles read per stock (only the last closed candle is needed)
+REJ_PATH = os.path.join(RESULTS_DIR, "spurt_daily_rejection.csv")
+REJ_STATE = os.path.join(RESULTS_DIR, "spurt_daily_rejection_state.json")
+REJ_COLS = ["date", "candle", "alert_time", "symbol", "price", "resistance", "wick_pct", "daily_spurt_x", "day_chg_pct",
+            "ret_10m", "ret_30m", "ret_60m", "best_pct", "worst_pct", "last_pct", "last_time", "result",
+            "nifty_at_alert", "nifty_10m", "nifty_30m", "nifty_60m", "nifty_last", "rel_last", "upper_part"]
+_rej = {"date": "", "checked": {}, "rows": []}
+
+
+def _rej_load(today_s):
+    try:
+        with open(REJ_STATE) as f:
+            s_ = json.load(f)
+        if s_.get("date") == today_s:
+            _rej.update(date=today_s, checked=dict(s_.get("checked") or {}), rows=list(s_.get("rows") or []))
+            return
+    except Exception:
+        pass
+    _rej.update(date=today_s, checked={}, rows=[])
+
+
+def _rej_write(today_s):
+    try:
+        os.makedirs(RESULTS_DIR, exist_ok=True)
+        df = pd.DataFrame(_rej["rows"], columns=REJ_COLS)
+        if os.path.exists(REJ_PATH):
+            try:
+                old = pd.read_csv(REJ_PATH)
+                df = pd.concat([old[old["date"].astype(str) != today_s], df], ignore_index=True)
+            except Exception as e:
+                log.warning(f"Spurt daily rejection csv could not be read, appending anyway: {e}")
+        df.to_csv(REJ_PATH + ".tmp", index=False)
+        os.replace(REJ_PATH + ".tmp", REJ_PATH)
+        with open(REJ_STATE + ".tmp", "w") as f:
+            json.dump({"date": today_s, "checked": _rej["checked"], "rows": _rej["rows"]}, f)
+        os.replace(REJ_STATE + ".tmp", REJ_STATE)
+    except Exception as e:
+        log.warning(f"Spurt daily rejection write failed: {e}")
+
+
+def _rej_candle(sym, sid):
+    """Last CLOSED REJ_TF-minute candle of the stock as (start 'HH:MM', o, h, l, c), or None."""
+    try:
+        from datetime import timezone
+        as_of = pd.Timestamp(datetime.now(timezone.utc).replace(tzinfo=None))
+        df5 = ls.fetch_intraday_history(sid, "NSE_EQ", 5, REJ_DAYS)
+        d = ls.drop_forming_bars(ls.build_merged_bars(df5, REJ_TF // 5), REJ_TF, as_of)
+        if d is None or len(d) == 0:
+            return None
+        last = d.iloc[-1]
+        return (sp._ist(d.index[-1]).strftime("%H:%M"), float(last["open"]), float(last["high"]), float(last["low"]), float(last["close"]))
+    except Exception as e:
+        log.warning(f"Spurt daily rejection candle failed for {sym}: {e}")
+        return None
+
+
+def _rej_notify(rows, upper=False):
+    topic = os.environ.get("NTFY_TOPIC", "").strip()
+    if not (sp.NTFY_ON and topic and rows):
+        return
+    import requests
+    lines = [f"{h['symbol']}  Rs {h['price']:.2f}  daily resistance {h['resistance']}  {REJ_TF}m upper wick {h['wick_pct']:.0f}%  volume today {h['daily_spurt_x']:.1f}x of 50-day avg  candle {h['candle']}"
+             for h in rows[:TOUCH_MAX_LINES]]
+    extra = f"\n+{len(rows) - TOUCH_MAX_LINES} more on /spurt_daily" if len(rows) > TOUCH_MAX_LINES else ""
+    try:
+        resp = requests.post(f"https://ntfy.sh/{topic}", data=("\n".join(lines) + extra).encode("utf-8"), timeout=8,
+                             headers={"Title": (f"Spurt stock REJECTED at UPPER part of DAILY resistance ({len(rows)})" if upper else f"Spurt stock REJECTED at DAILY resistance ({len(rows)})"), "Priority": "urgent", "Tags": "rotating_light,chart_with_downwards_trend"})
+        if resp.status_code >= 300:
+            log.warning(f"Spurt daily rejection ntfy refused: {resp.status_code} {resp.text[:150]}")
+    except Exception as e:
+        log.warning(f"Spurt daily rejection ntfy failed: {e}")
+
+
+def _rej_cycle(now, cands, quotes, nifty, uni):
+    """cands = {symbol: (resistance 'lo-hi', daily_spurt_x, day_chg_pct)}. Never raises."""
+    if not REJ_ON:
+        return
+    try:
+        today_s = now.strftime("%Y-%m-%d")
+        if _rej["date"] != today_s:
+            _rej_load(today_s)
+        slot = (now.hour * 60 + now.minute) // REJ_TF * REJ_TF                    # start of the candle that is forming now; the one before it is the last closed
+        slot_key = f"{slot // 60:02d}:{slot % 60:02d}"
+        todo = [s_ for s_ in cands if _rej["checked"].get(s_) != slot_key and s_ in uni]
+        new = []
+        if todo:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=max(1, min(int(getattr(sp, "WORKERS", 8)), 8))) as ex:
+                res = list(ex.map(lambda s_: (s_, _rej_candle(s_, uni[s_])), todo))
+            near = TOUCH_NEAR_PCT / 100.0
+            for sym, c in res:
+                _rej["checked"][sym] = slot_key
+                if not c:
+                    continue
+                t, o, h, l, cl = c
+                zr, mult, chg = cands[sym]
+                lo, zhi = _zone_nums(zr)
+                rng = h - l
+                if rng <= 0:
+                    continue
+                wick = (h - max(o, cl)) / rng * 100.0
+                if wick < REJ_WICK_PCT or h < lo * (1 - near) or cl > zhi:
+                    continue
+                if any(r_["symbol"] == sym and r_["candle"] == t for r_ in _rej["rows"]):
+                    continue
+                px = quotes.get(sym, {}).get("px") or cl
+                row = {c_: "" for c_ in REJ_COLS}
+                row.update({"date": today_s, "candle": t, "alert_time": now.strftime("%H:%M"), "symbol": sym, "price": round(px, 2), "resistance": zr, "wick_pct": round(wick, 1),
+                            "daily_spurt_x": round(mult, 2), "day_chg_pct": round(chg, 2), "result": "open", "nifty_at_alert": (round(nifty, 2) if nifty else ""),
+                            "upper_part": ("YES" if h >= lo + REJ_UPPER_FROM * (zhi - lo) else "")})
+                _rej["rows"].append(row)
+                new.append(row)
+        # follow-up of today's rows (fall after the alert counts as +)
+        hm_now = now.hour * 60 + now.minute
+        for r_ in _rej["rows"]:
+            q = quotes.get(r_["symbol"])
+            if not q or not r_.get("price"):
+                continue
+            try:
+                mv = round((1.0 - q["px"] / float(r_["price"])) * 100.0, 2)
+                el = hm_now - (int(r_["alert_time"][:2]) * 60 + int(r_["alert_time"][3:5]))
+                r_["best_pct"] = mv if r_["best_pct"] in ("", None) else max(float(r_["best_pct"]), mv)
+                r_["worst_pct"] = mv if r_["worst_pct"] in ("", None) else min(float(r_["worst_pct"]), mv)
+                r_["last_pct"], r_["last_time"] = mv, now.strftime("%H:%M")
+                nm = round((nifty / float(r_["nifty_at_alert"]) - 1.0) * 100.0, 2) if (nifty and r_.get("nifty_at_alert") not in ("", None)) else None
+                if nm is not None:
+                    r_["nifty_last"], r_["rel_last"] = nm, round(-mv - nm, 2)          # stock move minus NIFTY move, both in price direction
+                for lab, nlab, mm in (("ret_10m", "nifty_10m", 10), ("ret_30m", "nifty_30m", 30), ("ret_60m", "nifty_60m", 60)):
+                    if r_[lab] in ("", None) and el >= mm:
+                        r_[lab] = mv
+                        if nm is not None:
+                            r_[nlab] = nm
+                if r_["ret_60m"] not in ("", None):
+                    r_["result"] = "WORKED" if mv >= 0.3 else "FAILED" if mv <= -0.3 else "FLAT"
+            except Exception:
+                continue
+        if new or _rej["rows"]:
+            _rej_write(today_s)
+        if new:
+            _rej_notify([r_ for r_ in new if r_.get("upper_part") != "YES"])
+            _rej_notify([r_ for r_ in new if r_.get("upper_part") == "YES"], upper=True)
+            log.info(f"Spurt daily rejection: {[h['symbol'] for h in new]} rejected at the daily resistance zone ({REJ_TF}m candle)")
+    except Exception as e:
+        log.warning(f"Spurt daily rejection step failed: {e}")
+
+
+def _rej_html():
+    try:
+        today_s = datetime.now(IST).strftime("%Y-%m-%d")
+        rows = []
+        if os.path.exists(REJ_PATH):
+            df = pd.read_csv(REJ_PATH)
+            df = df[df["date"].astype(str) == today_s].fillna("")
+            rows = df.to_dict("records")
+        pc = lambda v: "-" if v in ("", None) else f'<span style="color:{"#0a7d33" if float(v) > 0 else "#c62828" if float(v) < 0 else "#555"}">{float(v):+.2f}%</span>'
+        body = "".join(
+            f"<tr><td>{r['candle']}</td><td>{r['alert_time']}</td><td>{sp._tvl(r['symbol'])}</td><td>{float(r['price']):.2f}</td><td>{r['resistance']}</td><td><b>{float(r['wick_pct']):.0f}%</b></td>"
+            f"<td>{float(r['daily_spurt_x']):.2f}x</td><td>{pc(r['ret_10m'])}</td><td>{pc(r['ret_30m'])}</td><td>{pc(r['ret_60m'])}</td><td>{pc(r['best_pct'])}</td><td>{pc(r['worst_pct'])}</td><td>{pc(r['last_pct'])}</td><td>{r['result']}</td></tr>"
+            for r in reversed(rows)) or '<tr><td colspan="14" style="text-align:center">No rejection at a daily resistance zone yet today.</td></tr>'
+        up_rows = [r for r in rows if str(r.get("upper_part", "")) == "YES"]
+        up_body = "".join(
+            f"<tr><td>{r['candle']}</td><td>{r['alert_time']}</td><td>{sp._tvl(r['symbol'])}</td><td>{float(r['price']):.2f}</td><td>{r['resistance']}</td><td><b>{float(r['wick_pct']):.0f}%</b></td>"
+            f"<td>{float(r['daily_spurt_x']):.2f}x</td><td>{pc(r['ret_10m'])}</td><td>{pc(r['ret_30m'])}</td><td>{pc(r['ret_60m'])}</td><td>{pc(r['best_pct'])}</td><td>{pc(r['worst_pct'])}</td><td>{pc(r['last_pct'])}</td><td>{r['result']}</td></tr>"
+            for r in reversed(up_rows)) or '<tr><td colspan="14" style="text-align:center">None yet today.</td></tr>'
+        up_html = (f'<h2>Rejected at the UPPER part of the DAILY resistance zone &mdash; {REJ_TF}-min candle ({len(up_rows)})</h2>'
+                   f'<div class="m">The same rejection as above, but the candle\'s high reached at least {REJ_UPPER_FROM * 100:.0f}% of the way up the daily zone: price went deep into the strongest zone and was still pushed back. '
+                   '<a href="/spurt_daily_upper.csv" target="_blank" rel="noopener">upper-part CSV</a></div>'
+                   '<div class="w"><table class="sp"><tr><th>Candle</th><th>Alert</th><th>Symbol</th><th>Price</th><th>Daily resistance</th><th>Upper wick</th><th>Volume x</th>'
+                   '<th>10 min</th><th>30 min</th><th>60 min</th><th>Best</th><th>Worst</th><th>Last</th><th>Result</th></tr>' + up_body + '</table></div><hr>')
+        return (f'<h2>Rejected at the DAILY resistance &mdash; {REJ_TF}-min candle with an upper wick of {REJ_WICK_PCT:g}% or more ({len(rows)})</h2>'
+                f'<div class="m">A stock with {TOUCH_MIN_MULT:g}x volume so far today whose closed {REJ_TF}-min candle touched its daily resistance zone, has an upper wick of {REJ_WICK_PCT:g}% or more of the candle range and closed at / below the zone top. '
+                'Phone alert for each. Moves after the alert: a FALL counts as + (the rejection worked). Information only. '
+                '<a href="/spurt_daily_rejection.csv" target="_blank" rel="noopener">rejection CSV</a></div>'
+                '<div class="w"><table class="sp"><tr><th>Candle</th><th>Alert</th><th>Symbol</th><th>Price</th><th>Daily resistance</th><th>Upper wick</th><th>Volume x</th>'
+                '<th>10 min</th><th>30 min</th><th>60 min</th><th>Best</th><th>Worst</th><th>Last</th><th>Result</th></tr>' + body + '</table></div><hr>' + up_html)
+    except Exception as e:
+        log.warning(f"Spurt daily rejection table failed: {e}")
+        return ""
 
 
 def touch_loop():
@@ -587,7 +787,7 @@ def _touch_html():
                 f'Moves are from the price at the alert (+ = up). The baseline is NIFTY over the same time: REJECTED = the stock is {TRACK_MOVE:g}% or more BELOW NIFTY\'s move after 60 min, BROKE_OUT = {TRACK_MOVE:g}% or more above it, FLAT = in between. '
                 f'<a href="/spurt_daily_touch.csv" target="_blank" rel="noopener">touch CSV</a></div>'
                 '<div class="w"><table class="sp"><tr><th>Alert time</th><th>Symbol</th><th>Price</th><th>Day high</th><th>Resistance (daily)</th><th>Volume x</th><th>Where</th>'
-                '<th>10 min</th><th>30 min</th><th>60 min</th><th>Max up</th><th>Max down</th><th>Last</th><th>NIFTY (same time)</th><th>Stock minus NIFTY</th><th>Result</th></tr>' + body + '</table></div><hr>')
+                '<th>10 min</th><th>30 min</th><th>60 min</th><th>Max up</th><th>Max down</th><th>Last</th><th>NIFTY (same time)</th><th>Stock minus NIFTY</th><th>Result</th></tr>' + body + '</table></div><hr>' + _rej_html())
     except Exception as e:
         log.warning(f"Spurt daily touch table failed: {e}")
         return ""
