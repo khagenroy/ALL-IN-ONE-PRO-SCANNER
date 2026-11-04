@@ -1169,7 +1169,9 @@ ROOM_CSV = os.path.join(RESULTS_DIR, "spurt10_room.csv")
 ROOM_COLS = ["date", "side", "symbol", "candle", "alert_time", "price", "broken_zone", "next_zone", "room_pct", "candle_pct", "multiple",
              "ret_10m", "ret_30m", "ret_60m", "best_pct", "worst_pct", "last_pct", "last_time", "result",
              "nifty_at_alert", "nifty_10m", "nifty_30m", "nifty_60m", "nifty_last", "rel_last"]
-_room = {"date": "", "mem": {}, "keys": set(), "hits": [], "count": {"BUY": 0, "SELL": 0}}
+_room = {"date": "", "mem": {}, "keys": set(), "hits": [], "count": {"BUY": 0, "SELL": 0, "ZSELL": 0}}
+
+ZSELL_ON = True              # SELL alert: spurt stock (>= ALERT_MULT) with a RED candle at a resistance zone that is also a 30m zone (15m+30m), candle volume above the previous candle
 
 
 def _room_zone(s):
@@ -1239,9 +1241,13 @@ def _room_send(side, hs):
     topic = os.environ.get("NTFY_TOPIC", "").strip()
     if not hs or not (NTFY_ON and topic) or _room["count"].get(side, 0) >= ROOM_ALERT_MAX:
         return
-    title, tag = (("BREAKOUT with room (BUY side)", "rocket") if side == "BUY" else ("BREAKDOWN with room (SELL side)", "small_red_triangle_down"))
+    title, tag = {"BUY": ("BREAKOUT with room (BUY side)", "rocket"), "SELL": ("BREAKDOWN with room (SELL side)", "small_red_triangle_down"),
+                  "ZSELL": ("SELL at 15m+30m zone + volume up", "chart_with_downwards_trend")}[side]
     hs.sort(key=lambda y: -float(y["mult"] or 0))
-    lines = [f"{y['symbol']}  Rs {y['price']:.2f}  {'above' if side == 'BUY' else 'below'} {y['broken']}  next zone {y['next'] or 'none'}  room {y['room']}{'' if y['room'] == 'no zone' else '%'}  volume {float(y['mult']):.1f}x" for y in hs[:12]]
+    if side == "ZSELL":
+        lines = [f"{y['symbol']}  Rs {y['price']:.2f}  red 15m candle at resistance {y['broken']} (15m+30m {y['next']})  volume {y['room']}x previous  spurt {float(y['mult']):.1f}x" for y in hs[:12]]
+    else:
+      lines = [f"{y['symbol']}  Rs {y['price']:.2f}  {'above' if side == 'BUY' else 'below'} {y['broken']}  next zone {y['next'] or 'none'}  room {y['room']}{'' if y['room'] == 'no zone' else '%'}  volume {float(y['mult']):.1f}x" for y in hs[:12]]
     extra = f"\n+{len(hs) - 12} more on the scanner page" if len(hs) > 12 else ""
     try:
         import requests
@@ -1264,10 +1270,10 @@ def _room_update(top, quotes, now_ist):
         if _room["date"] != today:
             if _room["date"] and _room["hits"]:
                 _room_write(_room["date"], _room["hits"])
-            _room.update(date=today, mem={}, keys=set(), hits=[], count={"BUY": 0, "SELL": 0})
+            _room.update(date=today, mem={}, keys=set(), hits=[], count={"BUY": 0, "SELL": 0, "ZSELL": 0})
             _room_load(today)
         hm = now_ist.strftime("%H:%M")
-        new = {"BUY": [], "SELL": []}
+        new = {"BUY": [], "SELL": [], "ZSELL": []}
         for r in top:
             sym, px = r.get("symbol"), r.get("price")
             if not sym or not px:
@@ -1297,6 +1303,18 @@ def _room_update(top, quotes, now_ist):
                     _room["keys"].add((sym, side))
                     _room["hits"].append(x)
                     new[side].append(x)
+            try:                                                       # SELL at 15m+30m resistance zone, red candle, volume up
+                c15, cz, zr = r.get("c15"), _room_zone(r.get("conf_resistance")), _room_zone(r.get("resistance"))
+                if ZSELL_ON and c15 and cz and zr and mult >= ALERT_MULT and (sym, "ZSELL", c15["t"]) not in _room["keys"]:
+                    vr = c15["v"] / c15["pv"] if c15["pv"] else 0.0
+                    if c15["c"] < c15["o"] and vr > 1.0 and c15["h"] >= zr[0] * (1 - ZONE_NEAR_PCT / 100.0):
+                        _room["keys"].add((sym, "ZSELL", c15["t"]))
+                        x = {"side": "ZSELL", "symbol": sym, "candle": c15["t"], "alert": hm, "price": float(px), "p0": float(px),
+                             "broken": f"{zr[0]:g}-{zr[1]:g}", "next": f"{cz[0]:g}-{cz[1]:g}", "room": round(vr, 1), "cpct": round((c15["c"] / c15["o"] - 1) * 100, 2), "mult": round(mult, 1), "n0": _nifty_px()[0]}
+                        _room["hits"].append(x)
+                        new["ZSELL"].append(x)
+            except Exception:
+                pass
             _room["mem"][sym] = {"res": res, "sup": sup}
         # follow-up of every hit of today with the live quote
         now_m = now_ist.hour * 60 + now_ist.minute
@@ -1307,7 +1325,7 @@ def _room_update(top, quotes, now_ist):
             a = _pat_mins(x["alert"])
             if not p or not x.get("p0") or a is None:
                 continue
-            sg = 1 if x["side"] == "BUY" else -1
+            sg = 1 if x["side"] == "BUY" else -1       # SELL and ZSELL: a fall counts as +
             mv = round((p / x["p0"] - 1.0) * 100.0 * sg, 2)
             x["best"] = mv if x.get("best") is None else max(x["best"], mv)
             x["worst"] = mv if x.get("worst") is None else min(x["worst"], mv)
@@ -1321,7 +1339,7 @@ def _room_update(top, quotes, now_ist):
                     x[nlab] = nm
         if _room["hits"]:
             _room_write(today, _room["hits"])
-        for side in ("BUY", "SELL"):
+        for side in ("BUY", "SELL", "ZSELL"):
             if new[side]:
                 log.info(f"Spurt10 room {side}: {[y['symbol'] for y in new[side]]}")
                 _room_send(side, new[side])
@@ -1336,7 +1354,7 @@ def _room_html():
             rows = [x for x in _room["hits"] if x["side"] == side]
             out += (f'<h2>{head} &mdash; {"BUY" if side == "BUY" else "SELL"} side &middot; volume &ge; {ROOM_MIN_MULT:g}x &middot; next zone &ge; {ROOM_MIN_PCT:g}% away ({len(rows)})</h2>'
                     f'<div class="m">Spurt stock whose price moved {word} in the previous cycle, with the next zone still far away. Only liquid stocks: buy-side and sell-side waiting quantity each at least {LIQ_MIN_DEPTH_QTY:,} shares, not near a circuit, no news. Phone alert for each. Information only. '
-                    f'<a href="/spurt10_room.csv">CSV with follow-up and NIFTY baseline (all days)</a></div>')
+                    f'<a href="/{"spurt10_room" if side == "BUY" else "spurt10_roomdown"}.csv">CSV with follow-up and NIFTY baseline (all days)</a></div>')
             if not rows:
                 out += '<div class="m">None yet today.</div>'
                 continue
@@ -1345,6 +1363,17 @@ def _room_html():
                 f"<td>{x['mult']}x</td><td>{x['alert']}</td><td>{'' if x.get('last') is None else x['last']}</td><td>{'' if x.get('best') is None else x['best']}</td></tr>" for x in reversed(rows))
             out += ('<div class="w"><table class="sp"><tr><th>Candle</th><th>Symbol</th><th>Price</th><th>Broken zone</th><th>Next zone</th><th>Room %</th>'
                     '<th>Volume</th><th>Alert</th><th>Move now %</th><th>Best %</th></tr>' + body + '</table></div>')
+        rows = [x for x in _room["hits"] if x["side"] == "ZSELL"]
+        out += (f'<h2>SELL at {ZONE_TF}m+{CONF_TF}m resistance zone &mdash; red 15-min candle with rising volume &middot; spurt &ge; {ALERT_MULT:g}x ({len(rows)})</h2>'
+                f'<div class="m">Closed 15-min candle of a stock with a 10-min volume spurt: red, its high touched a resistance zone that also exists on the {CONF_TF}-min chart, and its volume is above the previous 15-min candle. '
+                'Phone alert for each. Information only. <a href="/spurt10_zsell.csv">CSV with follow-up (all days)</a></div>')
+        if rows:
+            body = "".join(f"<tr><td>{x['candle']}</td><td>{_tvl(x['symbol'])}</td><td>{x['price']:.2f}</td><td>{x['broken']}</td><td>{x['next']}</td><td>{x['room']}x</td>"
+                            f"<td>{x['mult']}x</td><td>{x['alert']}</td><td>{'' if x.get('last') is None else x['last']}</td><td>{'' if x.get('best') is None else x['best']}</td></tr>" for x in reversed(rows))
+            out += ('<div class="w"><table class="sp"><tr><th>Candle</th><th>Symbol</th><th>Price</th><th>Resistance zone</th><th>30m zone</th><th>Volume vs previous</th>'
+                    '<th>Spurt</th><th>Alert</th><th>Move now % (fall = +)</th><th>Best %</th></tr>' + body + '</table></div>')
+        else:
+            out += '<div class="m">None yet today.</div>'
         return out
     except Exception:
         return ""
@@ -1746,6 +1775,14 @@ def run_once():
         if id(r) in top_ids:
             r.update(_zone_fields(zs, r["price"], r.get("candle_chg_pct")))
             r.update(_conf_fields(zs, _conf_zones(d5, asof), r["price"]))     # ADDED: 15m + 30m confluence
+            try:                                                           # ADDED: last two CLOSED 15-min candles (SELL at 15m+30m zone alert)
+                d15 = ls.drop_forming_bars(ls.build_merged_bars(d5, 3), 15, asof)
+                if d15 is not None and len(d15) >= 2:
+                    a_, b_ = d15.iloc[-1], d15.iloc[-2]
+                    r["c15"] = {"t": _ist(d15.index[-1]).strftime("%H:%M"), "o": float(a_["open"]), "h": float(a_["high"]), "l": float(a_["low"]), "c": float(a_["close"]),
+                                "v": float(a_["volume"]), "pv": float(b_["volume"])}
+            except Exception:
+                pass
             if r.get("zone_src"):
                 r["zone_src"] = f"Section A {ztf}m"
     try:

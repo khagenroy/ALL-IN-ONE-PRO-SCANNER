@@ -809,9 +809,31 @@ def spurt10_track_csv():
     return _serve_csv("spurt10_track.csv", "volume_spurt_every_candle_track.csv")
 
 
-@app.route("/spurt10_room.csv", methods=["GET"])
+@app.route("/spurt10_roomall.csv", methods=["GET"])
 def spurt10_room_csv():
-    return _serve_csv("spurt10_room.csv", "spurt10_room_followup.csv")
+    return _serve_csv("spurt10_room.csv", "spurt10_room_all_followup.csv")
+
+
+def _room_csv_route(page, side):
+    """/spurt10_room.csv etc.: the rows of ONE side (BUY / SELL / ZSELL) of spurt10_room.csv."""
+    def view():
+        import csv, io
+        path = os.path.join(RESULTS_DIR, "spurt10_room.csv")
+        if not os.path.exists(path):
+            return "No alert has been logged yet.", 404
+        out = io.StringIO()
+        w = csv.writer(out)
+        with open(path, newline="", encoding="utf-8") as f:
+            rd = csv.reader(f)
+            w.writerow(next(rd, []))
+            w.writerows(r for r in rd if len(r) > 1 and r[1] == side)
+        return Response(out.getvalue(), mimetype="text/csv", headers={"Content-Disposition": f"attachment; filename={page}_followup.csv"})
+    view.__name__ = "room_csv_" + page
+    app.add_url_rule(f"/{page}.csv", view_func=view, methods=["GET"])
+
+
+for _pg, _sd in (("spurt10_room", "BUY"), ("spurt10_roomdown", "SELL"), ("spurt10_zsell", "ZSELL")):
+    _room_csv_route(_pg, _sd)
 
 
 @app.route("/spurt10_patterns.csv", methods=["GET"])
@@ -1059,7 +1081,7 @@ def sma200_trades_csv():
 
 # ---- /spurt10 split into separate pages (one per section), built from the same saved spurt10.html - nothing is recomputed
 _S10_PARTS = [("main", "Top 30 spurt", None), ("ob", "OB signals", "OB mitigation signals on spurt stocks"),
-              ("wick", "Rejected at resistance", "Spurt stocks rejected at resistance"), ("rejres", "Clean rejection: resistance", "Clean top rejection at resistance"), ("rejsup", "Clean rejection: support", "Clean bottom rejection at support"), ("engbull", "Bullish engulfing", "Bullish engulfing at support"), ("engbear", "Bearish engulfing", "Bearish engulfing at resistance"), ("room", "Breakout / breakdown with room", "Breakout with room"), ("watch", "Watch list", "Watch list &mdash;"),
+              ("wick", "Rejected at resistance", "Spurt stocks rejected at resistance"), ("rejres", "Clean rejection: resistance", "Clean top rejection at resistance"), ("rejsup", "Clean rejection: support", "Clean bottom rejection at support"), ("engbull", "Bullish engulfing", "Bullish engulfing at support"), ("engbear", "Bearish engulfing", "Bearish engulfing at resistance"), ("room", "Breakout with room (BUY)", "Breakout with room"), ("roomdown", "Breakdown with room (SELL)", "Breakdown with room"), ("zsell", "SELL at 15m+30m zone", "SELL at 15m+30m resistance zone"), ("watch", "Watch list", "Watch list &mdash;"),
               ("news", "Left out: news", "Spurt stocks left out because of news"), ("thin", "Illiquid", "Illiquid stocks with a volume spurt")]
 
 
