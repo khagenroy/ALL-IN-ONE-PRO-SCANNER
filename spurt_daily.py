@@ -306,7 +306,9 @@ PREP_PATH = os.path.join(RESULTS_DIR, "spurt_daily_prep.json")           # today
 TOUCH_PATH = os.path.join(RESULTS_DIR, "spurt_daily_touch.csv")          # one line per stock per day (history stays)
 TOUCH_STATE = os.path.join(RESULTS_DIR, "spurt_daily_touch_state.json")  # stocks already alerted today (a restart does not repeat the alert)
 TOUCH_COLS = ["date", "time", "symbol", "price", "day_high", "resistance", "daily_spurt_x", "day_vol", "avg_vol", "day_chg_pct", "where",
-              "ret_10m", "ret_30m", "ret_60m", "max_up_pct", "max_down_pct", "last_pct", "last_time", "result"]   # last 8 = follow-up after the alert (+ = price up from the alert price)
+              "ret_10m", "ret_30m", "ret_60m", "max_up_pct", "max_down_pct", "last_pct", "last_time", "result",
+              "nifty_at_alert", "nifty_10m", "nifty_30m", "nifty_60m", "nifty_last", "rel_10m", "rel_30m", "rel_60m", "rel_last", "nifty_day_pct"]
+# ret_* = follow-up after the alert (+ = price up from the alert price); nifty_* = NIFTY's move over the same time; rel_* = stock minus NIFTY (the market-adjusted move)
 
 
 def _zone_nums(txt):
@@ -406,7 +408,7 @@ def _touch_notify(hits):
 TRACK_MOVE = 0.3             # % move from the price at the alert: at least this much DOWN = REJECTED, UP = BROKE_OUT, in between = FLAT
 
 
-def _touch_follow(row, px, now):
+def _touch_follow(row, px, now, nifty=None):
     """ADDED: follow-up of a stock after it reached the daily resistance: % move from the price at the alert (+ = up). Never raises."""
     try:
         mv = round((px / row["price"] - 1.0) * 100.0, 2)
@@ -414,11 +416,18 @@ def _touch_follow(row, px, now):
         row["max_up_pct"] = mv if row.get("max_up_pct") in (None, "") else max(row["max_up_pct"], mv)
         row["max_down_pct"] = mv if row.get("max_down_pct") in (None, "") else min(row["max_down_pct"], mv)
         row["last_pct"], row["last_time"] = mv, now.strftime("%H:%M")
-        for lab, mm in (("ret_10m", 10), ("ret_30m", 30), ("ret_60m", 60)):
+        nm = None
+        if nifty and row.get("nifty_at_alert") not in (None, ""):
+            nm = round((nifty / float(row["nifty_at_alert"]) - 1.0) * 100.0, 2)
+            row["nifty_last"], row["rel_last"] = nm, round(mv - nm, 2)
+        for lab, nlab, rlab, mm in (("ret_10m", "nifty_10m", "rel_10m", 10), ("ret_30m", "nifty_30m", "rel_30m", 30), ("ret_60m", "nifty_60m", "rel_60m", 60)):
             if row.get(lab) in (None, "") and el >= mm:
                 row[lab] = mv
+                if nm is not None:
+                    row[nlab], row[rlab] = nm, round(mv - nm, 2)
         done = row.get("ret_60m") not in (None, "") or now.hour * 60 + now.minute >= TOUCH_TO_MIN
-        row["result"] = ("open" if not done else "BROKE_OUT" if mv >= TRACK_MOVE else "REJECTED" if mv <= -TRACK_MOVE else "FLAT")
+        eff = mv - nm if nm is not None else mv                    # the result is judged on the move MINUS NIFTY's move (when NIFTY is known)
+        row["result"] = ("open" if not done else "BROKE_OUT" if eff >= TRACK_MOVE else "REJECTED" if eff <= -TRACK_MOVE else "FLAT")
     except Exception as e:
         log.warning(f"Spurt daily touch follow-up failed: {e}")
 
@@ -452,11 +461,12 @@ def _touch_cycle(state, now, prep):
     except Exception:
         _nws = set()
     near = TOUCH_NEAR_PCT / 100.0
+    nifty, _np = sp._nifty_px()                           # NIFTY baseline (from the indices strip, no extra Dhan call)
     new, changed = [], False
     for sym, q in quotes.items():
         if sym in state["track"]:                         # already alerted today: follow it
             if state["track"][sym].get("result") in (None, "", "open"):
-                _touch_follow(state["track"][sym], q["px"], now)
+                _touch_follow(state["track"][sym], q["px"], now, nifty)
                 changed = True
             continue
         if sym in _nws:
@@ -479,7 +489,8 @@ def _touch_cycle(state, now, prep):
         where = "above the zone" if q["px"] > zhi * (1 + near) else "in the zone" if q["px"] >= lo * (1 - near) else "touched, now below"
         row = {c: "" for c in TOUCH_COLS}
         row.update({"date": today_s, "time": now.strftime("%H:%M"), "symbol": sym, "price": round(q["px"], 2), "day_high": round(hi, 2), "resistance": p["resistance"],
-                    "daily_spurt_x": round(mult, 2), "day_vol": int(q["vol"]), "avg_vol": int(p["avg"]), "day_chg_pct": round(chg, 2), "where": where, "result": "open", "max_up_pct": 0, "max_down_pct": 0})
+                    "daily_spurt_x": round(mult, 2), "day_vol": int(q["vol"]), "avg_vol": int(p["avg"]), "day_chg_pct": round(chg, 2), "where": where, "result": "open", "max_up_pct": 0, "max_down_pct": 0,
+                    "nifty_at_alert": (round(nifty, 2) if nifty else ""), "nifty_day_pct": ("" if _np is None else _np)})
         state["track"][sym] = row
         state["done"][sym] = row["time"]
         new.append(row)
@@ -554,14 +565,14 @@ def _touch_html():
         body = "".join(
             f"<tr><td>{r['time']}</td><td>{sp._tvl(r['symbol'])}</td><td>{float(r['price']):.2f}</td><td>{float(r['day_high']):.2f}</td><td>{r['resistance']}</td>"
             f"<td>{float(r['daily_spurt_x']):.2f}x</td><td>{r['where']}</td><td>{pc(r['ret_10m'])}</td><td>{pc(r['ret_30m'])}</td><td>{pc(r['ret_60m'])}</td>"
-            f"<td>{pc(r['max_up_pct'])}</td><td>{pc(r['max_down_pct'])}</td><td>{pc(r['last_pct'])}</td><td>{rs(r['result'])}</td></tr>"
-            for r in reversed(rows)) or '<tr><td colspan="14" style="text-align:center">No stock with a 2x volume spurt has reached its daily resistance zone yet today.</td></tr>'
+            f"<td>{pc(r['max_up_pct'])}</td><td>{pc(r['max_down_pct'])}</td><td>{pc(r['last_pct'])}</td><td>{pc(r.get('nifty_last', ''))}</td><td>{pc(r.get('rel_last', ''))}</td><td>{rs(r['result'])}</td></tr>"
+            for r in reversed(rows)) or '<tr><td colspan="16" style="text-align:center">No stock with a 2x volume spurt has reached its daily resistance zone yet today.</td></tr>'
         return (f'<h2>Live today &mdash; volume spurt stocks that reached their DAILY resistance ({len(rows)})</h2>'
                 f'<div class="m">Alert when the volume so far today is {TOUCH_MIN_MULT:g}x the 50-day average and the day high reaches the daily resistance zone (checked every {TOUCH_EVERY_S}s, 09:20-15:25). '
-                f'Moves are from the price at the alert (+ = up). REJECTED = down {TRACK_MOVE:g}% or more after 60 min, BROKE_OUT = up {TRACK_MOVE:g}% or more, FLAT = in between. '
+                f'Moves are from the price at the alert (+ = up). The baseline is NIFTY over the same time: REJECTED = the stock is {TRACK_MOVE:g}% or more BELOW NIFTY\'s move after 60 min, BROKE_OUT = {TRACK_MOVE:g}% or more above it, FLAT = in between. '
                 f'<a href="/spurt_daily_touch.csv" target="_blank" rel="noopener">touch CSV</a></div>'
                 '<div class="w"><table class="sp"><tr><th>Alert time</th><th>Symbol</th><th>Price</th><th>Day high</th><th>Resistance (daily)</th><th>Volume x</th><th>Where</th>'
-                '<th>10 min</th><th>30 min</th><th>60 min</th><th>Max up</th><th>Max down</th><th>Last</th><th>Result</th></tr>' + body + '</table></div><hr>')
+                '<th>10 min</th><th>30 min</th><th>60 min</th><th>Max up</th><th>Max down</th><th>Last</th><th>NIFTY (same time)</th><th>Stock minus NIFTY</th><th>Result</th></tr>' + body + '</table></div><hr>')
     except Exception as e:
         log.warning(f"Spurt daily touch table failed: {e}")
         return ""

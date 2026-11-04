@@ -1214,7 +1214,25 @@ _news_day = {"date": None, "rows": {}}
 
 _NEWS_DAY_COLS = ["date", "first_spurt_candle", "symbol", "best_spurt_x", "last_price", "announcement",
                   "first_seen", "first_price", "spurt_dir", "spurt_candle_chg_pct", "day_chg_at_first",
-                  "ret_10m", "ret_30m", "ret_60m", "best_pct", "worst_pct", "last_pct", "last_time", "result"]   # the first six are the old columns, same order
+                  "ret_10m", "ret_30m", "ret_60m", "best_pct", "worst_pct", "last_pct", "last_time", "result",
+                  "nifty_at_first", "nifty_10m", "nifty_30m", "nifty_60m", "nifty_last", "rel_last", "nifty_day_pct"]   # the first six are the old columns, same order; the last six = NIFTY baseline
+
+
+def _nifty_px():
+    """ADDED: (NIFTY last price, day % change) from the indices strip (it asks Dhan every 20 s in this same app - no extra call), or (None, None) when it is not fresh. Never raises."""
+    try:
+        import indices_strip as _ix
+        with _ix._lock:
+            rows, asof = list(_ix._data.get("rows") or []), str(_ix._data.get("asof") or "")
+        t = datetime.strptime(asof, "%d-%b %H:%M:%S").replace(year=datetime.now(IST).year, tzinfo=IST)
+        if abs((datetime.now(IST) - t).total_seconds()) > 180:
+            return None, None
+        for r in rows:
+            if r.get("name") == "NIFTY" and r.get("price"):
+                return float(r["price"]), r.get("pct")
+    except Exception:
+        pass
+    return None, None
 
 
 def _news_follow(rows, quotes, now_ist):
@@ -1223,6 +1241,7 @@ def _news_follow(rows, quotes, now_ist):
     try:
         hm = now_ist.strftime("%H:%M")
         now_m = now_ist.hour * 60 + now_ist.minute
+        nf, _np = _nifty_px()
         for r in rows.values():
             if not r.get("p0"):
                 r["p0"] = r.get("price")
@@ -1243,6 +1262,12 @@ def _news_follow(rows, quotes, now_ist):
             for lab, mm in (("r10", 10), ("r30", 30), ("r60", 60)):
                 if r.get(lab) is None and now_m - a >= mm:
                     r[lab] = mv
+            if nf and r.get("n0"):                                   # NIFTY baseline: its % move from the same moment
+                nm = round((nf / r["n0"] - 1.0) * 100.0, 2)
+                r["nifty_last"] = nm
+                for lab, mm in (("n10", 10), ("n30", 30), ("n60", 60)):
+                    if r.get(lab) is None and now_m - a >= mm:
+                        r[lab] = nm
     except Exception as e:
         log.warning(f"Spurt10 news follow-up failed: {e}")
 
@@ -1253,6 +1278,9 @@ def _news_row(day, r, now_m):
     g = lambda k: "" if r.get(k) is None else r[k]
     up = (r.get("chg0") is None) or (r["chg0"] >= 0)
     last = r.get("last_pct")
+    rel = None if (last is None or r.get("nifty_last") is None) else round(last - r["nifty_last"], 2)      # move of the stock minus the move of NIFTY (market-adjusted)
+    if rel is not None:
+        last = rel
     done = r.get("r60") is not None or now_m >= 15 * 60 + 25
     res = "open"
     if last is not None and done:
@@ -1260,7 +1288,8 @@ def _news_row(day, r, now_m):
         res = "CONTINUED" if m >= 0.3 else "FADED" if m <= -0.3 else "FLAT"
     return [day, r["first"], r["symbol"], r["best"], r["price"], r["title"],
             g("seen"), g("p0"), "UP" if up else "DOWN", g("chg0"), g("dchg0"),
-            g("r10"), g("r30"), g("r60"), g("best_pct"), g("worst_pct"), g("last_pct"), g("last_time"), res]
+            g("r10"), g("r30"), g("r60"), g("best_pct"), g("worst_pct"), g("last_pct"), g("last_time"), res,
+            g("n0"), g("n10"), g("n30"), g("n60"), g("nifty_last"), "" if rel is None else rel, g("nd0")]
 
 
 def _news_day_update(items, now_ist, quotes=None):
@@ -1283,7 +1312,8 @@ def _news_day_update(items, now_ist, quotes=None):
             cur = rows.get(it["symbol"])
             if cur is None:
                 rows[it["symbol"]] = {"symbol": it["symbol"], "first": it["candle"], "best": it["multiple"], "price": it["price"], "title": it["title"],
-                                      "seen": now_ist.strftime("%H:%M"), "p0": it["price"], "chg0": it.get("candle_chg_pct"), "dchg0": it.get("day_chg_pct")}
+                                      "seen": now_ist.strftime("%H:%M"), "p0": it["price"], "chg0": it.get("candle_chg_pct"), "dchg0": it.get("day_chg_pct"),
+                                      "n0": _nifty_px()[0], "nd0": _nifty_px()[1]}
             else:
                 cur["best"] = max(cur["best"], it["multiple"])
                 cur["price"] = it["price"]
