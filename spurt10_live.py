@@ -356,6 +356,23 @@ def _candle_svg(o, h, l, c):
     return f'<span title="O {fm(o)}  H {fm(h)}  L {fm(l)}  C {fm(c)}" style="white-space:nowrap">{svg}</span>'
 
 
+_inv_cache = {"mt": None, "d": {}}
+
+
+def _inv_scores():
+    """{symbol: investing score} from the once-a-day investing scan; re-read only when the file changes."""
+    p = os.path.join(RESULTS_DIR, "invest_scores.json")
+    try:
+        mt = os.path.getmtime(p)
+        if _inv_cache["mt"] != mt:
+            with open(p) as f:
+                _inv_cache["d"] = json.load(f)
+            _inv_cache["mt"] = mt
+    except Exception:
+        pass
+    return _inv_cache["d"]
+
+
 def _tvl(sym):
     """Symbol as a link that opens its chart on TradingView (NSE)."""
     import urllib.parse as _up
@@ -369,6 +386,12 @@ def _tvl(sym):
             _nb = ' <span title="{t}" style="background:#fff3cd;color:#8a5a00;border:1px solid #e0b000;border-radius:3px;padding:0 3px;font-size:10px;font-weight:700">NEWS</span>'.format(t=_h.escape(str(_nt), quote=True))
     except Exception:
         _nb = ""
+    try:                                                    # ADDED: INV tag beside a stock that scored well in the investing scan (results/invest_scores.json, written once a day)
+        _iv = _inv_scores().get(s)
+        if _iv and _iv >= 3:
+            _nb += ' <a href="/invest" target="_blank" rel="noopener" title="investing scan score {n}/5" style="background:#e3f2fd;color:#0d47a1;border:1px solid #1e88e5;border-radius:3px;padding:0 3px;font-size:10px;font-weight:700;text-decoration:none">INV {n}</a>'.format(n=int(_iv))
+    except Exception:
+        pass
     return '<a href="{u}" target="_blank" rel="noopener" title="open chart in TradingView" style="color:inherit;text-decoration:none;border-bottom:1px dotted #888"><b>{t}</b></a>'.format(u=u, t=_h.escape(s)) + _nb
 
 
@@ -387,6 +410,16 @@ def _score_symbol(sym, sid):
     today_mask = day == day[-1]
     prev_close = df["close"][~today_mask].iloc[-1] if (~today_mask).any() else np.nan
     close = float(last["close"])
+    gap = {}
+    try:                                                              # ADDED: gap of today's open against the previous day (gap up / gap down with spurt candle page)
+        if (~today_mask).any():
+            pdm = day == day[~today_mask][-1]
+            op0 = float(df["open"][today_mask].iloc[0])
+            pcl = float(df["close"][pdm].iloc[-1])
+            gap = {"gap_open": op0, "gap_pc": pcl, "gap_ph": float(df["high"][pdm].max()), "gap_pl": float(df["low"][pdm].min()),
+                   "gap_pct": round((op0 / pcl - 1) * 100, 2) if pcl else None}
+    except Exception:
+        gap = {}
     zdf = df                                                          # candles the support / resistance zones are built on
     if ZONE_TF != 10:
         try:
@@ -396,6 +429,7 @@ def _score_symbol(sym, sid):
         except Exception as e:
             log.warning(f"Spurt10 {ZONE_TF}m zone candles failed for {sym}, using 10m: {e}")
     return {
+        **gap,
         "_zones": _secA_zones(zdf),
         "_df5": df5, "_as_of": as_of,
         "_zone_tf": (ZONE_TF if zdf is not df else 10),
@@ -1182,9 +1216,12 @@ ROOM_ALERT_MAX = 40           # phone alerts per kind per day
 ROOM_CSV = os.path.join(RESULTS_DIR, "spurt10_room.csv")
 ROOM_COLS = ["date", "side", "symbol", "candle", "alert_time", "price", "broken_zone", "next_zone", "room_pct", "candle_pct", "multiple",
              "ret_10m", "ret_30m", "ret_60m", "best_pct", "worst_pct", "last_pct", "last_time", "result",
-             "nifty_at_alert", "nifty_10m", "nifty_30m", "nifty_60m", "nifty_last", "rel_last"]
-_room = {"date": "", "mem": {}, "keys": set(), "hits": [], "count": {"BUY": 0, "SELL": 0, "ZSELL": 0, "UREJ": 0}}
+             "nifty_at_alert", "nifty_10m", "nifty_30m", "nifty_60m", "nifty_last", "rel_last", "gap_filled"]
+_room = {"date": "", "mem": {}, "keys": set(), "hits": [], "count": {"BUY": 0, "SELL": 0, "ZSELL": 0, "UREJ": 0, "GUP": 0, "GDN": 0}}
 
+GAP_ON = True                # gap up / gap down page: today's open is more than GAP_MIN_PCT % away from the previous close AND the stock shows a spurt candle (more than GAP_MIN_MULT x)
+GAP_MIN_PCT = 3.0
+GAP_MIN_MULT = 10.0
 UREJ_ON = True               # rejected at the UPPER part of a resistance zone: closed CAND_TF-min candle of a followed spurt stock reaches the upper part of the zone and is rejected
 UREJ_FROM = 0.5              # the "upper part" starts this far up the zone (0.5 = the top half of the zone, 0.75 = the top quarter); the high must reach it
 ZSELL_ON = True              # SELL alert: spurt stock (>= ALERT_MULT) with a RED candle at a resistance zone that is also a 30m zone (15m+30m), candle volume above the previous candle
@@ -1217,6 +1254,12 @@ def _room_load(today):
                     except Exception:
                         x[k] = None
                 x["last_t"] = r.get("last_time", "")
+                x["filled"] = r.get("gap_filled", "") or ""
+                try:
+                    _lo, _hi = (float(v) for v in str(x["broken"]).split("-"))
+                    x["pc"] = _lo if x["side"] == "GUP" else _hi
+                except Exception:
+                    pass
                 _room["hits"].append(x)
                 _room["keys"].add((x["symbol"], x["side"]))
     except Exception as e:
@@ -1229,7 +1272,7 @@ def _room_row(day, x):
     res = "open" if (last is None or x.get("r60") is None) else ("WORKED" if last >= 0.3 else "FAILED" if last <= -0.3 else "FLAT")
     rel = "" if (x.get("last") is None or x.get("nlast") is None) else round(x["last"] - x["nlast"], 2)
     return [day, x["side"], x["symbol"], x["candle"], x["alert"], x["price"], x["broken"], x["next"], x["room"], x["cpct"], x["mult"],
-            g("r10"), g("r30"), g("r60"), g("best"), g("worst"), g("last"), g("last_t"), res, g("n0"), g("n10"), g("n30"), g("n60"), g("nlast"), rel]
+            g("r10"), g("r30"), g("r60"), g("best"), g("worst"), g("last"), g("last_t"), res, g("n0"), g("n10"), g("n30"), g("n60"), g("nlast"), rel, x.get("filled", "")]
 
 
 def _room_write(day, hits):
@@ -1259,9 +1302,12 @@ def _room_send(side, hs):
         return
     title, tag = {"BUY": ("BREAKOUT with room (BUY side)", "rocket"), "SELL": ("BREAKDOWN with room (SELL side)", "small_red_triangle_down"),
                   "ZSELL": ("SELL at 15m+30m zone + volume up", "chart_with_downwards_trend"),
-                  "UREJ": ("REJECTED at UPPER part of resistance zone", "chart_with_downwards_trend")}[side]
+                  "UREJ": ("REJECTED at UPPER part of resistance zone", "chart_with_downwards_trend"),
+                  "GUP": ("GAP UP + volume spurt candle", "chart_with_upwards_trend"), "GDN": ("GAP DOWN + volume spurt candle", "chart_with_downwards_trend")}[side]
     hs.sort(key=lambda y: -float(y["mult"] or 0))
-    if side == "UREJ":
+    if side in ("GUP", "GDN"):
+        lines = [f"{y['symbol']}  Rs {y['price']:.2f}  gap {'+' if side == 'GUP' else ''}{y['room']}%  ({y['broken']}, {y['next']})  spurt {float(y['mult']):.1f}x  candle {y['candle']}" for y in hs[:12]]
+    elif side == "UREJ":
         lines = [f"{y['symbol']}  Rs {y['price']:.2f}  high reached the upper part of resistance {y['broken']}  upper wick {y['room']}%  spurt {float(y['mult']):.1f}x  candle {y['candle']}" for y in hs[:12]]
     elif side == "ZSELL":
         lines = [f"{y['symbol']}  Rs {y['price']:.2f}  red 15m candle at resistance {y['broken']} (15m+30m {y['next']})  volume {y['room']}x previous  spurt {float(y['mult']):.1f}x" for y in hs[:12]]
@@ -1289,10 +1335,10 @@ def _room_update(top, quotes, now_ist):
         if _room["date"] != today:
             if _room["date"] and _room["hits"]:
                 _room_write(_room["date"], _room["hits"])
-            _room.update(date=today, mem={}, keys=set(), hits=[], count={"BUY": 0, "SELL": 0, "ZSELL": 0, "UREJ": 0})
+            _room.update(date=today, mem={}, keys=set(), hits=[], count={"BUY": 0, "SELL": 0, "ZSELL": 0, "UREJ": 0, "GUP": 0, "GDN": 0})
             _room_load(today)
         hm = now_ist.strftime("%H:%M")
-        new = {"BUY": [], "SELL": [], "ZSELL": [], "UREJ": []}
+        new = {"BUY": [], "SELL": [], "ZSELL": [], "UREJ": [], "GUP": [], "GDN": []}
         for r in top:
             sym, px = r.get("symbol"), r.get("price")
             if not sym or not px:
@@ -1334,6 +1380,21 @@ def _room_update(top, quotes, now_ist):
                         new["ZSELL"].append(x)
             except Exception:
                 pass
+            try:                                                       # gap up / gap down with a spurt candle
+                gp = r.get("gap_pct")
+                if GAP_ON and gp is not None and abs(gp) > GAP_MIN_PCT and mult > GAP_MIN_MULT:
+                    gs = "GUP" if gp > 0 else "GDN"
+                    if (sym, gs) not in _room["keys"]:
+                        op0, pc0, ph0, pl0 = r["gap_open"], r["gap_pc"], r["gap_ph"], r["gap_pl"]
+                        where = ("above previous day's high" if op0 > ph0 else "inside previous day's range") if gs == "GUP" else ("below previous day's low" if op0 < pl0 else "inside previous day's range")
+                        x = {"side": gs, "symbol": sym, "candle": r.get("candle", ""), "alert": hm, "price": float(px), "p0": float(px), "pc": pc0,
+                             "broken": f"{min(op0, pc0):g}-{max(op0, pc0):g}", "next": where, "room": round(gp, 2), "cpct": round(float(cc), 2) if cc is not None else 0.0,
+                             "mult": round(mult, 1), "n0": _nifty_px()[0], "filled": ""}
+                        _room["keys"].add((sym, gs))
+                        _room["hits"].append(x)
+                        new[gs].append(x)
+            except Exception:
+                pass
             _room["mem"][sym] = {"res": res, "sup": sup}
         try:                                                           # rejected at the UPPER part of the resistance zone (followed spurt stocks, CAND_TF-min candles)
             symsm = _cands_last_meta.get("syms") or {}
@@ -1359,11 +1420,14 @@ def _room_update(top, quotes, now_ist):
             a = _pat_mins(x["alert"])
             if not p or not x.get("p0") or a is None:
                 continue
-            sg = 1 if x["side"] == "BUY" else -1       # SELL and ZSELL: a fall counts as +
+            sg = 1 if x["side"] in ("BUY", "GUP") else -1       # SELL, ZSELL, UREJ: a fall counts as +; gaps: a move in the gap direction counts as +
             mv = round((p / x["p0"] - 1.0) * 100.0 * sg, 2)
             x["best"] = mv if x.get("best") is None else max(x["best"], mv)
             x["worst"] = mv if x.get("worst") is None else min(x["worst"], mv)
             x["last"], x["last_t"] = mv, hm
+            if x["side"] in ("GUP", "GDN") and x.get("pc") and not x.get("filled"):
+                if (x["side"] == "GUP" and p <= x["pc"]) or (x["side"] == "GDN" and p >= x["pc"]):
+                    x["filled"] = "YES " + hm                      # price is back at the previous close = the gap is filled
             nm = round((nf / x["n0"] - 1.0) * 100.0, 2) if (nf and x.get("n0")) else None
             if nm is not None:
                 x["nlast"] = nm
@@ -1373,7 +1437,7 @@ def _room_update(top, quotes, now_ist):
                     x[nlab] = nm
         if _room["hits"]:
             _room_write(today, _room["hits"])
-        for side in ("BUY", "SELL", "ZSELL", "UREJ"):
+        for side in ("BUY", "SELL", "ZSELL", "UREJ", "GUP", "GDN"):
             if new[side]:
                 log.info(f"Spurt10 room {side}: {[y['symbol'] for y in new[side]]}")
                 _room_send(side, new[side])
@@ -1408,6 +1472,19 @@ def _room_html():
                     '<th>Spurt</th><th>Alert</th><th>Move now % (fall = +)</th><th>Best %</th></tr>' + body + '</table></div>')
         else:
             out += '<div class="m">None yet today.</div>'
+        for gs, ghead, gnote in (("GUP", "Gap up with a volume spurt candle", "opened ABOVE"), ("GDN", "Gap down with a volume spurt candle", "opened BELOW")):
+            grows = [x for x in _room["hits"] if x["side"] == gs]
+            out += (f'<h2>{ghead} &mdash; gap more than {GAP_MIN_PCT:g}% &middot; spurt more than {GAP_MIN_MULT:g}x ({len(grows)})</h2>'
+                    f'<div class="m">The stock {gnote} the previous close by more than {GAP_MIN_PCT:g}% and shows a spurt candle of more than {GAP_MIN_MULT:g}x. The first time it qualifies it is listed here with a phone alert. '
+                    'Move now = % move from the price at the alert, counted in the gap direction (+ = the gap is continuing). Gap filled = price has come back to the previous close. '
+                    'Information only. <a href="/spurt10_gap.csv">CSV with follow-up (all days)</a></div>')
+            if grows:
+                gb = "".join(f"<tr><td>{x['candle']}</td><td>{_tvl(x['symbol'])}</td><td>{x['price']:.2f}</td><td><b>{x['room']:+.2f}%</b></td><td>{x['broken']}</td><td>{x['next']}</td>"
+                             f"<td>{x['mult']}x</td><td>{x['alert']}</td><td>{'' if x.get('last') is None else x['last']}</td><td>{x.get('filled') or ''}</td></tr>" for x in reversed(grows))
+                out += ('<div class="w"><table class="sp"><tr><th>Candle</th><th>Symbol</th><th>Price</th><th>Gap %</th><th>Gap (previous close to open)</th><th>Against previous day</th>'
+                        '<th>Spurt</th><th>Alert</th><th>Move now % (gap direction)</th><th>Gap filled</th></tr>' + gb + '</table></div>')
+            else:
+                out += '<div class="m">None yet today.</div>'
         rows = [x for x in _room["hits"] if x["side"] == "UREJ"]
         out += (f'<h2>Rejected at the UPPER part of the resistance zone &mdash; {CAND_TF}-min candle, upper wick &ge; {WICK_PCT:g}% ({len(rows)})</h2>'
                 f'<div class="m">A stock that reached {WICK_SPURT_MULT:g}x today whose closed {CAND_TF}-min candle pushed into the upper part of its resistance zone (the high reached at least {UREJ_FROM * 100:.0f}% of the way up the zone), '
