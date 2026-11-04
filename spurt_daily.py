@@ -81,9 +81,20 @@ def _fetch_quotes(uni):
             except (TypeError, ValueError):
                 o = h = l = px
             dp = sp._parse_depth(q)
-            out[sym] = {"px": px, "vol": vol, "open": o or px, "high": h or px, "low": l or px, "spread": (dp[0] if dp else None)}
+            out[sym] = {"px": px, "vol": vol, "open": o or px, "high": h or px, "low": l or px, "spread": (dp[0] if dp else None), "bq": (dp[3] if dp and len(dp) > 4 else None), "sq": (dp[4] if dp and len(dp) > 4 else None), "circ": sp._circuit_side(q, px)}
         time.sleep(1.1)
     return out
+
+
+def _low_depth(d):
+    """ADDED 4 Nov: True when the total waiting bid or ask quantity (shares) is below sp.LIQ_MIN_DEPTH_QTY, or the price is near a circuit price (no depth data = False)."""
+    try:
+        if d.get("circ"):                                 # ADDED 4 Nov: within CIRCUIT_NEAR_PCT % of the upper / lower circuit price
+            return True
+        m = sp.LIQ_MIN_DEPTH_QTY
+        return bool(m > 0 and d.get("bq") is not None and d.get("sq") is not None and (d["bq"] < m or d["sq"] < m))
+    except Exception:
+        return False
 
 
 def _liquid(quotes):
@@ -92,6 +103,8 @@ def _liquid(quotes):
         if d["px"] < sp.MIN_PRICE or d["px"] * d["vol"] < MIN_TURNOVER:
             continue
         if d["spread"] is not None and d["spread"] > sp.LIQ_SPREAD_THIN:
+            continue
+        if _low_depth(d):
             continue
         names.append(sym)
     return names
@@ -475,6 +488,8 @@ def _touch_cycle(state, now, prep):
         if not p or q["px"] < sp.MIN_PRICE or q["px"] * q["vol"] < MIN_TURNOVER:
             continue
         if q["spread"] is not None and q["spread"] > sp.LIQ_SPREAD_THIN:
+            continue
+        if _low_depth(q):                                 # ADDED 4 Nov: too few shares waiting on the bid or the ask
             continue
         mult = q["vol"] / p["avg"]
         if mult < TOUCH_MIN_MULT:

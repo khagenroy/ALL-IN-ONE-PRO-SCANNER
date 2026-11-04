@@ -153,6 +153,8 @@ LIQ_SPREAD_OK = 0.10       # best bid-ask spread (% of price) up to this = LIQUI
 LIQ_REMOVE_THIN = True     # True = THIN stocks (wide bid-ask spread) are taken out of the spurt list, the tracker, the SELL signals and the alerts
 THIN_LIST_MIN_MULT = 10.0  # the illiquid list at the bottom of /spurt10 shows thin stocks with a spurt of at least this multiple
 THIN_LIST_MAX = 30
+LIQ_MIN_DEPTH_QTY = 50000   # ADDED 4 Nov: a stock whose total waiting BID quantity or total waiting ASK quantity (shares) is below this counts as THIN too and is left out like a wide-spread stock (a stock with no depth data stays). 0 = off
+CIRCUIT_NEAR_PCT = 1.0      # ADDED 4 Nov: a stock whose price is within this % of its UPPER or LOWER CIRCUIT price counts as THIN too (it can lock any moment, then you cannot get out) and is left out of every list and alert. 0 = off
 LIQ_SPREAD_THIN = 0.25     # above this = THIN (wide spread: hard to get in / out at the shown price); in between = OK
 _dsnap = {}                # {symbol: {px, chg, vol, spread, offers}} - the latest cycle, used by depth_html() (/depth page)
 _dsnap_meta = {"run": None, "spurt": {}, "zone": {}}
@@ -160,6 +162,7 @@ DEPTH_MIN_TURNOVER = 1e7   # /depth page: leave out stocks that traded less than
 DEPTH_LIST_N = 50          # /depth page: stocks shown in each list
 DEPTH_PCT = 55.0           # /depth page: Bids % / Offers % cells turn green / red above this
 DEPTH_ONLY_AT_ZONE = True  # ADDED: /depth page lists only spurt stocks that are AT a support / resistance zone AND have Bids % or Offers % above DEPTH_PCT; False = every spurt stock
+_circ = {}                 # ADDED 4 Nov: {symbol: "UPPER" / "LOWER"} for stocks within CIRCUIT_NEAR_PCT % of a circuit price - filled by _fetch_quotes every cycle
 _depth = {}                # {symbol: (spread_pct, buy_qty / sell_qty, offers_pct)} filled by _fetch_quotes every cycle
 DEPTH_PATH = os.path.join(os.path.dirname(__file__), "results", "depth_snapshot.json")   # ADDED: the /depth page data, saved to disk every cycle so it shows whichever worker / thread serves the page and survives a restart
 
@@ -209,18 +212,38 @@ def _parse_depth(q):
         offers = round(float(sq) / (float(bq) + float(sq)) * 100.0, 2) if bq and sq and (float(bq) + float(sq)) > 0 else None   # ADDED: Offers % of the depth window
         if spread is None and ratio is None:
             return None
-        return spread, ratio, offers
+        return spread, ratio, offers, (float(bq) if bq else 0.0), (float(sq) if sq else 0.0)      # ADDED: total bid qty and total ask qty (shares)
     except Exception:
         return None
+
+
+def _circuit_side(q, px):
+    """ADDED 4 Nov: "UPPER" / "LOWER" when the price is within CIRCUIT_NEAR_PCT % of the stock's upper / lower circuit price (from the same quote row), else "". Never raises."""
+    try:
+        if CIRCUIT_NEAR_PCT <= 0:
+            return ""
+        u = float(q.get("upper_circuit_limit") or 0)
+        l = float(q.get("lower_circuit_limit") or 0)
+        f = CIRCUIT_NEAR_PCT / 100.0
+        if u > 0 and px >= u * (1 - f):
+            return "UPPER"
+        if l > 0 and px <= l * (1 + f):
+            return "LOWER"
+    except Exception:
+        pass
+    return ""
 
 
 def _liq_fields(sym):
     """spread_pct, bs_ratio and the LIQUID / OK / THIN tag of a stock ('' when the quote had no depth)."""
     v = _depth.get(sym)
+    circ = _circ.get(sym, "")
+    low_qty = bool(circ) or bool(v and LIQ_MIN_DEPTH_QTY > 0 and len(v) > 4 and (v[3] < LIQ_MIN_DEPTH_QTY or v[4] < LIQ_MIN_DEPTH_QTY))      # ADDED 4 Nov: too few shares waiting on the bid or the ask side
     if not v or v[0] is None:
-        return {"spread_pct": None, "bs_ratio": (v[1] if v else None), "offers_pct": (v[2] if v and len(v) > 2 else None), "liq": ""}
+        return {"spread_pct": None, "bs_ratio": (v[1] if v else None), "offers_pct": (v[2] if v and len(v) > 2 else None), "liq": "THIN" if low_qty else ""}
     sp = v[0]
-    return {"spread_pct": sp, "bs_ratio": v[1], "offers_pct": (v[2] if len(v) > 2 else None), "liq": "LIQUID" if sp <= LIQ_SPREAD_OK else "THIN" if sp > LIQ_SPREAD_THIN else "OK"}
+    return {"spread_pct": sp, "bs_ratio": v[1], "offers_pct": (v[2] if len(v) > 2 else None),
+            "liq": "THIN" if low_qty else "LIQUID" if sp <= LIQ_SPREAD_OK else "THIN" if sp > LIQ_SPREAD_THIN else "OK"}
 
 
 def _fetch_quotes(uni):
@@ -230,6 +253,7 @@ def _fetch_quotes(uni):
     out, bad = {}, 0
     _depth.clear()
     _dsnap.clear()
+    _circ.clear()
     for i in range(0, len(ids), 1000):
         chunk = ids[i:i + 1000]
         resp = ls._dhan_post("marketfeed/quote", {"NSE_EQ": chunk}, f"quote batch {i // 1000 + 1}")
@@ -245,6 +269,9 @@ def _fetch_quotes(uni):
                 bad += 1
                 continue
             out[sym] = (px, vol)
+            _cs = _circuit_side(q, px)
+            if _cs:
+                _circ[sym] = _cs
             dp = _parse_depth(q)
             if dp:
                 _depth[sym] = dp
@@ -1475,11 +1502,14 @@ def run_once():
         for _r in rows:
             _r.update(_liq_fields(_r["symbol"]))
         thin_removed = sum(1 for _r in rows if _r.get("liq") == "THIN")
-        thin_list = sorted(({"symbol": _r["symbol"], "price": _r["price"], "candle": _r["candle"], "multiple": _r["multiple"], "spread_pct": _r["spread_pct"]}
+        thin_list = sorted(({"symbol": _r["symbol"], "price": _r["price"], "candle": _r["candle"], "multiple": _r["multiple"], "spread_pct": _r["spread_pct"],
+                            "bid_qty": (_depth.get(_r["symbol"]) or (0, 0, 0, None, None))[3], "ask_qty": (_depth.get(_r["symbol"]) or (0, 0, 0, None, None))[4],
+                            "why": (("Near " + _circ[_r["symbol"]].lower() + " circuit") if _r["symbol"] in _circ else
+                                    "Low buy / sell qty" if (_depth.get(_r["symbol"]) and len(_depth[_r["symbol"]]) > 4 and min(_depth[_r["symbol"]][3], _depth[_r["symbol"]][4]) < LIQ_MIN_DEPTH_QTY) else "Wide spread")}
                             for _r in rows if _r.get("liq") == "THIN" and _r["multiple"] >= THIN_LIST_MIN_MULT), key=lambda t: -t["multiple"])[:THIN_LIST_MAX]
         rows = [_r for _r in rows if _r.get("liq") != "THIN"]
         if thin_removed:
-            log.info(f"Spurt10: {thin_removed} thin stock(s) left out (spread above {LIQ_SPREAD_THIN}%)")
+            log.info(f"Spurt10: {thin_removed} thin stock(s) left out (spread above {LIQ_SPREAD_THIN}% or bid / ask quantity below {LIQ_MIN_DEPTH_QTY:,})")
     news_list, news_status = [], ""
     if NEWS_FILTER_ON:                                              # ADDED: leave out stocks with an important announcement (fails open: nothing is left out when the news feed cannot be read)
         _nsyms = _news_get(now_ist)
@@ -2019,12 +2049,15 @@ def _thin_html(meta):
     """ADDED: stocks with a volume spurt that were left out of the list because their bid-ask spread is wide (not liquid)."""
     tl = meta.get("thin_list") or []
     head = (f'<h3 style="margin:22px 0 4px">Illiquid stocks with a volume spurt (left out of the list above) &mdash; {len(tl)}</h3>'
-            f'<div class="m">Spread above {LIQ_SPREAD_THIN}% of the price (best bid vs best ask), so the spurt is hard to trade at the shown price. Spurts of {THIN_LIST_MIN_MULT:g}x or more, biggest first.</div>')
+            f'<div class="m">Spread above {LIQ_SPREAD_THIN}% of the price (best bid vs best ask), or fewer than {LIQ_MIN_DEPTH_QTY:,} shares waiting on the bid or the ask side, or the price is within {CIRCUIT_NEAR_PCT:g}% of its upper / lower circuit, so the spurt is hard to trade at the shown price. Spurts of {THIN_LIST_MIN_MULT:g}x or more, biggest first.</div>')
     if not tl:
         return head + '<div class="m">None right now.</div>'
-    rows = "".join(f"<tr><td>{i}</td><td>{_tvl(t['symbol'])}</td><td>{t['price']:.2f}</td><td>{t['candle']}</td><td>{t['multiple']:.2f}x</td><td style='color:#c62828'>{t['spread_pct']:.2f}%</td></tr>"
+    rows = "".join(f"<tr><td>{i}</td><td>{_tvl(t['symbol'])}</td><td>{t['price']:.2f}</td><td>{t['candle']}</td><td>{t['multiple']:.2f}x</td>"
+                   f"<td{' style=color:#c62828' if (t.get('spread_pct') or 0) > LIQ_SPREAD_THIN else ''}>{'-' if t.get('spread_pct') is None else format(t['spread_pct'], '.2f') + '%'}</td>"
+                   f"<td{' style=color:#c62828' if (t.get('bid_qty') is not None and t['bid_qty'] < LIQ_MIN_DEPTH_QTY) else ''}>{'-' if t.get('bid_qty') is None else format(int(t['bid_qty']), ',')}</td>"
+                   f"<td{' style=color:#c62828' if (t.get('ask_qty') is not None and t['ask_qty'] < LIQ_MIN_DEPTH_QTY) else ''}>{'-' if t.get('ask_qty') is None else format(int(t['ask_qty']), ',')}</td><td>{t.get('why', '')}</td></tr>"
                    for i, t in enumerate(tl, 1))
-    return (head + '<div class="w"><table class="sp"><tr><th>#</th><th>Symbol</th><th>Price</th><th>Candle</th><th>Multiple</th><th>Bid-ask spread</th></tr>' + rows + '</table></div>')
+    return (head + '<div class="w"><table class="sp"><tr><th>#</th><th>Symbol</th><th>Price</th><th>Candle</th><th>Multiple</th><th>Bid-ask spread</th><th>Buy side qty</th><th>Sell side qty</th><th>Why left out</th></tr>' + rows + '</table></div>')
 
 
 def _html(top, meta):
