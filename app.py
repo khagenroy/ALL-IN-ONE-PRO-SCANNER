@@ -409,6 +409,14 @@ def _spurt10_loop():
         log.error(f"Spurt10 loop could not start: {e}")
 
 
+# Load these once here, in order, before any background thread starts: when several threads import them for the first time together,
+# Python can hand one of them a half-loaded module ("partially initialized module 'invest_live'") and the /invest page fails.
+try:
+    import spurt10_live  # noqa: F401
+    import invest_live  # noqa: F401
+except Exception as _e:
+    log.error(f"Start-up import of spurt10_live / invest_live failed: {_e}")
+
 OIZONES_AUTORUN = os.environ.get("OIZONES_AUTORUN", "true").strip().lower() == "true"
 
 
