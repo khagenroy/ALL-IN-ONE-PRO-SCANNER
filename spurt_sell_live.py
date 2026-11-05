@@ -49,7 +49,7 @@ def _f(name, default):
 
 
 ENABLED = os.environ.get("SPURT_SELL_ENABLED", "true").strip().lower() == "true"
-MULT = _f("SPURT_SELL_MULT", 50)
+MULT = _f("SPURT_SELL_MULT", 10)                                                      # CHANGED 5 Nov: 10x (was 50x) = the TradingView indicator
 AVG_LEN = int(_f("SPURT_SELL_AVG_LEN", 50))
 WAIT = int(_f("SPURT_SELL_WAIT", 10))
 BODY_PCT = _f("SPURT_SELL_BODY_PCT", 60)
@@ -61,7 +61,9 @@ ZONE_NEAR_PCT = _f("SPURT_SELL_ZONE_NEAR_PCT", 0.5)
 NEED_RSI = os.environ.get("SPURT_SELL_NEED_RSI", "true").strip().lower() == "true"       # checklist point 6: RSI above RSI_MIN since the spurt
 RSI_LEN = int(_f("SPURT_SELL_RSI_LEN", 14))
 RSI_MIN = _f("SPURT_SELL_RSI_MIN", 70)
-HTF_MIN = int(_f("SPURT_SELL_HTF_MIN", 30))                                               # checklist point 5 (information, not required)
+HTF_MIN = int(_f("SPURT_SELL_HTF_MIN", 30))                                               # checklist point 5 (CHANGED 5 Nov: now REQUIRED)
+NEED_HTF = os.environ.get("SPURT_SELL_NEED_HTF", "true").strip().lower() == "true"       # ADDED 5 Nov: the 30-min resistance zone must also be touched (false = information only, as before)
+BASE_TF = int(_f("SPURT_SELL_BASE_TF", 15))                                               # ADDED 5 Nov: candle size in minutes the rule runs on (the scanner sends 15-min candles; 10 = old)
 SKIP_OPEN = os.environ.get("SPURT_SELL_SKIP_OPEN", "false").strip().lower() == "true"     # default: the 09:15 candle COUNTS as a spurt
 
 RESULTS_DIR = os.path.join(os.path.dirname(__file__), "results")
@@ -167,8 +169,7 @@ def track(df, sym, day_chg=None, price=None):
             "res_zone": res_zone, "htf_zone": htf_zone, "red_any": bool(red_any),
             "move_pct": round(float((c[L] / c[j] - 1) * 100), 2), "off_high_pct": round(float((c[L] / h[j:L + 1].max() - 1) * 100), 2),
             "vol_vs_spurt": round(float(v[L] / v[j]), 2) if v[j] > 0 else None,
-            "strip": [f"{o[i]:.4f}|{h[i]:.4f}|{l[i]:.4f}|{c[i]:.4f}" for i in range(max(j - PRE_CANDLES, 0), min(L, j + WAIT) + 1)],
-            "pre": int(j - max(j - PRE_CANDLES, 0)),
+            "strip": [f"{o[i]:.4f}|{h[i]:.4f}|{l[i]:.4f}|{c[i]:.4f}" for i in range(j, min(L, j + WAIT) + 1)],
             "symbol": sym, "price": round(float(c[L]), 2), "day_chg_pct": day_chg,
             "spurt_at": ist[j].strftime("%H:%M"), "spurt_mult": round(float(mult[j]), 1), "best_mult": round(best, 1),
             "spurt_colour": colour(j), "since": int(L - j),
@@ -222,11 +223,8 @@ def _tv_link(sym):
     return f'<a href="{u}" target="_blank" rel="noopener" title="open chart in TradingView" style="color:inherit;text-decoration:none;border-bottom:1px dotted #888"><b>{_h.escape(str(sym))}</b></a>'
 
 
-PRE_CANDLES = 10      # candles BEFORE the spurt candle shown in the strip (dimmed), so the strip is 10 before + the spurt + up to 10 after
-
-
-def _strip_svg(strip, tag=0, pre=0):
-    """The 10 candles before the spurt (dimmed), the spurt candle and the candles after it (up to 10) side by side on one shared price scale, so sizes can be compared. A dot marks the spurt candle."""
+def _strip_svg(strip, tag=0):
+    """The spurt candle and the candles after it (up to 10) side by side on one shared price scale, so sizes can be compared. A dot marks the spurt candle."""
     try:
         cs = [[float(x) for x in str(t).split("|")[:4]] for t in strip]
         if not cs:
@@ -240,12 +238,11 @@ def _strip_svg(strip, tag=0, pre=0):
         for i, (o, h, l, c) in enumerate(cs):
             col = "#089981" if c > o else "#F23645" if c < o else "#888"
             x = i * w + w / 2
-            op = ' opacity="0.55"' if i < pre else ""
             top, bot = min(y(o), y(c)), max(y(o), y(c))
-            parts.append(f'<line x1="{x:.1f}" y1="{y(h):.1f}" x2="{x:.1f}" y2="{y(l):.1f}" stroke="{col}" stroke-width="1.5"{op}/>'
-                         f'<rect x="{x - 4:.1f}" y="{top:.1f}" width="8" height="{max(bot - top, 1.5):.1f}" fill="{col}"{op}/>')
-        parts.append(f'<circle cx="{pre * w + w / 2:.1f}" cy="68" r="2.4" fill="#d29922"/>')
-        title = "10 candles before the spurt (dim), the spurt candle (dot) and the candles after it"
+            parts.append(f'<line x1="{x:.1f}" y1="{y(h):.1f}" x2="{x:.1f}" y2="{y(l):.1f}" stroke="{col}" stroke-width="1.5"/>'
+                         f'<rect x="{x - 4:.1f}" y="{top:.1f}" width="8" height="{max(bot - top, 1.5):.1f}" fill="{col}"/>')
+        parts.append(f'<circle cx="{w / 2:.1f}" cy="68" r="2.4" fill="#d29922"/>')
+        title = "spurt candle (dot) and the candles after it"
         return f'<svg width="{len(cs) * w}" height="72" viewBox="0 0 {len(cs) * w} 72" style="vertical-align:middle"><title>{title}</title>' + "".join(parts) + "</svg>"
     except Exception:
         return "-"
@@ -290,7 +287,7 @@ def _status(r, need_mult, is_signal, red_col):
 
 
 _NO_TRK = (f'<h3 style="margin:18px 0 4px">All volume-spurt stocks today (&ge; {TRACK_MULT:g}x)</h3>'
-           f'<div class="m">No stock has had a 10-min candle of {TRACK_MULT:g}x volume or more yet today. Every stock that reaches it is listed here and followed for {WAIT} candles. '
+           f'<div class="m">No stock has had a {BASE_TF}-min candle of {TRACK_MULT:g}x volume or more yet today. Every stock that reaches it is listed here and followed for {WAIT} candles. '
            f'The {MULT:g}x in the rule above is only the level needed for a SELL signal.</div>')
 
 
@@ -321,17 +318,17 @@ def tracker_html(signal_syms=()):
                     f"<td style='color:{cc(r['spurt_colour'])}'><b>{r['spurt_colour']}</b></td><td>{r['since']}</td>"
                     f"<td style='color:{cc(r['first_after'])}'><b>{r['first_after']}</b></td>"
                     f"<td style='white-space:nowrap;text-align:center'>{_draw(r['ohlc'])} <b style='color:{cc(r['latest_colour'])}'>{r['latest_colour']}</b></td>"
-                    f"<td class='st' style='white-space:nowrap'>{_strip_svg(r.get('strip') or [], 0, int(r.get('pre') or 0))}</td>"
+                    f"<td class='st' style='white-space:nowrap'>{_strip_svg(r.get('strip') or [])}</td>"
                     f"<td>{pc(r.get('move_pct'))}</td><td>{pc(r.get('off_high_pct'))}</td><td>{'-' if r.get('vol_vs_spurt') is None else format(r['vol_vs_spurt'], 'g') + 'x'}</td>"
                     f"<td>{'yes' if r['red_solid_vol'] else '-'}</td><td>{zt(r.get('res_zone'))}</td><td>{zt(r.get('htf_zone'))}</td>"
                     f"<td{rsi_style}>{r['rsi_peak']:g}{' &#10004;' if r['rsi_peak'] > RSI_MIN else ''}</td>"
                     f"<td><b>{_trk_score(r)}/6</b></td><td>{r['price']:.2f}</td><td>{_live_c(lp, r['symbol'], r['price'])}</td><td>{status}</td><td>{r.get('seen', '')}</td></tr>")
         return (f'<h3 style="margin:18px 0 4px">All volume-spurt stocks today (&ge; {TRACK_MULT:g}x) &mdash; {len(rows)} stock(s) &middot; updated {data.get("updated", "")}</h3>'
-                '<div class="m">Every stock with a 10-min candle of at least that volume multiple today, newest spurt first. "First candle after" and the latest candle show what the price did after the spurt. '
+                f'<div class="m">Every stock with a {BASE_TF}-min candle of at least that volume multiple today, newest spurt first. "First candle after" and the latest candle show what the price did after the spurt. '
                 '"Red solid + volume up" = a solid red candle with higher volume than the one before it has come since the spurt (checklist points 3 and 4). Stocks leave nothing out: '
                 'a stock that is no longer in the live top list keeps its last row (see "Seen").</div>'
                 '<style>table.trk th,table.trk td{padding:4px 5px;font-size:12px;line-height:1.25}table.trk td.st{min-width:152px;padding:2px 4px;text-align:left}table.trk th{font-size:11.5px}</style><table class="s trk"><tr><th>#</th><th>Symbol</th><th>Spurt at</th><th title="volume multiple of the spurt candle">Spurt x</th><th title="best multiple today">Best x</th><th>Spurt candle</th><th title="candles since the spurt">Since</th>'
-                '<th>1st candle after</th><th>Latest</th><th title="10 candles before the spurt (dim), the spurt candle (dot) and the candles after it">10 before + spurt (dot) + next</th><th title="change since the spurt candle closed">Move</th><th title="distance from the highest high since the spurt">From high</th><th title="latest candle volume vs the spurt candle volume">Vol vs spurt</th><th title="solid red candle with higher volume has come">Red + vol up</th><th title="resistance zone touched since the spurt">Res. zone</th><th>' + str(HTF_MIN) + 'm zone</th><th>RSI</th><th>Checklist</th><th title="close of the latest closed 10-min candle">Close</th><th title="last traded price now (refreshed when the page is opened)">Live</th><th>Status</th><th>Seen</th></tr>'
+                '<th>1st candle after</th><th>Latest</th><th>Spurt (dot) + next candles</th><th title="change since the spurt candle closed">Move</th><th title="distance from the highest high since the spurt">From high</th><th title="latest candle volume vs the spurt candle volume">Vol vs spurt</th><th title="solid red candle with higher volume has come">Red + vol up</th><th title="resistance zone touched since the spurt">Res. zone</th><th>' + str(HTF_MIN) + 'm zone</th><th>RSI</th><th>Checklist</th><th title="close of the latest closed 10-min candle">Close</th><th title="last traded price now (refreshed when the page is opened)">Live</th><th>Status</th><th>Seen</th></tr>'
                 f'{out}</table><br>')
     except FileNotFoundError:
         return _NO_TRK
@@ -351,10 +348,10 @@ def _rsi(close, n):
 
 def _htf_touch(df, sj, L, tol_pct):
     """Point 5: did price touch a live HTF_MIN-minute RESISTANCE zone between the spurt and the red candle? Returns 'lo-hi' or ''.
-    The HTF candles are built from the 10-min candles (only complete ones). Information only - never blocks a signal."""
+    The HTF candles are built from the 10-min candles (only complete ones). Required for a signal when NEED_HTF is true (the default since 5 Nov)."""
     try:
         import spurt_zones
-        step = HTF_MIN // 10
+        step = max(HTF_MIN // BASE_TF, 1)
         if step < 2:
             return ""
         ist = df.index.to_series().map(_ist)
@@ -381,7 +378,7 @@ def _htf_touch(df, sj, L, tol_pct):
 
 # ---------------------------------------------------------------- the rule
 def check(df, sym, day_chg=None):
-    """df = 10-min candles, last row = latest CLOSED candle. Returns a signal dict or None. Never raises."""
+    """df = BASE_TF-min candles (15 since 5 Nov), last row = latest CLOSED candle. Returns a signal dict or None. Never raises."""
     if not ENABLED:
         return None
     try:
@@ -431,7 +428,9 @@ def check(df, sym, day_chg=None):
         rsi_peak = float(np.nanmax(_rsi(c, RSI_LEN)[sj:L + 1]))                  # point 6: highest RSI from the spurt candle to the red candle
         if NEED_RSI and not rsi_peak > RSI_MIN:
             return None
-        htf_txt = _htf_touch(df, sj, L, ZONE_NEAR_PCT)                           # point 5 (information)
+        htf_txt = _htf_touch(df, sj, L, ZONE_NEAR_PCT)                           # point 5
+        if NEED_HTF and not htf_txt:
+            return None
         score = 3 + (1 if zone_txt else 0) + (1 if rsi_peak > RSI_MIN else 0) + (1 if htf_txt else 0)   # points 1, 3, 4 are met by construction
         return {
             "symbol": sym,
@@ -542,8 +541,17 @@ rows.forEach(function(r){b.appendChild(r);});});});
 _RULES_BANNER = ('<style>@keyframes rb{0%,49%{background:#fff176;color:#d50000}50%,100%{background:#d50000;color:#fff}}</style>'
                  '<div style="animation:rb 1s step-end infinite;position:sticky;top:0;z-index:99999;background:#fff176;border:3px solid #d50000;border-radius:6px;'
                  'padding:10px 14px;margin:0 0 14px;color:#d50000;font-weight:900;font-size:22px;line-height:1.5;text-align:center">'
-                 '1. DON\'T RUSH &nbsp;&nbsp;|&nbsp;&nbsp; 2. DON\'T TRADE WITHOUT VALID SET UP &nbsp;&nbsp;|&nbsp;&nbsp; 3. 1 VALID SETUP ENOUGH TO EARN MONEY&nbsp;&nbsp;|&nbsp;&nbsp; 4. DON&#39;T BE EMOTIONAL ATTACHED</div>')
+                 '1. DON&#39;T RUSH&nbsp;&nbsp;|&nbsp;&nbsp; 2. DON&#39;T TRADE WITHOUT VALID SET UP&nbsp;&nbsp;|&nbsp;&nbsp; 3. 1 VALID SETUP ENOUGH TO EARN MONEY&nbsp;&nbsp;|&nbsp;&nbsp; 4. DON&#39;T BE EMOTIONAL ATTACHED</div>')
 
+
+
+def _idx():
+    """Indices strip under the banner (empty text if Dhan gives nothing)."""
+    try:
+        import indices_strip
+        return indices_strip.strip_html()
+    except Exception:
+        return ""
 
 
 def page_html(date=None):
@@ -553,12 +561,12 @@ def page_html(date=None):
                 '<meta http-equiv="refresh" content="60"><title>Spurt SELL</title>'
                 '<style>body{font-family:Arial,sans-serif;margin:12px;background:#fafafa}table{border-collapse:collapse;background:#fff}'
                 'th,td{border:1px solid #ddd;padding:6px 8px;text-align:right;font-size:14px}th{background:#222;color:#fff}'
-                'td:nth-child(2){text-align:left}.m{color:#555;font-size:13px;margin:6px 0 12px}</style></head><body>' + _RULES_BANNER)
-        rule = (f"Rule: a green 10-min candle with volume &ge; {MULT:g}x the average of the previous {AVG_LEN} candles (09:15 candle {'ignored' if SKIP_OPEN else 'included'}), then within "
+                'td:nth-child(2){text-align:left}.m{color:#555;font-size:13px;margin:6px 0 12px}</style></head><body>' + _RULES_BANNER + _idx())
+        rule = (f"Rule: a green {BASE_TF}-min candle with volume &ge; {MULT:g}x the average of the previous {AVG_LEN} candles (09:15 candle {'ignored' if SKIP_OPEN else 'included'}), then within "
                 f"{WAIT} candles a solid red candle (body &ge; {BODY_PCT:g}% of its range) with higher volume than the candle before it. "
                 f"SELL at that red candle's close, stop loss = its high, targets = {R1:g}x and {R2:g}x the risk. One signal per spurt. "
-                f"Checklist: points 1-4 above plus RSI above {RSI_MIN:g} since the spurt are required; the {HTF_MIN}m resistance zone is shown as a bonus (score 5/6 or 6/6). "
-                f"{'The price must also have touched a resistance order-block zone since the spurt (10-min chart, ALL IN ONE PRO logic). ' if NEED_ZONE else ''}"
+                f"Checklist: points 1-4 above plus RSI above {RSI_MIN:g} since the spurt are required; the {HTF_MIN}m resistance zone is {'also required' if NEED_HTF else 'shown as a bonus'} (score 5/6 or 6/6). "
+                f"{'The price must also have touched a resistance order-block zone since the spurt ({BASE_TF}-min chart, ALL IN ONE PRO logic). ' if NEED_ZONE else ''}"
                 "Paper/information only - the scanner places no orders.")
         sig_today = set()
         try:

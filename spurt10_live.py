@@ -428,13 +428,24 @@ def _score_symbol(sym, sid):
                 zdf = zdf15
         except Exception as e:
             log.warning(f"Spurt10 {ZONE_TF}m zone candles failed for {sym}, using 10m: {e}")
+    sdf = df                                                          # ADDED 5 Nov: candles the Spurt SELL rule / tracker run on (15-min, like the TradingView indicator; spurt_sell_live.BASE_TF)
+    try:
+        import spurt_sell_live as _ssl
+        if _ssl.BASE_TF != 10:
+            _s15 = ls.drop_forming_bars(ls.build_merged_bars(df5, _ssl.BASE_TF // 5), _ssl.BASE_TF, as_of)
+            if _s15 is not None and len(_s15) >= _ssl.AVG_LEN + 3:
+                sdf = _s15
+            else:
+                sdf = None                                            # not enough 15-min candles yet: no SELL check for this stock this cycle
+    except Exception as e:
+        log.warning(f"Spurt10 SELL candles failed for {sym}: {e}")
     return {
         **gap,
         "_zones": _secA_zones(zdf),
         "_df5": df5, "_as_of": as_of,
         "_zone_tf": (ZONE_TF if zdf is not df else 10),
-        "_trk": _trk_check(df, sym, round((close / prev_close - 1) * 100, 2) if prev_close == prev_close else None),   # ADDED: spurt tracker (spurt_sell_live.py)
-        "_sell": _sell_check(df, sym, round((close / prev_close - 1) * 100, 2) if prev_close == prev_close else None),   # ADDED: spurt -> red candle SELL rule (spurt_sell_live.py)
+        "_trk": _trk_check(sdf, sym, round((close / prev_close - 1) * 100, 2) if prev_close == prev_close else None),   # ADDED: spurt tracker (spurt_sell_live.py)
+        "_sell": _sell_check(sdf, sym, round((close / prev_close - 1) * 100, 2) if prev_close == prev_close else None),   # ADDED: spurt -> red candle SELL rule (spurt_sell_live.py)
         "symbol": sym,
         "price": round(close, 2),
         "day_chg_pct": round((close / prev_close - 1) * 100, 2) if prev_close == prev_close else None,
@@ -464,6 +475,8 @@ def _paper_fetch5(sym):
 
 def _trk_check(df, sym, day_chg):
     """ADDED: summary of today's volume spurt (>= 10x) of this stock for the /spurt_sell tracker table. Never raises."""
+    if df is None:
+        return None
     try:
         import spurt_sell_live
         return spurt_sell_live.track(df, sym, day_chg)
