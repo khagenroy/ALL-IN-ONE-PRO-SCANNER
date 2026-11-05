@@ -550,9 +550,6 @@ def add_menu(app):
     GROUPS = [
         ("Spurt scanners", ["/spurt10", "/spurt10_history", "/zone_touch", "/spurt_daily", "/spurt_sell", "/spurt_paper", "/spurtpb", "/volspurt", "/spz"]),
         ("Spurt10 sections", ["/spurt10_main", "/spurt10_early", "/spurt10_ob", "/spurt10_wick", "/spurt10_rejres", "/spurt10_rejsup", "/spurt10_engbull", "/spurt10_engbear", "/spurt10_room", "/spurt10_roomdown", "/spurt10_zsell", "/spurt10_upper", "/spurt10_gap", "/spurt10_orb", "/spurt10_watch", "/spurt10_news", "/spurt10_thin", "/depth"]),
-        ("OI zones / ORB", ["/oizones", "/oizones_signals", "/orb"]),
-        ("Best setups", ["/best", "/bestnow"]),
-        ("Scanner / Swing / Gainers", ["/scanner", "/swing", "/gainers"]),
         ("SMA / Trend", ["/sma200", "/sma200now", "/trendnow"]),
         ("Bot / Deals", ["/botlog", "/botpnl", "/deals"]),
         ("Commodity tables", ["/mcx_oizones", "/mcx_signals", "/mcx_signals_all", "/mcx_spurt"]),
@@ -560,6 +557,9 @@ def add_menu(app):
         ("Investing", ["/invest"]),
         ("Practice trading", ["/paper", "/paper/history", "/paper/leaderboard", "/paper/help"]),
         ("Crypto tables", ["/crypto_oizones", "/crypto_signals", "/crypto_signals_all", "/crypto_spurt"]),
+        ("OI zones / ORB", ["/oizones", "/oizones_signals", "/orb"]),
+        ("Best setups", ["/best", "/bestnow"]),
+        ("Scanner / Swing / Gainers", ["/scanner", "/swing", "/gainers"]),
             ]
     SKIP = ("/", "/health", "/login", "/logout", "/register", "/setup", "/alerts", "/indices.json", "/password", "/risk_mgmt")
 
@@ -607,7 +607,10 @@ def add_menu(app):
         for title, plist in groups:
             rows = "".join(f"<div class=r><a class=pg href='{escape(p)}' target=_blank rel=noopener>{escape(p[1:])}</a>{chips(p)}</div>" for p in plist if ok(p))
             if rows:
-                cards += f"<section><h3>{escape(title)}</h3>{rows}</section>"
+                if title == "Spurt10 sections":              # wide tile: the long button list is split into 2 columns, so the row is not so tall and the small tiles can sit below
+                    cards += f"<section class=w2><h3>{escape(title)}</h3><div class=cols>{rows}</div></section>"
+                else:
+                    cards += f"<section><h3>{escape(title)}</h3>{rows}</section>"
         _lk = app.config.get("AG_LINKS") or []
         if _lk:
             cards += "<section><h3>Other scanners</h3>" + "".join(f"<div class=r><a class=pg href='{escape(u)}' target=_blank rel=noopener>{escape(n)} &#8599;</a></div>" for n, u in _lk) + "</section>"
@@ -637,7 +640,7 @@ def add_menu(app):
         top = ("<a href='/alerts' target=_blank rel=noopener>Alerts</a>" + (" &middot; <a href='/admin/users'>Manage users</a>" if admin else "") + f" &middot; <a href='/password'>Password</a> &middot; <a href='/logout'>Logout ({who})</a>")
         css = (_ART_CSS + "body{margin:0;background:" + _BG + ";background-attachment:fixed;min-height:100vh;color:#e6e9ef;font-family:system-ui,Arial,sans-serif}.t{display:flex;justify-content:space-between;align-items:center;padding:10px 16px;border-bottom:1px solid #2f3a50;background:rgba(11,15,22,.75);backdrop-filter:blur(6px);font-size:14px;gap:10px;flex-wrap:wrap}"
                ".g{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px;padding:12px 14px}section{background:rgba(24,29,39,.82);border:1px solid #2f3a50;border-radius:12px;padding:10px 12px;box-shadow:0 6px 20px rgba(0,0,0,.35);transition:transform .15s,border-color .15s}section:hover{transform:translateY(-2px);border-color:#4a6fb0}"
-               "h3{margin:0 0 6px;font-size:13px;color:#8fb4ff;text-transform:uppercase;letter-spacing:.5px}.r{display:flex;flex-wrap:wrap;align-items:center;gap:4px;padding:2px 0;font-size:13px}"
+               "h3{margin:0 0 6px;font-size:13px;color:#8fb4ff;text-transform:uppercase;letter-spacing:.5px}.r{display:flex;flex-wrap:wrap;align-items:center;gap:4px;padding:2px 0;font-size:13px;break-inside:avoid}@media(min-width:760px){.w2{grid-column:span 2}.w2 .cols{column-count:2;column-gap:16px}}"
                ".pg{background:linear-gradient(135deg,#2f6fdc,#4a86f0);box-shadow:0 2px 8px rgba(47,111,220,.4);color:#fff;font-weight:600;padding:2px 9px;border-radius:6px;margin-right:4px}.pg:hover{background:#4a86f0}a{color:#7db3ff;text-decoration:none}"
                ".ch{font-size:11px;background:#1d232e;border:1px dashed #3a4558;border-radius:10px;padding:0 6px;color:#8d9bb0}.ch:before{content:\"\\2193 \"}body{padding-bottom:64px}" + _FOOT_CSS)
         note = "(blue = open the scanner, grey \u2193 = download CSV)"
