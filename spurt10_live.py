@@ -2823,7 +2823,7 @@ def _in_session(now):
 # (today's volume now minus the volume ~10 minutes ago) is compared with the stock's average 10-min candle volume (50 closed candles). At EARLY_MULT x or more = EARLY alert (once per stock per
 # EARLY_COOLDOWN_MIN minutes). The same leave-outs apply as everywhere else: thin / near-circuit stocks and stocks with news. The candle colour is not final yet - the alert shows the price move so far.
 EARLY_ON = True
-EARLY_MULT = 10.0
+EARLY_MULT = 20.0
 EARLY_MIN_AGE = 3.0           # minutes: the window must be at least this long
 EARLY_MAX_AGE = 10.5          # minutes: the window is never longer than one 10-min candle
 EARLY_FETCH_MAX = 25          # stocks per tick whose average volume must still be read from candles
