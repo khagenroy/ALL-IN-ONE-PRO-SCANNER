@@ -551,7 +551,7 @@ def add_menu(app):
         ("Spurt scanners", ["/spurt10", "/spurt10_history", "/zone_touch", "/spurt_daily", "/spurt_sell", "/spurt_paper", "/spurtpb", "/volspurt", "/spz"]),
         ("Practice trading", ["/paper", "/paper/history", "/paper/leaderboard", "/paper/help"]),
         ("Investing", ["/invest"]),
-        ("Spurt10 sections", ["/spurt10_main", "/spurt10_ob", "/spurt10_wick", "/spurt10_rejres", "/spurt10_rejsup", "/spurt10_engbull", "/spurt10_engbear", "/spurt10_room", "/spurt10_roomdown", "/spurt10_zsell", "/spurt10_upper", "/spurt10_gap", "/spurt10_watch", "/spurt10_news", "/spurt10_thin", "/depth"]),
+        ("Spurt10 sections", ["/spurt10_main", "/spurt10_ob", "/spurt10_wick", "/spurt10_rejres", "/spurt10_rejsup", "/spurt10_engbull", "/spurt10_engbear", "/spurt10_room", "/spurt10_roomdown", "/spurt10_zsell", "/spurt10_upper", "/spurt10_gap", "/spurt10_orb", "/spurt10_watch", "/spurt10_news", "/spurt10_thin", "/depth"]),
         ("SMA / Trend", ["/sma200", "/sma200now", "/trendnow"]),
         ("Best setups", ["/best", "/bestnow"]),
         ("Scanner / Swing / Gainers", ["/scanner", "/swing", "/gainers"]),

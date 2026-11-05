@@ -1217,8 +1217,11 @@ ROOM_CSV = os.path.join(RESULTS_DIR, "spurt10_room.csv")
 ROOM_COLS = ["date", "side", "symbol", "candle", "alert_time", "price", "broken_zone", "next_zone", "room_pct", "candle_pct", "multiple",
              "ret_10m", "ret_30m", "ret_60m", "best_pct", "worst_pct", "last_pct", "last_time", "result",
              "nifty_at_alert", "nifty_10m", "nifty_30m", "nifty_60m", "nifty_last", "rel_last", "gap_filled"]
-_room = {"date": "", "mem": {}, "keys": set(), "hits": [], "count": {"BUY": 0, "SELL": 0, "ZSELL": 0, "UREJ": 0, "GUP": 0, "GDN": 0}}
+_room = {"date": "", "mem": {}, "keys": set(), "hits": [], "count": {"BUY": 0, "SELL": 0, "ZSELL": 0, "UREJ": 0, "GUP": 0, "GDN": 0, "ORBUP": 0, "ORBDN": 0, "ORBIN": 0}}
 
+ORB_ON = True                # ADDED 5 Nov: opening range = the first 15-min candle of the day (09:15-09:30). ORBUP / ORBDN = a closed 15-min candle of a spurt stock CLOSES above the range high / below the range low (alert once per stock per day)
+ORB_BREAK_UNTIL = 15 * 60    # breakout alerts are given until this time (minutes after midnight, IST)
+ORB_INSIDE_UNTIL = 13 * 60   # ORBIN: a spurt stock (>= ALERT_MULT) that is still INSIDE the opening range - alert once per stock per day until 13:00
 GAP_ON = True                # gap up / gap down page: today's open is more than GAP_MIN_PCT % away from the previous close AND the stock shows a spurt candle (more than GAP_MIN_MULT x)
 GAP_MIN_PCT = 3.0
 GAP_MIN_MULT = 10.0
@@ -1303,10 +1306,16 @@ def _room_send(side, hs):
     title, tag = {"BUY": ("BREAKOUT with room (BUY side)", "rocket"), "SELL": ("BREAKDOWN with room (SELL side)", "small_red_triangle_down"),
                   "ZSELL": ("SELL at 15m+30m zone + volume up", "chart_with_downwards_trend"),
                   "UREJ": ("REJECTED at UPPER part of resistance zone", "chart_with_downwards_trend"),
-                  "GUP": ("GAP UP + volume spurt candle", "chart_with_upwards_trend"), "GDN": ("GAP DOWN + volume spurt candle", "chart_with_downwards_trend")}[side]
+                  "GUP": ("GAP UP + volume spurt candle", "chart_with_upwards_trend"), "GDN": ("GAP DOWN + volume spurt candle", "chart_with_downwards_trend"),
+                  "ORBUP": ("ORB BREAKOUT UP (closed above the opening range)", "rocket"), "ORBDN": ("ORB BREAKDOWN (closed below the opening range)", "small_red_triangle_down"),
+                  "ORBIN": ("Spurt stocks INSIDE the opening range", "hourglass_flowing_sand")}[side]
     hs.sort(key=lambda y: -float(y["mult"] or 0))
     if side in ("GUP", "GDN"):
         lines = [f"{y['symbol']}  Rs {y['price']:.2f}  gap {'+' if side == 'GUP' else ''}{y['room']}%  ({y['broken']}, {y['next']})  spurt {float(y['mult']):.1f}x  candle {y['candle']}" for y in hs[:12]]
+    elif side in ("ORBUP", "ORBDN"):
+        lines = [f"{y['symbol']}  Rs {y['price']:.2f}  15m candle {y['candle']} closed {'above' if side == 'ORBUP' else 'below'} the opening range {y['broken']}  spurt {float(y['mult']):.1f}x" for y in hs[:12]]
+    elif side == "ORBIN":
+        lines = [f"{y['symbol']}  Rs {y['price']:.2f}  inside the opening range {y['broken']}  spurt {float(y['mult']):.1f}x" for y in hs[:12]]
     elif side == "UREJ":
         lines = [f"{y['symbol']}  Rs {y['price']:.2f}  high reached the upper part of resistance {y['broken']}  upper wick {y['room']}%  spurt {float(y['mult']):.1f}x  candle {y['candle']}" for y in hs[:12]]
     elif side == "ZSELL":
@@ -1317,7 +1326,7 @@ def _room_send(side, hs):
     try:
         import requests
         resp = requests.post(f"https://ntfy.sh/{topic}", data=("\n".join(lines) + extra).encode("utf-8"), timeout=8,
-                             headers={"Title": f"{title} ({len(hs)})", "Priority": ("urgent" if side == "UREJ" else "high"), "Tags": ("rotating_light," + tag if side == "UREJ" else tag)})
+                             headers={"Title": f"{title} ({len(hs)})", "Priority": ("urgent" if side == "UREJ" else "default" if side == "ORBIN" else "high"), "Tags": ("rotating_light," + tag if side == "UREJ" else tag)})
         if resp.status_code < 300:
             _room["count"][side] = _room["count"].get(side, 0) + 1
         else:
@@ -1335,10 +1344,10 @@ def _room_update(top, quotes, now_ist):
         if _room["date"] != today:
             if _room["date"] and _room["hits"]:
                 _room_write(_room["date"], _room["hits"])
-            _room.update(date=today, mem={}, keys=set(), hits=[], count={"BUY": 0, "SELL": 0, "ZSELL": 0, "UREJ": 0, "GUP": 0, "GDN": 0})
+            _room.update(date=today, mem={}, keys=set(), hits=[], count={"BUY": 0, "SELL": 0, "ZSELL": 0, "UREJ": 0, "GUP": 0, "GDN": 0, "ORBUP": 0, "ORBDN": 0, "ORBIN": 0})
             _room_load(today)
         hm = now_ist.strftime("%H:%M")
-        new = {"BUY": [], "SELL": [], "ZSELL": [], "UREJ": [], "GUP": [], "GDN": []}
+        new = {"BUY": [], "SELL": [], "ZSELL": [], "UREJ": [], "GUP": [], "GDN": [], "ORBUP": [], "ORBDN": [], "ORBIN": []}
         for r in top:
             sym, px = r.get("symbol"), r.get("price")
             if not sym or not px:
@@ -1395,6 +1404,29 @@ def _room_update(top, quotes, now_ist):
                         new[gs].append(x)
             except Exception:
                 pass
+            try:                                                       # opening range (first 15-min candle): breakout up / down on a closed 15-min candle, and still inside the range until 13:00
+                orb, c15 = r.get("orb"), r.get("c15")
+                if ORB_ON and orb and mult >= ALERT_MULT:
+                    ohi, olo = orb
+                    nowm0 = now_ist.hour * 60 + now_ist.minute
+                    rng_s = f"{olo:g}-{ohi:g}"
+                    if c15 and c15["t"] != "09:15" and nowm0 <= ORB_BREAK_UNTIL:
+                        for os_, okk in (("ORBUP", c15["c"] > ohi), ("ORBDN", c15["c"] < olo)):
+                            if okk and (sym, os_) not in _room["keys"]:
+                                x = {"side": os_, "symbol": sym, "candle": c15["t"], "alert": hm, "price": float(px), "p0": float(px), "broken": rng_s, "next": "",
+                                     "room": round((c15["c"] / (ohi if os_ == "ORBUP" else olo) - 1) * 100, 2), "cpct": round((c15["c"] / c15["o"] - 1) * 100, 2) if c15["o"] else 0.0,
+                                     "mult": round(mult, 1), "n0": _nifty_px()[0]}
+                                _room["keys"].add((sym, os_))
+                                _room["hits"].append(x)
+                                new[os_].append(x)
+                    if 9 * 60 + 30 <= nowm0 <= ORB_INSIDE_UNTIL and olo <= px <= ohi and (sym, "ORBIN") not in _room["keys"]:
+                        x = {"side": "ORBIN", "symbol": sym, "candle": (c15 or {}).get("t", ""), "alert": hm, "price": float(px), "p0": float(px), "broken": rng_s, "next": "",
+                             "room": round((px - olo) / (ohi - olo) * 100, 0) if ohi > olo else 0, "cpct": round(float(cc), 2) if cc is not None else 0.0, "mult": round(mult, 1), "n0": _nifty_px()[0]}
+                        _room["keys"].add((sym, "ORBIN"))
+                        _room["hits"].append(x)
+                        new["ORBIN"].append(x)
+            except Exception:
+                pass
             _room["mem"][sym] = {"res": res, "sup": sup}
         try:                                                           # rejected at the UPPER part of the resistance zone (followed spurt stocks, CAND_TF-min candles)
             symsm = _cands_last_meta.get("syms") or {}
@@ -1420,7 +1452,7 @@ def _room_update(top, quotes, now_ist):
             a = _pat_mins(x["alert"])
             if not p or not x.get("p0") or a is None:
                 continue
-            sg = 1 if x["side"] in ("BUY", "GUP") else -1       # SELL, ZSELL, UREJ: a fall counts as +; gaps: a move in the gap direction counts as +
+            sg = 1 if x["side"] in ("BUY", "GUP", "ORBUP", "ORBIN") else -1       # SELL, ZSELL, UREJ: a fall counts as +; gaps: a move in the gap direction counts as +
             mv = round((p / x["p0"] - 1.0) * 100.0 * sg, 2)
             x["best"] = mv if x.get("best") is None else max(x["best"], mv)
             x["worst"] = mv if x.get("worst") is None else min(x["worst"], mv)
@@ -1437,7 +1469,7 @@ def _room_update(top, quotes, now_ist):
                     x[nlab] = nm
         if _room["hits"]:
             _room_write(today, _room["hits"])
-        for side in ("BUY", "SELL", "ZSELL", "UREJ", "GUP", "GDN"):
+        for side in ("BUY", "SELL", "ZSELL", "UREJ", "GUP", "GDN", "ORBUP", "ORBDN", "ORBIN"):
             if new[side]:
                 log.info(f"Spurt10 room {side}: {[y['symbol'] for y in new[side]]}")
                 _room_send(side, new[side])
@@ -1495,6 +1527,28 @@ def _room_html():
                             f"<td>{x['mult']}x</td><td>{x['alert']}</td><td>{'' if x.get('last') is None else x['last']}</td><td>{'' if x.get('best') is None else x['best']}</td></tr>" for x in reversed(rows))
             out += ('<div class="w"><table class="sp"><tr><th>Candle</th><th>Symbol</th><th>Price</th><th>Resistance zone</th><th>Upper wick</th>'
                     '<th>Best spurt</th><th>Alert</th><th>Move now % (fall = +)</th><th>Best %</th></tr>' + body + '</table></div>')
+        else:
+            out += '<div class="m">None yet today.</div>'
+        for os_, ohead, onote in (("ORBUP", "Opening range breakout UP", "CLOSED above the high"), ("ORBDN", "Opening range breakdown DOWN", "CLOSED below the low")):
+            orows = [x for x in _room["hits"] if x["side"] == os_]
+            out += (f'<h2>{ohead} &mdash; 15-min candle {onote} of the first 15 minutes &middot; spurt &ge; {ALERT_MULT:g}x ({len(orows)})</h2>'
+                    f'<div class="m">Opening range = the high and low of the 09:15-09:30 candle. A closed 15-min candle of a spurt stock {onote} of that range (the opening candle itself does not count). '
+                    'First time per stock per day, phone alert for each. Move now = % move from the price at the alert in the breakout direction. Information only. '
+                    '<a href="/spurt10_orb.csv">CSV with follow-up (all days)</a></div>')
+            if orows:
+                ob = "".join(f"<tr><td>{x['candle']}</td><td>{_tvl(x['symbol'])}</td><td>{x['price']:.2f}</td><td>{x['broken']}</td><td>{x['room']:+.2f}%</td>"
+                             f"<td>{x['mult']}x</td><td>{x['alert']}</td><td>{'' if x.get('last') is None else x['last']}</td><td>{'' if x.get('best') is None else x['best']}</td></tr>" for x in reversed(orows))
+                out += ('<div class="w"><table class="sp"><tr><th>Candle</th><th>Symbol</th><th>Price</th><th>Opening range</th><th>Close vs range edge</th>'
+                        '<th>Spurt</th><th>Alert</th><th>Move now %</th><th>Best %</th></tr>' + ob + '</table></div>')
+            else:
+                out += '<div class="m">None yet today.</div>'
+        orows = [x for x in _room["hits"] if x["side"] == "ORBIN"]
+        out += (f'<h2>Spurt stocks INSIDE the opening range &mdash; until {ORB_INSIDE_UNTIL // 60}:00 &middot; spurt &ge; {ALERT_MULT:g}x ({len(orows)})</h2>'
+                '<div class="m">A spurt stock whose price is still between the high and low of the 09:15-09:30 candle. Listed the first time it is seen inside the range after 09:30, until 13:00, with a phone alert. '
+                'Position in range: 0% = at the range low, 100% = at the range high. Information only. <a href="/spurt10_orb.csv">CSV with follow-up (all days)</a></div>')
+        if orows:
+            ob = "".join(f"<tr><td>{x['alert']}</td><td>{_tvl(x['symbol'])}</td><td>{x['price']:.2f}</td><td>{x['broken']}</td><td>{x['room']:g}%</td><td>{x['mult']}x</td></tr>" for x in reversed(orows))
+            out += '<div class="w"><table class="sp"><tr><th>Alert</th><th>Symbol</th><th>Price</th><th>Opening range</th><th>Position in range</th><th>Spurt</th></tr>' + ob + '</table></div>'
         else:
             out += '<div class="m">None yet today.</div>'
         return out
@@ -1900,6 +1954,15 @@ def run_once():
             r.update(_conf_fields(zs, _conf_zones(d5, asof), r["price"]))     # ADDED: 15m + 30m confluence
             try:                                                           # ADDED: last two CLOSED 15-min candles (SELL at 15m+30m zone alert)
                 d15 = ls.drop_forming_bars(ls.build_merged_bars(d5, 3), 15, asof)
+                try:                                                       # ADDED: opening range = today's first 15-min candle (09:15), only once it has closed
+                    _td = now_ist.date()
+                    _ix = [_ist(t) for t in d15.index] if d15 is not None else []
+                    _k = [i for i, t in enumerate(_ix) if t.date() == _td]
+                    if _k and _ix[_k[0]].strftime("%H:%M") == "09:15":
+                        _f = d15.iloc[_k[0]]
+                        r["orb"] = (float(_f["high"]), float(_f["low"]))
+                except Exception:
+                    pass
                 if d15 is not None and len(d15) >= 2:
                     a_, b_ = d15.iloc[-1], d15.iloc[-2]
                     r["c15"] = {"t": _ist(d15.index[-1]).strftime("%H:%M"), "o": float(a_["open"]), "h": float(a_["high"]), "l": float(a_["low"]), "c": float(a_["close"]),
