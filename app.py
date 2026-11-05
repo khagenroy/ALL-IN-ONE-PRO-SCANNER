@@ -655,6 +655,11 @@ def invest_history_csv():
     return _serve_csv("invest_history.csv", "investing_scan_history.csv")
 
 
+@app.route("/spurt10_early.csv", methods=["GET"])
+def spurt10_early_csv():
+    return _serve_csv("spurt10_early.csv", "volume_spurt_early.csv")
+
+
 @app.route("/spurt_daily.csv", methods=["GET"])
 def spurt_daily_csv():
     return _serve_csv("spurt_daily.csv", "volume_spurt_daily.csv")
@@ -1137,7 +1142,7 @@ def sma200_trades_csv():
 
 
 # ---- /spurt10 split into separate pages (one per section), built from the same saved spurt10.html - nothing is recomputed
-_S10_PARTS = [("main", "Top 30 spurt", None), ("ob", "OB signals", "OB mitigation signals on spurt stocks"),
+_S10_PARTS = [("main", "Top 30 spurt", None), ("early", "Early spurt (forming)", "\x00early"), ("ob", "OB signals", "OB mitigation signals on spurt stocks"),
               ("wick", "Rejected at resistance", "Spurt stocks rejected at resistance"), ("rejres", "Clean rejection: resistance", "Clean top rejection at resistance"), ("rejsup", "Clean rejection: support", "Clean bottom rejection at support"), ("engbull", "Bullish engulfing", "Bullish engulfing at support"), ("engbear", "Bearish engulfing", "Bearish engulfing at resistance"), ("room", "Breakout with room (BUY)", "Breakout with room"), ("roomdown", "Breakdown with room (SELL)", "Breakdown with room"), ("zsell", "SELL at 15m+30m zone", "SELL at 15m+30m resistance zone"), ("gap", "Gap up / gap down + spurt", "Gap up with a volume spurt candle"), ("upper", "Rejected at upper zone", "Rejected at the UPPER part of the resistance zone"), ("orb", "Opening range (ORB)", "Opening range breakout UP"), ("watch", "Watch list", "Watch list &mdash;"),
               ("news", "Left out: news", "Spurt stocks with news today"), ("thin", "Illiquid", "Illiquid stocks with a volume spurt")]
 
@@ -1145,6 +1150,11 @@ _S10_PARTS = [("main", "Top 30 spurt", None), ("ob", "OB signals", "OB mitigatio
 def _s10_part(key: str):
     path = os.path.join(RESULTS_DIR, "spurt10.html")
     if not os.path.exists(path):
+        if key == "early":                                           # the early page works before the first 10-min scan of the first day
+            import spurt10_live as _s10
+            return ("<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Early spurt</title>"
+                    "<style>body{font-family:Arial,sans-serif;margin:12px}table{border-collapse:collapse}th,td{border:1px solid #ddd;padding:6px 8px;text-align:right}th{background:#222;color:#fff}"
+                    ".m{color:#555;font-size:13px;margin:6px 0 12px}</style></head><body>" + _s10.early_html() + "</body></html>")
         return "No scan has run yet.", 404
     with open(path, encoding="utf-8", errors="replace") as f:
         html = f.read()
@@ -1168,7 +1178,11 @@ def _s10_part(key: str):
             f'<a href="/spurt10_{k}" style="padding:5px 12px;border:1px solid #222;border-radius:5px;text-decoration:none;'
             + ("background:#222;color:#fff" if k == key else "color:#222;background:#fff") + f'">{lab}</a>' for k, lab, _n in _S10_PARTS) + (
             '<a href="/depth" style="padding:5px 12px;border:1px solid #222;border-radius:5px;text-decoration:none;color:#222;background:#fff">Bids / Offers</a>') + "</div>"
-        body = chunks.get(key) or '<div class="m">This section is empty right now.</div>'
+        if key == "early":                                           # ADDED 5 Nov: live page of the early volume spurt check (kept in memory by spurt10_live)
+            import spurt10_live as _s10
+            body = _s10.early_html()
+        else:
+            body = chunks.get(key) or '<div class="m">This section is empty right now.</div>'
         return head + banner + tabs + body + script + "</body></html>"
     except Exception as e:
         log.warning(f"spurt10 split failed: {e}")

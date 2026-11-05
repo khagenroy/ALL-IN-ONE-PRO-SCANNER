@@ -1895,6 +1895,7 @@ def run_once():
     now_ist = datetime.now(IST)
     uni = _load_universe()
     quotes = _fetch_quotes(uni)
+    _early_snap(quotes, now_ist)                                    # ADDED 5 Nov: feeds the early volume spurt check
     names, n_pass = _shortlist(quotes, now_ist)
     sid_of = dict(uni)
     rows, failed = [], 0
@@ -1909,6 +1910,10 @@ def run_once():
                 failed += 1
                 if failed <= 3:
                     log.warning(f"Spurt10 candle fetch failed: {e}")
+    try:
+        _early_note_bases(rows)                                     # ADDED 5 Nov: average 10-min volume of the stocks just scored (used by the early volume spurt check)
+    except Exception:
+        pass
     thin_removed = 0
     thin_list = []
     if LIQ_REMOVE_THIN and _depth:                                  # ADDED: leave out thin stocks (wide bid-ask spread); a stock with no depth data stays
@@ -2813,12 +2818,226 @@ def _in_session(now):
     return 9 * 60 + 25 <= mins <= 15 * 60 + 40
 
 
+# ---------------------------------------------------------------- EARLY volume spurt (the 10-min candle is still forming)  - ADDED 5 Nov
+# Volume only grows during a candle, so a spurt is a spurt before the candle closes. Every 2 minutes one quote call (all stocks) gives the day volume; the volume of the LAST up to 10 minutes
+# (today's volume now minus the volume ~10 minutes ago) is compared with the stock's average 10-min candle volume (50 closed candles). At EARLY_MULT x or more = EARLY alert (once per stock per
+# EARLY_COOLDOWN_MIN minutes). The same leave-outs apply as everywhere else: thin / near-circuit stocks and stocks with news. The candle colour is not final yet - the alert shows the price move so far.
+EARLY_ON = True
+EARLY_MULT = 10.0
+EARLY_MIN_AGE = 3.0           # minutes: the window must be at least this long
+EARLY_MAX_AGE = 10.5          # minutes: the window is never longer than one 10-min candle
+EARLY_FETCH_MAX = 25          # stocks per tick whose average volume must still be read from candles
+EARLY_PRETEST = 3.0           # a stock whose average is not known yet is looked up only when its window volume is at least this many times today's pace (cheap first filter)
+EARLY_COOLDOWN_MIN = 20
+EARLY_ALERT_MAX = 60          # phone alerts per day
+EARLY_FROM = 9 * 60 + 14
+EARLY_TO = 15 * 60 + 25
+EARLY_CSV = os.path.join(RESULTS_DIR, "spurt10_early.csv")
+EARLY_COLS = ["date", "time", "symbol", "price", "multiple", "window_min", "move_pct", "volume_in_window", "avg_10m_volume"]
+_early = {"date": "", "snaps": [], "base": {}, "hits": [], "last": {}, "count": 0}
+
+
+def _early_reset(today):
+    _early.update(date=today, snaps=[], base={}, hits=[], last={}, count=0)
+    try:
+        import csv
+        if os.path.exists(EARLY_CSV):
+            with open(EARLY_CSV, newline="", encoding="utf-8") as f:
+                for r in csv.DictReader(f):
+                    if r.get("date") == today:
+                        _early["hits"].append({"time": r["time"], "symbol": r["symbol"], "price": float(r["price"]), "mult": float(r["multiple"]), "window": float(r["window_min"]),
+                                               "move": float(r["move_pct"]), "vol": int(float(r["volume_in_window"])), "base": int(float(r["avg_10m_volume"]))})
+                        _early["last"][r["symbol"]] = time.time()
+    except Exception as e:
+        log.warning(f"Spurt10 early load failed: {e}")
+
+
+def _early_write(today):
+    try:
+        import csv
+        old = []
+        if os.path.exists(EARLY_CSV):
+            with open(EARLY_CSV, newline="", encoding="utf-8") as f:
+                rd = csv.reader(f)
+                next(rd, None)
+                old = [r for r in rd if r and r[0] != today]
+        os.makedirs(RESULTS_DIR, exist_ok=True)
+        tmp = EARLY_CSV + ".tmp"
+        with open(tmp, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(EARLY_COLS)
+            w.writerows(old)
+            w.writerows([today, h["time"], h["symbol"], h["price"], h["mult"], h["window"], h["move"], h["vol"], h["base"]] for h in _early["hits"])
+        os.replace(tmp, EARLY_CSV)
+    except Exception as e:
+        log.warning(f"Spurt10 early csv write failed: {e}")
+
+
+def _early_snap(quotes, now_ist):
+    """Remember this quote read (price, day volume of every stock) for the next ~12 minutes. Never raises."""
+    try:
+        today = now_ist.strftime("%Y-%m-%d")
+        if _early["date"] != today:
+            _early_reset(today)
+        t = now_ist.timestamp()
+        _early["snaps"].append((t, dict(quotes)))
+        _early["snaps"] = [x for x in _early["snaps"] if t - x[0] <= 12 * 60]
+    except Exception:
+        pass
+
+
+def _early_note_bases(rows):
+    """Average 10-min candle volume of the stocks the normal cycle just scored (no extra candle call needed for them later)."""
+    for r in rows:
+        if r.get("sma_vol"):
+            _early["base"][r["symbol"]] = float(r["sma_vol"])
+
+
+def _early_fetch_base(sym, sid):
+    """Average volume of the last SMA_LEN closed 10-min candles of one stock, or 0.0. Never raises."""
+    try:
+        as_of = pd.Timestamp(datetime.now(timezone.utc).replace(tzinfo=None))
+        df5 = ls.fetch_intraday_history(sid, "NSE_EQ", 5, HISTORY_DAYS)
+        df = ls.drop_forming_bars(ls.build_merged_bars(df5, 2), 10, as_of)
+        if df is None or len(df) < SMA_LEN + 1:
+            return 0.0
+        return float(df["volume"].to_numpy(dtype=float)[-SMA_LEN:].mean())
+    except Exception:
+        return 0.0
+
+
+def _early_send(hits):
+    topic = os.environ.get("NTFY_TOPIC", "").strip()
+    if not hits or not (NTFY_ON and topic) or _early["count"] >= EARLY_ALERT_MAX:
+        return
+    hits = sorted(hits, key=lambda h: -h["mult"])
+    lines = [f"{h['symbol']}  Rs {h['price']:.2f}  {h['mult']:.1f}x in {h['window']:.0f} min  price {h['move']:+.2f}%" for h in hits[:12]]
+    extra = f"\n+{len(hits) - 12} more on the Early spurt page" if len(hits) > 12 else ""
+    try:
+        import requests
+        resp = requests.post(f"https://ntfy.sh/{topic}", data=("\n".join(lines) + extra).encode("utf-8"), timeout=8,
+                             headers={"Title": f"EARLY volume spurt - candle still forming ({len(hits)})", "Priority": "high", "Tags": "zap"})
+        if resp.status_code < 300:
+            _early["count"] += 1
+        else:
+            log.warning(f"Spurt10 early ntfy refused: {resp.status_code}")
+    except Exception as ex:
+        log.warning(f"Spurt10 early ntfy failed: {ex}")
+
+
+def _early_once(now_ist):
+    """One early check: reads all quotes, compares the volume of the last <= 10 minutes with the average 10-min candle volume. Never raises."""
+    try:
+        mins = now_ist.hour * 60 + now_ist.minute
+        if not EARLY_ON or now_ist.weekday() >= 5 or not (EARLY_FROM <= mins <= EARLY_TO):
+            return
+        uni = _load_universe()
+        quotes = _fetch_quotes(uni)
+        _early_snap(quotes, now_ist)
+        now_ts = now_ist.timestamp()
+        snaps = [x for x in _early["snaps"] if EARLY_MIN_AGE * 60 <= now_ts - x[0] <= EARLY_MAX_AGE * 60]
+        if not snaps:
+            return
+        t0, old = min(snaps, key=lambda x: x[0])                       # the oldest read inside the window: the longest window
+        age = (now_ts - t0) / 60.0
+        slot0 = max(((datetime.fromtimestamp(t0, IST).hour * 60 + datetime.fromtimestamp(t0, IST).minute) - (9 * 60 + 15)) / 10.0, 3.0)
+        cand, need = [], []
+        for sym, (px, vol) in quotes.items():
+            o = old.get(sym)
+            if not o or px < MIN_PRICE:
+                continue
+            w = vol - o[1]
+            if w <= 0:
+                continue
+            base = _early["base"].get(sym)
+            if base is None:                                           # not known yet: pace of the day so far gives a first guess; only an obvious spurt is checked on candles
+                est = max(o[1] / slot0, 1000.0)
+                if w / est >= EARLY_PRETEST:
+                    need.append((sym, w / est))
+            elif base >= MIN_SMA_VOL and w / base >= EARLY_MULT:
+                cand.append((sym, w, base))
+        if need:
+            need.sort(key=lambda t: -t[1])
+            sid_of = dict(uni)
+            todo = [sy for sy, _r in need[:EARLY_FETCH_MAX]]
+            with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+                for sy, b in zip(todo, ex.map(lambda z: _early_fetch_base(z, sid_of[z]), todo)):
+                    _early["base"][sy] = b
+            for sy in todo:
+                b = _early["base"].get(sy) or 0.0
+                w = quotes[sy][1] - old[sy][1]
+                if b >= MIN_SMA_VOL and w / b >= EARLY_MULT:
+                    cand.append((sy, w, b))
+        if not cand:
+            return
+        nsyms = {}
+        if NEWS_FILTER_ON and NEWS_LEAVE_OUT:
+            try:
+                nsyms = _news_get(now_ist) or {}
+            except Exception:
+                nsyms = {}
+        new = []
+        for sym, w, base in cand:
+            if time.time() - _early["last"].get(sym, 0) < EARLY_COOLDOWN_MIN * 60 or sym in nsyms or _thin_now(sym):
+                continue
+            px = quotes[sym][0]
+            h = {"time": now_ist.strftime("%H:%M"), "symbol": sym, "price": float(px), "mult": round(w / base, 1), "window": round(age, 1),
+                 "move": round((px / old[sym][0] - 1) * 100, 2) if old[sym][0] else 0.0, "vol": int(w), "base": int(base)}
+            _early["last"][sym] = time.time()
+            _early["hits"].append(h)
+            new.append(h)
+        if new:
+            log.info(f"Spurt10 EARLY spurt: {[h['symbol'] for h in new]}")
+            _early_write(_early["date"])
+            _early_send(new)
+    except Exception as e:
+        log.warning(f"Spurt10 early check failed: {e}")
+
+
+def early_html():
+    """Body of the Early spurt page (shown inside the Spurt10 tabs)."""
+    try:
+        hits = list(reversed(_early["hits"]))
+        out = (f'<h2>Early volume spurt &mdash; candle still forming &middot; {EARLY_MULT:g}x or more ({len(hits)})</h2>'
+               f'<div class="m">Checked every 2 minutes. Volume of the last {EARLY_MIN_AGE:g}-{EARLY_MAX_AGE - 0.5:g} minutes (today\'s volume now minus ~10 minutes ago) &ge; {EARLY_MULT:g}x the stock\'s average 10-min candle volume (50 closed candles). '
+               'Volume cannot fall back, so it stays a spurt when the candle closes; the candle colour is not final yet, so look at the price move. '
+               f'A stock is listed again only after {EARLY_COOLDOWN_MIN} minutes. Thin / near-circuit stocks and stocks with news are left out. Phone alert for each check. Information only. '
+               '<a href="/spurt10_early.csv">CSV (all days)</a></div>')
+        if not hits:
+            return out + '<div class="m">None yet today.</div>'
+        body = "".join(f"<tr><td>{h['time']}</td><td>{_tvl(h['symbol'])}</td><td>{h['price']:.2f}</td><td><b>{h['mult']}x</b></td><td>{h['window']:g}</td>"
+                       f"<td style=\"color:{'#0a7d33' if h['move'] > 0 else '#c62828' if h['move'] < 0 else '#555'}\">{h['move']:+.2f}%</td><td>{h['vol']:,}</td><td>{h['base']:,}</td></tr>" for h in hits)
+        return out + ('<div class="w"><table class="sp"><tr><th>Alert time</th><th>Symbol</th><th>Price</th><th>Early spurt</th><th>Window (min)</th><th>Price move in window</th>'
+                      '<th>Volume in window</th><th>Avg 10-min volume</th></tr>' + body + '</table></div>')
+    except Exception:
+        return '<div class="m">The early spurt page could not be built.</div>'
+
+
+def _early_next(now):
+    nxt = now.replace(second=50, microsecond=0)
+    if now.minute % 2 == 1:
+        nxt += timedelta(minutes=1)
+    elif nxt <= now:
+        nxt += timedelta(minutes=2)
+    return nxt
+
+
+
 def loop():
-    log.info("Spurt10 autorun started - every 10 min at candle close (09:25-15:40 IST, Mon-Fri).")
+    log.info("Spurt10 autorun started - every 10 min at candle close (09:25-15:40 IST, Mon-Fri); early volume spurt check every 2 min (09:14-15:25).")
     while True:
         try:
-            time.sleep(_seconds_to_next_run(datetime.now(IST)))
-            if _in_session(datetime.now(IST)):
+            now = datetime.now(IST)
+            t_wake, kind = now + timedelta(seconds=_seconds_to_next_run(now)), "run"
+            if EARLY_ON and now.weekday() < 5:
+                mins = now.hour * 60 + now.minute
+                t_e = now.replace(hour=9, minute=14, second=50, microsecond=0) if mins < EARLY_FROM else (_early_next(now) if mins <= EARLY_TO else None)
+                if t_e is not None and t_e < t_wake - timedelta(seconds=15):
+                    t_wake, kind = t_e, "early"
+            time.sleep(max((t_wake - now).total_seconds(), 1))
+            if kind == "early":
+                _early_once(datetime.now(IST))
+            elif _in_session(datetime.now(IST)):
                 run_once()
         except Exception as e:
             log.error(f"Spurt10 cycle failed: {e}")
