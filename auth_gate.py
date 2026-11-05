@@ -549,8 +549,6 @@ def add_menu(app):
     app.config["AG_RESTRICT"] = True
     GROUPS = [
         ("Spurt scanners", ["/spurt10", "/spurt10_history", "/zone_touch", "/spurt_daily", "/spurt_sell", "/spurt_paper", "/spurtpb", "/volspurt", "/spz"]),
-        ("Practice trading", ["/paper", "/paper/history", "/paper/leaderboard", "/paper/help"]),
-        ("Investing", ["/invest"]),
         ("Spurt10 sections", ["/spurt10_main", "/spurt10_ob", "/spurt10_wick", "/spurt10_rejres", "/spurt10_rejsup", "/spurt10_engbull", "/spurt10_engbear", "/spurt10_room", "/spurt10_roomdown", "/spurt10_zsell", "/spurt10_upper", "/spurt10_gap", "/spurt10_orb", "/spurt10_watch", "/spurt10_news", "/spurt10_thin", "/depth"]),
         ("SMA / Trend", ["/sma200", "/sma200now", "/trendnow"]),
         ("Best setups", ["/best", "/bestnow"]),
@@ -560,6 +558,8 @@ def add_menu(app):
         ("Commodity tables", ["/mcx_oizones", "/mcx_signals", "/mcx_signals_all", "/mcx_spurt"]),
         ("Crypto tables", ["/crypto_oizones", "/crypto_signals", "/crypto_signals_all", "/crypto_spurt"]),
         ("Bot / Deals", ["/botlog", "/botpnl", "/deals"]),
+        ("Investing", ["/invest"]),
+        ("Practice trading", ["/paper", "/paper/history", "/paper/leaderboard", "/paper/help"]),
             ]
     SKIP = ("/", "/health", "/login", "/logout", "/register", "/setup", "/alerts", "/indices.json", "/password", "/risk_mgmt")
 
