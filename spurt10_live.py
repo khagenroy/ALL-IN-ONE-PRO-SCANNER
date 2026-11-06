@@ -1571,7 +1571,7 @@ def _room_html():
 
 # ---------------------------------------------------------------- stocks with news (NSE corporate announcements) are left out
 NEWS_FILTER_ON = True        # ADDED: spurt stocks with an important NSE corporate announcement since the previous close are taken out of the list / alerts / /depth and shown in a list at the bottom. False = off
-NEWS_LEAVE_OUT = True        # True = (as before) stocks with news are taken out of the normal list / alerts / sell scans and only shown in the news list + the news phone alert. False = they stay in with a NEWS tag
+NEWS_LEAVE_OUT = False       # CHANGED 6 Nov: news stocks stay IN the normal list / alerts / sell scans (tagged NEWS beside the symbol) instead of being removed; the news list + news phone alert keep working as before. True = (old behaviour) take them out
 NEWS_REFRESH_SEC = 600       # the announcements are read again after this many seconds (one request per refresh)
 NEWS_KEEP_WORDS = ("result", "outcome of board", "board meeting", "acquisition", "acquire", "order", "contract", "award", "bagging", "fund raising", "fundraising",
                    "preferential", "qip", "rights issue", "bonus", "split", "dividend", "buy back", "buyback", "merger", "demerger", "amalgamation",
