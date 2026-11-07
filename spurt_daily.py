@@ -365,7 +365,8 @@ def _prep_one(sym, sid, today):
         if not res:
             return None
         z = min(res, key=lambda z: z["lo"])
-        return {"avg": avg, "close": close, "resistance": f"{z['lo']:g}-{z['hi']:g}"}
+        return {"avg": avg, "close": close, "resistance": f"{z['lo']:g}-{z['hi']:g}",
+                "res_all": [f"{x['lo']:g}-{x['hi']:g}" for x in sorted(res, key=lambda x: x["lo"])]}      # ADDED 7 Nov: every live daily resistance zone (as the indicator draws them) for /daily_rej
     except Exception as e:
         log.warning(f"Spurt daily prep {sym} failed: {e}")
         return None
@@ -523,6 +524,11 @@ def _touch_cycle(state, now, prep):
     if new or changed:
         _touch_write(state, today_s)
     _rej_cycle(now, rej_c, quotes, nifty, uni)
+    try:                                                  # ADDED 7 Nov: the same rejection for ALL liquid stocks (page /daily_rej)
+        import daily_rej_all
+        daily_rej_all.cycle(now, prep, quotes, nifty, uni)
+    except Exception as _e:
+        log.warning(f"daily_rej_all failed: {_e}")
     if new:
         _touch_notify(new)
         log.info(f"Spurt daily touch: {[h['symbol'] for h in new]} volume spurt + reached the daily resistance zone")

@@ -643,6 +643,21 @@ def spurt_daily_page():
         return "<p>Daily spurt page failed - see the logs.</p>", 500
 
 
+@app.route("/daily_rej", methods=["GET"])
+def daily_rej_page():
+    try:
+        import daily_rej_all
+        return daily_rej_all.page_html()
+    except Exception:
+        log.exception("/daily_rej failed")
+        return "<p>Daily rejection page failed - see the logs.</p>", 500
+
+
+@app.route("/daily_rej.csv", methods=["GET"])
+def daily_rej_csv():
+    return _serve_csv("daily_rej.csv", "daily_resistance_rejection_all.csv")
+
+
 @app.route("/invest", methods=["GET"])
 def invest_page():
     try:

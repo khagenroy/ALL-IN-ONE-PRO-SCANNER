@@ -1,9 +1,9 @@
 """
-VOLUME SPURT 5-MIN SCANNER  (page: /spurt10   csv: /spurt10.csv)
+VOLUME SPURT 10-MIN SCANNER  (page: /spurt10   csv: /spurt10.csv)
 
-Every 5 minutes (just after each 5-minute candle closes) it ranks the whole NSE cash market by
+Every 10 minutes (just after each 10-minute candle closes) it ranks the whole NSE cash market by
 
-        volume of the LATEST CLOSED 5-min candle  /  average volume of the PREVIOUS 50 five-minute candles
+        volume of the LATEST CLOSED 10-min candle  /  average volume of the PREVIOUS 50 ten-minute candles
         (= the "Volume Multiple vs SMA" idea, with a 50-candle volume moving average)
 
 and shows the TOP 30. Stocks priced below MIN_PRICE (50) are left out.
@@ -11,23 +11,19 @@ and shows the TOP 30. Stocks priced below MIN_PRICE (50) are left out.
 HOW IT COVERS ALL ~2,700 NSE STOCKS WITHOUT HAMMERING DHAN
   Step 1  3 batched quote calls (marketfeed/quote, up to 1000 stocks each) give every stock's last price and
           today's total volume. Price < 50 is dropped. Comparing today's volume with the previous cycle's
-          snapshot shows how much traded in the last 5 minutes for EVERY stock.
+          snapshot shows how much traded in the last 10 minutes for EVERY stock.
   Step 2  A shortlist of the SHORTLIST (default 150) busiest stocks is picked from that.
-  Step 3  Only the shortlist has its 5-min candles downloaded (closed candles only) so the
+  Step 3  Only the shortlist has its 5-min candles downloaded (merged to 10-min, closed candles only) so the
           exact ratio vs the 50-candle volume average can be computed and the top 30 ranked.
 
 It is read-only: places no orders, is not connected to Section A / Section B / the bot / RSI Flush, and any
 error here is caught and logged without touching the other scans. It uses the same rate limiter as the main scan.
 
-(CHANGED 7 Nov: base ranking candle switched from 10-min to 5-min. Logic/thresholds unchanged -- SMA_LEN stays
-50 candles of the new 5-min size, not rescaled. CAND_TF/ZONE_TF/spurt_sell_live.BASE_TF (15-min) and the
-return-after-10/30/60-min tracking are separate, independent timeframes and were left untouched.)
-
 ENV (all optional)
   SPURT10_AUTORUN=true      SPURT10_TOP_N=30        SPURT10_MIN_PRICE=50      SPURT10_SMA_LEN=50
   SPURT10_SHORTLIST=150     SPURT10_MIN_SMA_VOL=1000  (ignore stocks whose 50-candle average is below this many shares)
   SPURT10_WORKERS=4
-  SPURT10_ALERT_MULT=3.0    phone alert (ntfy) when a stock's latest 5-min candle volume is >= this many times the 50-candle average
+  SPURT10_ALERT_MULT=3.0    phone alert (ntfy) when a stock's latest 10-min candle volume is >= this many times the 50-candle average
   SPURT10_NTFY=true         switch the phone alert on/off (uses the same NTFY_TOPIC as the other scanner alerts)
   SPURT10_NTFY_MAX_PER_DAY=40   safety cap on phone notifications per day
   SPURT10_ZONE_TF=15        time frame (minutes: 10, 15, 30...) of the support / resistance zones, the zone columns and the zone alert
@@ -66,6 +62,7 @@ WORKERS = int(os.environ.get("SPURT10_WORKERS", "4") or "4")
 ALERT_MULT = float(os.environ.get("SPURT10_ALERT_MULT", "3.0") or "3.0")
 NTFY_ON = os.environ.get("SPURT10_NTFY", "true").strip().lower() == "true"
 NTFY_MAX_PER_DAY = int(os.environ.get("SPURT10_NTFY_MAX_PER_DAY", "40") or "40")
+SPURT_TF = 5                 # CHANGED 7 Nov: candle size (minutes) of the main volume spurt - 5 (was 10). The cycle runs every SPURT_TF minutes and the volume average is of the last 50 candles of this size. Set 10 to go back.
 ZONE_TF = max(5, int(os.environ.get("SPURT10_ZONE_TF", "15") or "15") // 5 * 5)     # zone candles, minutes (multiple of 5)
 WATCH_MULT = float(os.environ.get("SPURT10_WATCH_MULT", "20") or "20")
 WATCH_MAX = int(os.environ.get("SPURT10_WATCH_MAX", "100") or "100")
@@ -86,7 +83,7 @@ OFFERS_ALERT_ON = True      # ADDED: phone alert when a spurt stock has selling 
 OFFERS_ALERT_PCT = 55.0     # Offers % above this = selling pressure alert (raise it, e.g. 60, to get fewer alerts)
 OFFERS_ONLY_AT_ZONE = True  # ADDED: the selling-pressure alert is sent only while the stock is AT a support / resistance zone (between zones the depth means little); False = old behaviour
 OFFERS_ALERT_MAX = 30       # safety cap on these notifications per day
-HISTORY_DAYS = 8            # calendar days of 5-min candles: 50 five-minute candles need ~2 sessions (kept at 8 for a safety buffer)
+HISTORY_DAYS = 8            # calendar days of 5-min candles: 50 ten-minute candles need ~3 sessions
 
 RESULTS_DIR = os.path.join(os.path.dirname(__file__), "results")
 JSON_PATH = os.path.join(RESULTS_DIR, "spurt10.json")
@@ -302,12 +299,19 @@ def _fetch_quotes(uni):
     return out
 
 
+def _spurt_bars(df5, as_of):
+    """Closed candles of the main volume spurt (SPURT_TF minutes) built from Dhan 5-minute candles."""
+    if SPURT_TF <= 5:
+        return ls.drop_forming_bars(df5, 5, as_of)
+    return ls.drop_forming_bars(ls.build_merged_bars(df5, SPURT_TF // 5), SPURT_TF, as_of)
+
+
 def _shortlist(quotes, now_ist):
-    """Pick the busiest stocks of the last 5 min (or of the day, on the first cycle)."""
+    """Pick the busiest stocks of the last 10 min (or of the day, on the first cycle)."""
     today = now_ist.strftime("%Y-%m-%d")
     if _snap["date"] != today:
         _snap.update(date=today, ts=None, vol={})
-    elapsed_bars = max(1.0, ((now_ist.hour * 60 + now_ist.minute) - (9 * 60 + 15)) / 5.0)   # CHANGED 7 Nov: 5-min bars
+    elapsed_bars = max(1.0, ((now_ist.hour * 60 + now_ist.minute) - (9 * 60 + 15)) / float(SPURT_TF))
     cand = []
     for sym, (px, vol) in quotes.items():
         if px < MIN_PRICE or vol <= 0:
@@ -318,7 +322,7 @@ def _shortlist(quotes, now_ist):
             avg10 = max(prev / max(elapsed_bars - 1.0, 1.0), 1.0)
             cand.append((sym, delta / avg10, delta * px))          # spurt vs today's pace, rupee turnover of the window
         else:
-            cand.append((sym, 0.0, vol * px / elapsed_bars))      # no snapshot yet: average turnover per 5 min
+            cand.append((sym, 0.0, vol * px / elapsed_bars))      # no snapshot yet: average turnover per 10 min
     have_snap = bool(_snap["vol"])
     pick = []
     if have_snap:
@@ -402,7 +406,7 @@ def _tvl(sym):
 def _score_symbol(sym, sid):
     as_of = pd.Timestamp(datetime.now(timezone.utc).replace(tzinfo=None))
     df5 = ls.fetch_intraday_history(sid, "NSE_EQ", 5, HISTORY_DAYS)
-    df = ls.drop_forming_bars(df5, 5, as_of)                     # CHANGED 7 Nov: base candle is 5-min now (df5 as-is, no merge)
+    df = _spurt_bars(df5, as_of)
     if df is None or len(df) < SMA_LEN + 1:
         return None
     vol = df["volume"].to_numpy(dtype=float)
@@ -425,17 +429,17 @@ def _score_symbol(sym, sid):
     except Exception:
         gap = {}
     zdf = df                                                          # candles the support / resistance zones are built on
-    if ZONE_TF != 5:
+    if ZONE_TF != SPURT_TF:
         try:
             zdf15 = ls.drop_forming_bars(ls.build_merged_bars(df5, ZONE_TF // 5), ZONE_TF, as_of)
             if zdf15 is not None and len(zdf15) >= 30:
                 zdf = zdf15
         except Exception as e:
-            log.warning(f"Spurt10 {ZONE_TF}m zone candles failed for {sym}, using 5m: {e}")
+            log.warning(f"Spurt10 {ZONE_TF}m zone candles failed for {sym}, using 10m: {e}")
     sdf = df                                                          # ADDED 5 Nov: candles the Spurt SELL rule / tracker run on (15-min, like the TradingView indicator; spurt_sell_live.BASE_TF)
     try:
         import spurt_sell_live as _ssl
-        if _ssl.BASE_TF != 5:
+        if _ssl.BASE_TF != SPURT_TF:
             _s15 = ls.drop_forming_bars(ls.build_merged_bars(df5, _ssl.BASE_TF // 5), _ssl.BASE_TF, as_of)
             if _s15 is not None and len(_s15) >= _ssl.AVG_LEN + 3:
                 sdf = _s15
@@ -447,7 +451,7 @@ def _score_symbol(sym, sid):
         **gap,
         "_zones": _secA_zones(zdf),
         "_df5": df5, "_as_of": as_of,
-        "_zone_tf": (ZONE_TF if zdf is not df else 5),
+        "_zone_tf": (ZONE_TF if zdf is not df else SPURT_TF),
         "_trk": _trk_check(sdf, sym, round((close / prev_close - 1) * 100, 2) if prev_close == prev_close else None),   # ADDED: spurt tracker (spurt_sell_live.py)
         "_sell": _sell_check(sdf, sym, round((close / prev_close - 1) * 100, 2) if prev_close == prev_close else None),   # ADDED: spurt -> red candle SELL rule (spurt_sell_live.py)
         "symbol": sym,
@@ -456,7 +460,7 @@ def _score_symbol(sym, sid):
         "candle": _ist(df.index[-1]).strftime("%H:%M"),
         "candle_chg_pct": round((close / float(last["open"]) - 1) * 100, 2) if last["open"] else None,
         "ohlc": (float(last["open"]), float(last["high"]), float(last["low"]), float(last["close"])),
-        "prev": ((float(df.iloc[-2]["open"]), float(df.iloc[-2]["high"]), float(df.iloc[-2]["low"]), float(df.iloc[-2]["close"]), float(vol[-2])) if len(df) >= 2 else None),   # ADDED: previous closed 5-min candle (engulfing sections)
+        "prev": ((float(df.iloc[-2]["open"]), float(df.iloc[-2]["high"]), float(df.iloc[-2]["low"]), float(df.iloc[-2]["close"]), float(vol[-2])) if len(df) >= 2 else None),   # ADDED: previous closed 10-min candle (engulfing sections)
         "candle_vol": int(vol[-1]),
         "sma_vol": int(round(base)),
         "multiple": round(float(vol[-1] / base), 2),
@@ -502,7 +506,7 @@ _alerted = {"date": None, "keys": set(), "count": 0}
 
 
 def _send_alerts(rows, now_ist):
-    """ADDED 2026-10-09: one phone notification per cycle listing every stock whose latest closed 5-min candle volume is
+    """ADDED 2026-10-09: one phone notification per cycle listing every stock whose latest closed 10-min candle volume is
     >= ALERT_MULT x its 50-candle average. A stock is announced once per candle (never twice for the same candle), and at most
     NTFY_MAX_PER_DAY notifications a day. Read-only - it only sends a notification."""
     topic = os.environ.get("NTFY_TOPIC", "").strip()
@@ -820,7 +824,7 @@ _cands_last_meta = {"syms": {}}
 
 
 def _wick_alerts(top, now_ist, sid_of):
-    """ADDED: stocks that reached WICK_SPURT_MULT x today are followed until 15:15. When the latest CLOSED 5-min candle of such a stock touched its
+    """ADDED: stocks that reached WICK_SPURT_MULT x today are followed until 15:15. When the latest CLOSED 10-min candle of such a stock touched its
     resistance zone (the same zones as the zone columns), has an upper wick of WICK_PCT % or more of its range and closed at / below the zone top,
     one phone alert is sent (once per stock per candle) and the stock is listed in the table on /spurt10. Read-only - it changes no signal."""
     _cands_last.clear()
@@ -936,7 +940,7 @@ def _wick_html():
 
 
 # ---------------------------------------------------------------- ADDED: clean rejection candles at resistance / support (spurt stocks)
-CLEAN_ON = True              # phone alert + table: a followed spurt stock's closed 5-min candle touches a zone and shows a clean rejection. False = off
+CLEAN_ON = True              # phone alert + table: a followed spurt stock's closed 10-min candle touches a zone and shows a clean rejection. False = off
 CLEAN_WICK_PCT = 60.0        # the rejection wick must be MORE than this % of the candle's high-low range
 CLEAN_OPP_MAX_PCT = 5.0      # the opposite wick must be at most this % of the range ("no wick on the other side"; 0 = strictly none)
 CLEAN_VOL_X = 1.0           # the rejection candle's volume must be MORE than this x the previous candle's volume (1.0 = any increase)
@@ -967,7 +971,7 @@ def _clean_eval(o, h, l, c, zone, kind, vol=None, prev=None):
 
 
 def _clean_alerts(now_ist):
-    """ADDED: uses the closed 5-min candles of the spurt stocks already read by _wick_alerts (no extra Dhan call). One phone alert per stock per
+    """ADDED: uses the closed 10-min candles of the spurt stocks already read by _wick_alerts (no extra Dhan call). One phone alert per stock per
     candle and kind. Read-only - it changes no signal."""
     if not CLEAN_ON or not _cands_last:
         return
@@ -1070,7 +1074,7 @@ def _engulf_eval(o, h, l, c, vol, prev, support, resistance):
 
 
 def _engulf_alerts(now_ist):
-    """ADDED: uses the closed 5-min candles of the spurt stocks already read by _wick_alerts (no extra Dhan call). One phone alert per stock per candle and kind."""
+    """ADDED: uses the closed 10-min candles of the spurt stocks already read by _wick_alerts (no extra Dhan call). One phone alert per stock per candle and kind."""
     if not ENGULF_ON or not _cands_last:
         return
     today = now_ist.strftime("%Y-%m-%d")
@@ -1512,7 +1516,7 @@ def _room_html():
                     '<th>Volume</th><th>Alert</th><th>Move now %</th><th>Best %</th></tr>' + body + '</table></div>')
         rows = [x for x in _room["hits"] if x["side"] == "ZSELL"]
         out += (f'<h2>SELL at {ZONE_TF}m+{CONF_TF}m resistance zone &mdash; red 15-min candle with rising volume &middot; spurt &ge; {ALERT_MULT:g}x ({len(rows)})</h2>'
-                f'<div class="m">Closed 15-min candle of a stock with a 5-min volume spurt: red, its high touched a resistance zone that also exists on the {CONF_TF}-min chart, and its volume is above the previous 15-min candle. '
+                f'<div class="m">Closed 15-min candle of a stock with a 10-min volume spurt: red, its high touched a resistance zone that also exists on the {CONF_TF}-min chart, and its volume is above the previous 15-min candle. '
                 'Phone alert for each. Information only. <a href="/spurt10_zsell.csv">CSV with follow-up (all days)</a></div>')
         if rows:
             body = "".join(f"<tr><td>{x['candle']}</td><td>{_tvl(x['symbol'])}</td><td>{x['price']:.2f}</td><td>{x['broken']}</td><td>{x['next']}</td><td>{x['room']}x</td>"
@@ -1894,7 +1898,7 @@ def _news_html(meta):
 
 
 def run_once():
-    _candle_reminder(datetime.now(IST), 5, "Stock 5-min")
+    _candle_reminder(datetime.now(IST), SPURT_TF, f"Stock {SPURT_TF}-min")
     t0 = time.monotonic()
     now_ist = datetime.now(IST)
     uni = _load_universe()
@@ -1915,7 +1919,7 @@ def run_once():
                 if failed <= 3:
                     log.warning(f"Spurt10 candle fetch failed: {e}")
     try:
-        _early_note_bases(rows)                                     # ADDED 5 Nov: average 5-min volume of the stocks just scored (used by the early volume spurt check)
+        _early_note_bases(rows)                                     # ADDED 5 Nov: average 10-min volume of the stocks just scored (used by the early volume spurt check)
     except Exception:
         pass
     thin_removed = 0
@@ -1969,7 +1973,7 @@ def run_once():
             sg.update(_lq)
             sell_hits.append(sg)
         zs = r.pop("_zones", None)
-        ztf = r.pop("_zone_tf", 5)
+        ztf = r.pop("_zone_tf", 10)
         d5, asof = r.pop("_df5", None), r.pop("_as_of", None)
         if id(r) in top_ids:
             r.update(_zone_fields(zs, r["price"], r.get("candle_chg_pct")))
@@ -2077,7 +2081,7 @@ ZONE_AGAINST_PCT = 1.0                                                          
 
 
 def _secA_zones(df):
-    """Live order-block zones from Section A on this stock's 5-min candles: the same zones the ALL IN ONE PRO indicator draws
+    """Live order-block zones from Section A on this stock's 10-min candles: the same zones the ALL IN ONE PRO indicator draws
     (bullish OB = support, bearish OB = resistance). Runs on candles already downloaded - no extra Dhan call."""
     try:                                   # FIXED: zones now come from spurt_zones.py (the old with_zones option no longer exists in all_in_one_scanner.py)
         import spurt_zones
@@ -2185,7 +2189,7 @@ HIST_COLS = ["date", "run", "candle", "symbol", "price", "day_chg_pct", "candle_
 
 def _append_history(rows, now_ist):
     """ADDED: append the top-30 stocks of this cycle to results/spurt10_history.csv, one row per
-    (date, 5-min candle, symbol). Read-only logging: never raises, never touches the scan itself."""
+    (date, 10-min candle, symbol). Read-only logging: never raises, never touches the scan itself."""
     if not HISTORY_ON or not rows:
         return
     try:
@@ -2222,7 +2226,7 @@ def _append_history(rows, now_ist):
 
 # ------------------------------------------------------------------ ADDED: every-candle track + zone-touch follow-up
 # Every stock that reached the top 30 today is followed for the rest of the day (even after it drops out of the table): one row per
-# 5-min candle with price, candle and support / resistance zone  ->  results/spurt10_track.csv
+# 10-min candle with price, candle and support / resistance zone  ->  results/spurt10_track.csv
 # Each time a followed stock arrives AT a support / resistance zone, the price 10 / 30 / 60 minutes later and the best / worst move
 # are recorded  ->  results/zone_touch_followup.csv   (answers: did it reverse or break through?)
 TRACK_ON = os.environ.get("SPURT10_TRACK", "true").strip().lower() == "true"
@@ -2266,7 +2270,7 @@ def _trk_row(sid_sym, sid, now_ist):
     if not r:
         return None
     zs = r.pop("_zones", None)
-    ztf = r.pop("_zone_tf", 5)
+    ztf = r.pop("_zone_tf", 10)
     d5, asof = r.pop("_df5", None), r.pop("_as_of", None)
     for k in ("_trk", "_sell"):
         r.pop(k, None)
@@ -2471,7 +2475,7 @@ def _watch_html(meta):
     until = meta.get("watch_until", "15:00")
     head = (f'<h3 style="margin:22px 0 4px">Watch list &mdash; {len(wl)} spurt stock(s) tracked for support / resistance until {until} IST</h3>'
             f'<div class="m">A stock joins when it reaches {meta.get("watch_mult", 20):g}x or more in the top-30 and stays all day, even after it leaves the table. '
-            f'You get a phone alert the first time it is at a zone. Red/green row = at a zone now. Updated every 5 min.</div>')
+            f'You get a phone alert the first time it is at a zone. Red/green row = at a zone now. Updated every {SPURT_TF} min.</div>')
     if not wl:
         return head + '<div class="m">Nothing on the watch list yet.</div>'
     rows = ""
@@ -2545,14 +2549,14 @@ def _html(top, meta):
         for i, r in enumerate(top, 1)
     ) or '<tr><td colspan="16">No stocks qualified in this cycle.</td></tr>'
     return f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="refresh" content="60"><title>Volume Spurt 5-min</title>
+<meta http-equiv="refresh" content="60"><title>Volume Spurt {SPURT_TF}-min</title>
 <style>body{{font-family:Arial,sans-serif;margin:12px;background:#fafafa}}table{{border-collapse:collapse;width:100%;background:#fff}}
 th,td{{border:1px solid #ddd;padding:6px 8px;text-align:right;font-size:14px}}th{{background:#222;color:#fff}}td:nth-child(2){{text-align:left}}
 .m{{color:#555;font-size:13px;margin:6px 0 12px}}.w{{overflow-x:auto}}</style></head><body>
 {_RULES_BANNER}
-<h2>Volume Spurt &mdash; latest 5-min candle vs {meta['sma_len']}-candle volume average (top {len(top)})</h2>
+<h2>Volume Spurt &mdash; latest {SPURT_TF}-min candle vs {meta['sma_len']}-candle volume average (top {len(top)})</h2>
 <div class="m">Run: {meta['run']} (took {meta['took_s']}s) &middot; {meta['universe']} NSE stocks (ETFs left out: {meta.get('etf_excluded', 0)}; thin stocks left out: {meta.get('thin_removed', 0)}), {meta['price_ok']} priced &ge; {meta['min_price']:.0f},
-{meta['shortlisted']} shortlisted, {meta['scored']} scored, {meta['failed']} errors &middot; refreshes every 5 min &middot; {LEGEND} &middot; phone alert at {meta.get('alert_mult', 3.0):g}x or more &middot; zones = ALL IN ONE PRO order-block zones on the {ZONE_TF}-min chart (same as the indicator on a {ZONE_TF}-min chart); purple "{ZONE_TF}m+{CONF_TF}m zone" = the same zone also exists on the {CONF_TF}-min chart (stronger); volume spurt = 5-min candles &middot;
+{meta['shortlisted']} shortlisted, {meta['scored']} scored, {meta['failed']} errors &middot; refreshes every {SPURT_TF} min &middot; {LEGEND} &middot; phone alert at {meta.get('alert_mult', 3.0):g}x or more &middot; zones = ALL IN ONE PRO order-block zones on the {ZONE_TF}-min chart (same as the indicator on a {ZONE_TF}-min chart); purple "{ZONE_TF}m+{CONF_TF}m zone" = the same zone also exists on the {CONF_TF}-min chart (stronger); volume spurt = 10-min candles &middot;
 <a href="/spurt10.csv">CSV</a> (this cycle) &middot; <a href="/spurt10_history">full-day history page</a> &middot; <a href="/spurt10_history.csv">history CSV</a> &middot; <a href="/spurt_sell">Spurt SELL signals</a> &middot; <a href="/spurt_daily">Daily volume spurt</a> &middot; <a href="/scanner">Scanner</a></div>
 <div class="w"><table class="sp"><tr><th>#</th><th>Symbol</th><th>Price</th><th>Day %</th><th>Candle</th><th>Candle %</th><th>Candle type</th>
 <th>Candle volume</th><th>{meta['sma_len']}-candle avg vol</th><th>Multiple</th><th><a href="/depth" target="_blank" rel="noopener" title="open the Bids / Offers page" style="color:#fff;text-decoration:underline">Bids %</a></th><th><a href="/depth" target="_blank" rel="noopener" title="open the Bids / Offers page" style="color:#fff;text-decoration:underline">Offers %</a></th><th>Day volume</th><th>Support zone ({ZONE_TF}m)</th><th>Resistance zone ({ZONE_TF}m)</th><th>Zone view</th></tr>{body}</table></div>
@@ -2657,8 +2661,8 @@ def stock_depth_html(sym):
 
 def depth_html():
     """ADDED: /depth page - Bids % and Offers % (Dhan depth window: total buy / sell quantity) of the stocks that HAVE A VOLUME SPURT now
-    (the top-30 spurt table of the latest 5-min cycle), biggest spurt first. Click a Bids % / Offers % value for that stock's 5-level depth.
-    In memory, refreshed every 5-min cycle. Never raises."""
+    (the top-30 spurt table of the latest 10-min cycle), biggest spurt first. Click a Bids % / Offers % value for that stock's 5-level depth.
+    In memory, refreshed every 10-min cycle. Never raises."""
     try:
         snap = dict(_dsnap)
         run = _dsnap_meta.get("run")
@@ -2673,7 +2677,7 @@ def depth_html():
                 'th,td{border:1px solid #ddd;padding:6px 8px;text-align:right;font-size:14px}th{background:#222;color:#fff}td:nth-child(2){text-align:left}'
                 '.m{color:#555;font-size:13px;margin:6px 0 12px}.w{overflow-x:auto}</style></head><body>')
         if not run or not spurt:
-            return head + "<h2>Volume-spurt stocks &mdash; Bids / Offers</h2><p>No scan has run yet. It fills at the first 5-min cycle after 09:20 IST on a trading day.</p></body></html>"
+            return head + "<h2>Volume-spurt stocks &mdash; Bids / Offers</h2><p>No scan has run yet. It fills at the first 10-min cycle after 09:25 IST on a trading day.</p></body></html>"
         rows = sorted(((sym, mult) for sym, mult in spurt.items()), key=lambda x: -x[1])
         total_spurt = len(rows)
         if DEPTH_ONLY_AT_ZONE:                                          # ADDED: only stocks at a zone with one side above DEPTH_PCT
@@ -2709,12 +2713,12 @@ def depth_html():
                      f"<td{bg_b}><b>{dl}{100.0 - off:.1f}%</a></b></td><td{bg_o}><b>{dl}{off:.1f}%</a></b></td>"
                      f"<td>{'-' if d['spread'] is None else format(d['spread'], '.2f') + '%'}</td>{zc}</tr>")
         return (head + '<h2>Volume-spurt stocks &mdash; Bids / Offers</h2>'
-                f'<div class="m">Run: {run} &middot; ' + (f'{len(rows)} of the {total_spurt} volume-spurt stocks: only those AT a support / resistance zone with Bids % or Offers % above {DEPTH_PCT:g}%' if DEPTH_ONLY_AT_ZONE else f'the {len(rows)} stocks of the 5-min volume-spurt table') + f', biggest spurt first &middot; '
+                f'<div class="m">Run: {run} &middot; ' + (f'{len(rows)} of the {total_spurt} volume-spurt stocks: only those AT a support / resistance zone with Bids % or Offers % above {DEPTH_PCT:g}%' if DEPTH_ONLY_AT_ZONE else f'the {len(rows)} stocks of the 10-min volume-spurt table') + f', biggest spurt first &middot; '
                 f'Bids % / Offers % = total buy / sell quantity in the Dhan depth window (green / red cell = above {DEPTH_PCT:g}%) &middot; click a value for that stock\'s 5-level depth &middot; '
-                'refreshes every 5 min &middot; <a href="/spurt10">Volume spurt</a> &middot; <a href="/spurt_sell">Spurt SELL signals</a></div>'
-                '<div class="w"><table class="sp"><tr><th>#</th><th>Symbol</th><th>Price</th><th>Day %</th><th>Spurt (5-min)</th><th>Bids %</th><th>Offers %</th><th>Bid-ask spread</th><th>Zone</th></tr>'
+                'refreshes every 10 min &middot; <a href="/spurt10">Volume spurt</a> &middot; <a href="/spurt_sell">Spurt SELL signals</a></div>'
+                '<div class="w"><table class="sp"><tr><th>#</th><th>Symbol</th><th>Price</th><th>Day %</th><th>Spurt (' + str(SPURT_TF) + '-min)</th><th>Bids %</th><th>Offers %</th><th>Bid-ask spread</th><th>Zone</th></tr>'
                 + body + '</table></div>'
-                + (f'<p class="m">No spurt stock is at a support / resistance zone with Bids % or Offers % above {DEPTH_PCT:g}% right now. It is checked every 5 minutes.</p>' if (DEPTH_ONLY_AT_ZONE and not rows) else '')
+                + (f'<p class="m">No spurt stock is at a support / resistance zone with Bids % or Offers % above {DEPTH_PCT:g}% right now. It is checked every 10 minutes.</p>' if (DEPTH_ONLY_AT_ZONE and not rows) else '')
                 + _SORT_JS + "</body></html>")
     except Exception as e:
         log.warning(f"Spurt10 /depth page failed: {e}")
@@ -2727,7 +2731,7 @@ def history_html(date=None, min_mult=0.0, sym=None, only=None):
     import html as _h
     try:
         if not os.path.exists(HIST_PATH):
-            return "<p>No history yet. It starts filling at the first cycle after 09:20 IST on a trading day.</p>"
+            return "<p>No history yet. It starts filling at the first cycle after 09:25 IST on a trading day.</p>"
         df = pd.read_csv(HIST_PATH)
         if df.empty:
             return "<p>No history yet.</p>"
@@ -2809,9 +2813,9 @@ def section_html():
 # ---------------------------------------------------------------- loop
 def _seconds_to_next_run(now):
     nxt = now.replace(second=20, microsecond=0)
-    nxt += timedelta(minutes=(5 - now.minute % 5) % 5)          # CHANGED 7 Nov: wake every 5 min (was 10)
+    nxt += timedelta(minutes=(SPURT_TF - now.minute % SPURT_TF) % SPURT_TF)
     if nxt <= now:
-        nxt += timedelta(minutes=5)
+        nxt += timedelta(minutes=SPURT_TF)
     return max((nxt - now).total_seconds(), 1)
 
 
@@ -2819,18 +2823,17 @@ def _in_session(now):
     if now.weekday() >= 5:
         return False
     mins = now.hour * 60 + now.minute
-    return 9 * 60 + 20 <= mins <= 15 * 60 + 40   # CHANGED 7 Nov: first 5-min candle closes at 09:20 (was 09:25 for 10-min)
+    return 9 * 60 + 25 <= mins <= 15 * 60 + 40
 
 
-# ---------------------------------------------------------------- EARLY volume spurt (the 5-min candle is still forming)  - ADDED 5 Nov
-# Volume only grows during a candle, so a spurt is a spurt before the candle closes. Every 2 minutes one quote call (all stocks) gives the day volume; the volume of the LAST up to 5 minutes
-# (today's volume now minus the volume ~5 minutes ago) is compared with the stock's average 5-min candle volume (50 closed candles). At EARLY_MULT x or more = EARLY alert (once per stock per
+# ---------------------------------------------------------------- EARLY volume spurt (the 10-min candle is still forming)  - ADDED 5 Nov
+# Volume only grows during a candle, so a spurt is a spurt before the candle closes. Every 2 minutes one quote call (all stocks) gives the day volume; the volume of the LAST up to 10 minutes
+# (today's volume now minus the volume ~10 minutes ago) is compared with the stock's average 10-min candle volume (50 closed candles). At EARLY_MULT x or more = EARLY alert (once per stock per
 # EARLY_COOLDOWN_MIN minutes). The same leave-outs apply as everywhere else: thin / near-circuit stocks and stocks with news. The candle colour is not final yet - the alert shows the price move so far.
-# (CHANGED 7 Nov: MIN_AGE/MAX_AGE halved along with the base candle, so the window still means "up to one candle's worth of forming volume".)
 EARLY_ON = True
 EARLY_MULT = 20.0
-EARLY_MIN_AGE = 1.5           # minutes: the window must be at least this long
-EARLY_MAX_AGE = 5.5           # minutes: the window is never longer than one 5-min candle
+EARLY_MIN_AGE = 2.0           # minutes: the window must be at least this long
+EARLY_MAX_AGE = SPURT_TF + 0.5          # minutes: the window is never longer than one 10-min candle
 EARLY_FETCH_MAX = 25          # stocks per tick whose average volume must still be read from candles
 EARLY_PRETEST = 3.0           # a stock whose average is not known yet is looked up only when its window volume is at least this many times today's pace (cheap first filter)
 EARLY_COOLDOWN_MIN = 20
@@ -2886,24 +2889,24 @@ def _early_snap(quotes, now_ist):
             _early_reset(today)
         t = now_ist.timestamp()
         _early["snaps"].append((t, dict(quotes)))
-        _early["snaps"] = [x for x in _early["snaps"] if t - x[0] <= 7 * 60]   # CHANGED 7 Nov: buffer above the new EARLY_MAX_AGE (5.5 min)
+        _early["snaps"] = [x for x in _early["snaps"] if t - x[0] <= 12 * 60]
     except Exception:
         pass
 
 
 def _early_note_bases(rows):
-    """Average 5-min candle volume of the stocks the normal cycle just scored (no extra candle call needed for them later)."""
+    """Average 10-min candle volume of the stocks the normal cycle just scored (no extra candle call needed for them later)."""
     for r in rows:
         if r.get("sma_vol"):
             _early["base"][r["symbol"]] = float(r["sma_vol"])
 
 
 def _early_fetch_base(sym, sid):
-    """Average volume of the last SMA_LEN closed 5-min candles of one stock, or 0.0. Never raises."""
+    """Average volume of the last SMA_LEN closed 10-min candles of one stock, or 0.0. Never raises."""
     try:
         as_of = pd.Timestamp(datetime.now(timezone.utc).replace(tzinfo=None))
         df5 = ls.fetch_intraday_history(sid, "NSE_EQ", 5, HISTORY_DAYS)
-        df = ls.drop_forming_bars(df5, 5, as_of)                  # CHANGED 7 Nov: base candle is 5-min now
+        df = _spurt_bars(df5, as_of)
         if df is None or len(df) < SMA_LEN + 1:
             return 0.0
         return float(df["volume"].to_numpy(dtype=float)[-SMA_LEN:].mean())
@@ -2931,7 +2934,7 @@ def _early_send(hits):
 
 
 def _early_once(now_ist):
-    """One early check: reads all quotes, compares the volume of the last <= 5 minutes with the average 5-min candle volume. Never raises."""
+    """One early check: reads all quotes, compares the volume of the last <= 10 minutes with the average 10-min candle volume. Never raises."""
     try:
         mins = now_ist.hour * 60 + now_ist.minute
         if not EARLY_ON or now_ist.weekday() >= 5 or not (EARLY_FROM <= mins <= EARLY_TO):
@@ -2945,7 +2948,7 @@ def _early_once(now_ist):
             return
         t0, old = min(snaps, key=lambda x: x[0])                       # the oldest read inside the window: the longest window
         age = (now_ts - t0) / 60.0
-        slot0 = max(((datetime.fromtimestamp(t0, IST).hour * 60 + datetime.fromtimestamp(t0, IST).minute) - (9 * 60 + 15)) / 5.0, 3.0)   # CHANGED 7 Nov: 5-min bars
+        slot0 = max(((datetime.fromtimestamp(t0, IST).hour * 60 + datetime.fromtimestamp(t0, IST).minute) - (9 * 60 + 15)) / float(SPURT_TF), 3.0)
         cand, need = [], []
         for sym, (px, vol) in quotes.items():
             o = old.get(sym)
@@ -3004,7 +3007,7 @@ def early_html():
     try:
         hits = list(reversed(_early["hits"]))
         out = (f'<h2>Early volume spurt &mdash; candle still forming &middot; {EARLY_MULT:g}x or more ({len(hits)})</h2>'
-               f'<div class="m">Checked every 2 minutes. Volume of the last {EARLY_MIN_AGE:g}-{EARLY_MAX_AGE - 0.5:g} minutes (today\'s volume now minus ~5 minutes ago) &ge; {EARLY_MULT:g}x the stock\'s average 5-min candle volume (50 closed candles). '
+               f'<div class="m">Checked every 2 minutes. Volume of the last {EARLY_MIN_AGE:g}-{EARLY_MAX_AGE - 0.5:g} minutes (today\'s volume now minus ~{SPURT_TF} minutes ago) &ge; {EARLY_MULT:g}x the stock\'s average 10-min candle volume (50 closed candles). '
                'Volume cannot fall back, so it stays a spurt when the candle closes; the candle colour is not final yet, so look at the price move. '
                f'A stock is listed again only after {EARLY_COOLDOWN_MIN} minutes. Thin / near-circuit stocks and stocks with news are left out. Phone alert for each check. Information only. '
                '<a href="/spurt10_early.csv">CSV (all days)</a></div>')
@@ -3013,7 +3016,7 @@ def early_html():
         body = "".join(f"<tr><td>{h['time']}</td><td>{_tvl(h['symbol'])}</td><td>{h['price']:.2f}</td><td><b>{h['mult']}x</b></td><td>{h['window']:g}</td>"
                        f"<td style=\"color:{'#0a7d33' if h['move'] > 0 else '#c62828' if h['move'] < 0 else '#555'}\">{h['move']:+.2f}%</td><td>{h['vol']:,}</td><td>{h['base']:,}</td></tr>" for h in hits)
         return out + ('<div class="w"><table class="sp"><tr><th>Alert time</th><th>Symbol</th><th>Price</th><th>Early spurt</th><th>Window (min)</th><th>Price move in window</th>'
-                      '<th>Volume in window</th><th>Avg 5-min volume</th></tr>' + body + '</table></div>')
+                      '<th>Volume in window</th><th>Avg ' + str(SPURT_TF) + '-min volume</th></tr>' + body + '</table></div>')
     except Exception:
         return '<div class="m">The early spurt page could not be built.</div>'
 
@@ -3029,7 +3032,7 @@ def _early_next(now):
 
 
 def loop():
-    log.info("Spurt10 autorun started - every 5 min at candle close (09:20-15:40 IST, Mon-Fri); early volume spurt check every 2 min (09:14-15:25).")
+    log.info("Spurt10 autorun started - every 10 min at candle close (09:25-15:40 IST, Mon-Fri); early volume spurt check every 2 min (09:14-15:25).")
     while True:
         try:
             now = datetime.now(IST)
