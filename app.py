@@ -658,6 +658,11 @@ def spurt_sweep_csv():
     return _serve_csv("spurt_link.csv", "sweep_and_ob_signals_on_spurt_stocks.csv")
 
 
+@app.route("/spurt_wick.csv", methods=["GET"])
+def spurt_wick_csv():
+    return _serve_csv("spurt_wick.csv", "long_wick_spurt_candles.csv")
+
+
 @app.route("/spurt_flush", methods=["GET"])
 def spurt_flush_page():
     try:

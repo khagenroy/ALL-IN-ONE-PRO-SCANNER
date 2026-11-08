@@ -121,7 +121,7 @@ def _candle_info(sym, ts, is_buy):
         vprev = round(v / vol[k - 1], 2) if k >= 1 and vol[k - 1] > 0 else ""
         base = vol[max(0, k - 50):k]
         vavg = round(v / base.mean(), 2) if len(base) >= 10 and base.mean() > 0 else ""
-        return {"wick": wick, "vprev": vprev, "vavg": vavg}
+        return {"wick": wick, "vprev": vprev, "vavg": vavg, "red": bool(cl < o), "green": bool(cl > o)}
     except Exception as e:
         log.warning(f"spurt_link: signal candle of {sym} could not be read: {e}")
         return None
@@ -170,7 +170,8 @@ def process(now_ist=None):
             if r.symbol not in _st["seen"] or key in _st["done"]:
                 continue
             sp = _st["seen"][r.symbol]
-            ci = _candle_info(r.symbol, str(getattr(r, "timestamp", "")), str(r.signal).upper().endswith("BUY"))
+            is_buy = str(r.signal).upper().endswith("BUY")
+            ci = _candle_info(r.symbol, str(getattr(r, "timestamp", "")), is_buy)
             wp = None if ci is None else ci["wick"]
             if wp is None:                                   # candle not readable now: try again at the next call, give up after WICK_RETRY_MAX
                 _st["tries"][key] = _st["tries"].get(key, 0) + 1
@@ -178,7 +179,7 @@ def process(now_ist=None):
                     _st["done"].add(key)
                 continue
             _st["done"].add(key)
-            if wp < REJ_MIN_PCT:                             # not a rejection candle: not announced, not listed
+            if wp < REJ_MIN_PCT or not (ci.get("green") if is_buy else ci.get("red")):        # not a rejection candle (wick below REJ_MIN_PCT, or wrong colour: BUY needs GREEN, SELL needs RED - CHANGED 8 Nov): not announced, not listed
                 continue
             if VOL_FILTER and not (ci["vprev"] != "" and ci["vavg"] != "" and ci["vprev"] >= VOL_MULT and ci["vavg"] >= VOL_MULT):
                 continue
@@ -239,7 +240,7 @@ def section_html(now_ist=None):
     today = _today(now_ist)
     head = (f'<h3 style="margin:22px 0 4px">OB mitigation signals on spurt stocks (&ge; {LINK_MULT:g}x today)</h3>'
             f'<div class="m">Section A Strategy 2 (10-min) OB_BUY / OB_SELL fired on a stock that has reached {LINK_MULT:g}x or more today (the sweep signals are on their own page, /spurt_sweep), '
-            f'and only when the signal candle is a rejection candle (lower wick for BUY / upper wick for SELL of {REJ_MIN_PCT:g}% or more of the candle range). '
+            f'and only when the signal candle is a rejection candle (lower wick for BUY / upper wick for SELL of {REJ_MIN_PCT:g}% or more of the candle range; the candle must be GREEN for BUY and RED for SELL) that is also a RED candle (close below open). '
             f'{"The signal candle volume must also be " + format(VOL_MULT, "g") + "x or more of the previous candle AND of the 50-candle average. " if VOL_FILTER else ""}'
             f'A phone alert is sent for each. Green = BUY, red = SELL.</div>')
     try:
@@ -271,7 +272,7 @@ def sweep_page_html(now_ist=None):
             '<title>Sweep signals on spurt stocks</title><style>body{font-family:Arial,sans-serif;margin:12px;background:#fafafa}table{border-collapse:collapse;width:100%;background:#fff}'
             'th,td{border:1px solid #ddd;padding:6px 8px;text-align:right;font-size:14px}th{background:#222;color:#fff;position:sticky;top:0}.m{color:#555;font-size:13px;margin:6px 0 12px}</style></head><body>')
     intro = (f'<h2>Sweep signals on volume-spurt stocks (&ge; {LINK_MULT:g}x today)</h2><div class="m">Section A Strategy 1 (10-min): SWEEP_BUY / SWEEP_SELL fired on a stock that has reached {LINK_MULT:g}x or more today, '
-             f'and only when the signal candle is a rejection candle (lower wick for BUY / upper wick for SELL of {REJ_MIN_PCT:g}% or more of the candle range). '
+             f'and only when the signal candle is a rejection candle (lower wick for BUY / upper wick for SELL of {REJ_MIN_PCT:g}% or more of the candle range; the candle must be GREEN for BUY and RED for SELL) that is also a RED candle (close below open). '
              f'<b>Volume</b> = the signal candle\'s volume as a multiple of the previous candle and of the 50-candle average; a tick means both are {VOL_MULT:g}x or more '
              f'({"only ticked signals are listed" if VOL_FILTER else "shown for information, the signal is listed either way"}). A phone alert is sent for each. Green = BUY, red = SELL. '
              f'<a href="/spurt_sweep.csv" target="_blank" rel="noopener">CSV</a> &middot; <a href="/spurt10" target="_blank" rel="noopener">Spurt10</a></div>')

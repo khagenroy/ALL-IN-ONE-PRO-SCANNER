@@ -488,6 +488,11 @@ def _touch_cycle(state, now, prep):
                     rej_c[sym] = (_p["resistance"], q["vol"] / _p["avg"], (q["px"] / _p["close"] - 1) * 100)
         except Exception:
             pass
+    _rej_cycle(now, rej_c, quotes, nifty, uni)            # MOVED 8 Nov: runs first, so the touch alert below can use today's rejections
+    try:
+        _rejected = {r_["symbol"] for r_ in _rej["rows"]}
+    except Exception:
+        _rejected = set()
     for sym, q in quotes.items():
         if sym in state["track"]:                         # already alerted today: follow it
             if state["track"][sym].get("result") in (None, "", "open"):
@@ -495,6 +500,8 @@ def _touch_cycle(state, now, prep):
                 changed = True
             continue
         if sym in _nws:
+            continue
+        if TOUCH_NEEDS_REJ and REJ_ON and sym not in _rejected:      # CHANGED 8 Nov: the touch alert only for a stock with a 15-min rejection today (wick >= REJ_WICK_PCT, RED candle)
             continue
         p = prep.get(sym)
         if not p or q["px"] < sp.MIN_PRICE or q["px"] * q["vol"] < MIN_TURNOVER:
@@ -523,7 +530,6 @@ def _touch_cycle(state, now, prep):
         new.append(row)
     if new or changed:
         _touch_write(state, today_s)
-    _rej_cycle(now, rej_c, quotes, nifty, uni)
     try:                                                  # ADDED 7 Nov: the same rejection for ALL liquid stocks (page /daily_rej)
         import daily_rej_all
         daily_rej_all.cycle(now, prep, quotes, nifty, uni)
@@ -540,7 +546,8 @@ def _touch_cycle(state, now, prep):
 # closes at / below the zone top  ->  phone alert + row in the table on /spurt_daily + results/spurt_daily_rejection.csv (all days, with follow-up and NIFTY baseline).
 REJ_ON = True
 REJ_TF = 15                  # candle size in minutes (multiple of 5)
-REJ_WICK_PCT = 60.0          # upper wick >= this % of the candle's high-low range
+TOUCH_NEEDS_REJ = True          # ADDED 8 Nov: 'Volume spurt stock at DAILY resistance' alert only after a 15-min rejection candle (wick >= REJ_WICK_PCT, RED); set False for the old touch alert
+REJ_WICK_PCT = 70.0          # CHANGED 8 Nov (was 60): upper wick >= this % of the candle's high-low range; the rejection candle must also be RED (close below open)
 REJ_UPPER_FROM = 0.5        # "upper part" of the daily zone = from this share of the zone height upwards (0.5 = top half); a rejection whose high reached it is also listed in the UPPER table
 REJ_DAYS = 4                 # calendar days of 5-min candles read per stock (only the last closed candle is needed)
 REJ_PATH = os.path.join(RESULTS_DIR, "spurt_daily_rejection.csv")
@@ -643,7 +650,7 @@ def _rej_cycle(now, cands, quotes, nifty, uni):
                 if rng <= 0:
                     continue
                 wick = (h - max(o, cl)) / rng * 100.0
-                if wick < REJ_WICK_PCT or h < lo * (1 - near) or cl > zhi:
+                if wick < REJ_WICK_PCT or cl >= o or h < lo * (1 - near) or cl > zhi:        # CHANGED 8 Nov: red candle only
                     continue
                 if any(r_["symbol"] == sym and r_["candle"] == t for r_ in _rej["rows"]):
                     continue
@@ -712,7 +719,7 @@ def _rej_html():
                    '<div class="w"><table class="sp"><tr><th>Candle</th><th>Alert</th><th>Symbol</th><th>Price</th><th>Daily resistance</th><th>Upper wick</th><th>Volume x</th>'
                    '<th>10 min</th><th>30 min</th><th>60 min</th><th>Best</th><th>Worst</th><th>Last</th><th>Result</th></tr>' + up_body + '</table></div><hr>')
         return (f'<h2>Rejected at the DAILY resistance &mdash; {REJ_TF}-min candle with an upper wick of {REJ_WICK_PCT:g}% or more ({len(rows)})</h2>'
-                f'<div class="m">A stock with {TOUCH_MIN_MULT:g}x volume so far today whose closed {REJ_TF}-min candle touched its daily resistance zone, has an upper wick of {REJ_WICK_PCT:g}% or more of the candle range and closed at / below the zone top. '
+                f'<div class="m">A stock with {TOUCH_MIN_MULT:g}x volume so far today whose closed {REJ_TF}-min candle touched its daily resistance zone, has an upper wick of {REJ_WICK_PCT:g}% or more of the candle range, is a RED candle (close below open) and closed at / below the zone top. '
                 'Phone alert for each. Moves after the alert: a FALL counts as + (the rejection worked). Information only. '
                 '<a href="/spurt_daily_rejection.csv" target="_blank" rel="noopener">rejection CSV</a></div>'
                 '<div class="w"><table class="sp"><tr><th>Candle</th><th>Alert</th><th>Symbol</th><th>Price</th><th>Daily resistance</th><th>Upper wick</th><th>Volume x</th>'

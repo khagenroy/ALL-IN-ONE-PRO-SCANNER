@@ -6,7 +6,7 @@ A closed 15-minute candle that is REJECTED at the UPPER part of the DAILY resist
 
   Daily resistance zone = nearest daily order-block resistance above the last close (prepared once a day by spurt_daily._prep_today).
   Upper part            = from REJ_UPPER_FROM (0.5 = the top half) of the zone height upwards.
-  Rejected              = the closed 15-min candle's high reached the upper part, its upper wick is WICK_PCT (60) % or more of the candle's
+  Rejected              = the closed 15-min candle's high reached the upper part, its upper wick is WICK_PCT (70) % or more, it is a RED candle (close below open), of the candle's
                           high-low range, and it closed at / below the zone top.
   Liquid                = same rule as the other pages (price, Rs 1 crore traded, spread, depth).
 
@@ -29,7 +29,7 @@ IST = sp.IST
 
 ON = True
 TF = 15                       # candle minutes
-WICK_PCT = 60.0               # upper wick >= this % of the candle's high-low range
+WICK_PCT = 70.0               # CHANGED 8 Nov (was 60): upper wick >= this % of the candle's high-low range; the rejection candle must also be RED (close below open)
 UPPER_FROM = 0.5              # upper part of the daily zone starts this far up the zone (0.5 = top half, 0.75 = top quarter)
 NEAR_ZONE_PCT = 2.0           # only stocks whose price is within this % below the zone bottom (or higher) are checked: the rejection must have just happened
 MAX_CHECK = 150               # most candle downloads per 15-minute slot
@@ -139,7 +139,7 @@ def cycle(now, prep, quotes, nifty, uni):
                     if rng <= 0:
                         continue
                     wick = (h - max(o, cl)) / rng * 100.0
-                    if wick < WICK_PCT or any(r_["symbol"] == sym and r_["candle"] == t for r_ in _st["rows"]):
+                    if wick < WICK_PCT or cl >= o or any(r_["symbol"] == sym and r_["candle"] == t for r_ in _st["rows"]):        # CHANGED 8 Nov: red candle only
                         continue
                     hit = None
                     for zr in zl:                          # first zone the candle was rejected at
@@ -219,7 +219,7 @@ def page_html():
             for r in reversed(rows)) or '<tr><td colspan="15" style="text-align:center">No rejection at the upper part of a daily resistance zone yet today.</td></tr>'
         return (head + f'<h2>Rejected at the UPPER part of the DAILY resistance &mdash; {TF}-min candle, upper wick &ge; {WICK_PCT:g}% &mdash; all stocks ({len(rows)})</h2>'
                 f'<div class="m">Every liquid stock (volume spurt or not) whose closed {TF}-min candle pushed into the upper part (from {UPPER_FROM * 100:.0f}% of the zone height) of its '
-                f'daily resistance zone, has an upper wick of {WICK_PCT:g}% or more of the candle range and closed at / below the zone top. Checked each {TF} min, 09:30-15:25. '
+                f'daily resistance zone, has an upper wick of {WICK_PCT:g}% or more of the candle range, is a RED candle (close below open) and closed at / below the zone top. Checked each {TF} min, 09:30-15:25. '
                 f'"Volume x" = volume so far today / 50-day average. Moves after the alert: a FALL counts as + (the rejection worked). Information only. '
                 f'<a href="/daily_rej.csv" target="_blank" rel="noopener">CSV</a> &middot; <a href="/spurt_daily" target="_blank" rel="noopener">Daily spurt page</a></div>'
                 '<div class="w"><table class="sp"><tr><th>Candle</th><th>Alert</th><th>Symbol</th><th>Price</th><th>Daily resistance</th><th>Upper wick</th><th>Volume x</th><th>Day %</th>'

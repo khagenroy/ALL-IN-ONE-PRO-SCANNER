@@ -622,6 +622,30 @@ def _watch_rows(top, now_ist, sid_of):
     return out
 
 
+ZONE_NEEDS_REJ = True        # ADDED 8 Nov: the "Spurt stock at resistance / support" alert only when the closed candle is a rejection candle (wick >= WICK_PCT; RED at resistance, GREEN at support); False = old behaviour
+
+
+def _zone_rej_ok(r, at):
+    """True when the stock's last closed candle (CAND_TF min) has a wick of WICK_PCT % or more away from the zone and the right colour:
+    resistance -> upper wick + RED candle, support -> lower wick + GREEN candle. A stock without a candle (watch-list row) does not pass."""
+    try:
+        if CAND_TF == 15 and r.get("c15"):
+            c15 = r["c15"]
+            o, h, l, c = c15["o"], c15["h"], c15["l"], c15["c"]
+        elif r.get("ohlc"):
+            o, h, l, c = r["ohlc"][:4]
+        else:
+            return False
+        rng = h - l
+        if rng <= 0:
+            return False
+        if at == "RESISTANCE":
+            return (h - max(o, c)) / rng * 100.0 >= WICK_PCT and c < o
+        return (min(o, c) - l) / rng * 100.0 >= WICK_PCT and c > o
+    except Exception:
+        return False
+
+
 def _send_zone_alerts(top, now_ist):
     """ADDED: one phone notification per cycle for every stock of the top-30 spurt table that is AT a support or resistance zone
     (the same cells that are highlighted on the page). A stock is announced once per day per zone (it is announced again only if
@@ -644,6 +668,8 @@ def _send_zone_alerts(top, now_ist):
         zone = r.get("support") if at == "SUPPORT" else r.get("resistance")
         key = (r["symbol"], at, zone)
         if key in _zone_alerted["keys"]:
+            continue
+        if ZONE_NEEDS_REJ and not _zone_rej_ok(r, at):          # CHANGED 8 Nov: same rule as the other rejection alerts
             continue
         hits.append((r, at, zone, key))
     if not hits:
@@ -747,7 +773,7 @@ def _send_offers_alerts(top, now_ist):
 CAND_TF = 15                 # ADDED 4 Nov: candle size (minutes, 10 or 15) used by the rejected-at-resistance, clean rejection and engulfing sections (15 = closed 15-min candles, 10 = as before)
 WICK_ON = True               # ADDED: phone alert + table when a spurt stock's closed 15 (CAND_TF)-min candle is rejected at a resistance zone with a long upper wick
 WICK_SPURT_MULT = 10.0       # a "spurt stock" = reached this multiple (x the 50-candle volume average) at any time today
-WICK_PCT = 60.0              # upper wick of the CAND_TF-min candle >= this % of its high-low range
+WICK_PCT = 70.0              # CHANGED 8 Nov (was 60): upper wick of the CAND_TF-min candle >= this % of its high-low range; the rejection candle must also be RED (close below open)
 WICK_UNTIL_MIN = 15 * 60 + 15  # no wick alerts after 15:15 IST
 WICK_WATCH_MAX = 100         # most spurt stocks followed at once
 WICK_ALERT_MAX = 40          # safety cap on these notifications per day
@@ -812,7 +838,7 @@ def _wick_eval(o, h, l, c, res):
         lo, hi = (float(x) for x in str(res).split("-"))
         wick = (h - max(o, c)) / rng * 100.0
         near = ZONE_NEAR_PCT / 100.0
-        if wick >= WICK_PCT and h >= lo * (1 - near) and c <= hi:
+        if wick >= WICK_PCT and c < o and h >= lo * (1 - near) and c <= hi:        # CHANGED 8 Nov: red candle only
             return round(wick, 1)
     except Exception:
         pass
@@ -928,7 +954,7 @@ def _wick_html():
         rows = list(_wick["hits"])
         head = (f'<h2>Spurt stocks rejected at resistance &mdash; upper wick &ge; {WICK_PCT:g}% &middot; spurt &ge; {WICK_SPURT_MULT:g}x ({len(rows)})</h2>'
                 f'<div class="m">A stock that reached {WICK_SPURT_MULT:g}x today, whose closed {CAND_TF}-min candle touched its resistance zone ({ZONE_TF}m zones), has an upper wick of '
-                f'{WICK_PCT:g}% or more of the candle and closed at / below the zone top. A phone alert is sent for each (until 15:15 IST). Information only.</div>')
+                f'{WICK_PCT:g}% or more of the candle, is a RED candle (close below open) and closed at / below the zone top. A phone alert is sent for each (until 15:15 IST). Information only.</div>')
         if not rows:
             return head + '<div class="m">None yet today.</div>'
         body = "".join(f"<tr><td>{x['candle']}</td><td>{_tvl(x['symbol'])}</td><td>{x['price']:.2f}</td><td><b>{x['wick']:.0f}%</b></td><td>{x['resistance']}</td>"
@@ -941,7 +967,7 @@ def _wick_html():
 
 # ---------------------------------------------------------------- ADDED: clean rejection candles at resistance / support (spurt stocks)
 CLEAN_ON = True              # phone alert + table: a followed spurt stock's closed 10-min candle touches a zone and shows a clean rejection. False = off
-CLEAN_WICK_PCT = 60.0        # the rejection wick must be MORE than this % of the candle's high-low range
+CLEAN_WICK_PCT = 70.0        # CHANGED 8 Nov (was 60): the rejection wick must be MORE than this % of the candle's high-low range; resistance rejection candle must be RED, support rejection candle must be GREEN
 CLEAN_OPP_MAX_PCT = 5.0      # the opposite wick must be at most this % of the range ("no wick on the other side"; 0 = strictly none)
 CLEAN_VOL_X = 1.0           # the rejection candle's volume must be MORE than this x the previous candle's volume (1.0 = any increase)
 CLEAN_ALERT_MAX = 40         # safety cap on these notifications per day (each kind)
@@ -961,9 +987,9 @@ def _clean_eval(o, h, l, c, zone, kind, vol=None, prev=None):
         up = (h - max(o, c)) / rng * 100.0
         dn = (min(o, c) - l) / rng * 100.0
         near = ZONE_NEAR_PCT / 100.0
-        if kind == "R" and up > CLEAN_WICK_PCT and dn <= CLEAN_OPP_MAX_PCT and h >= lo * (1 - near) and c <= hi:
+        if kind == "R" and up > CLEAN_WICK_PCT and dn <= CLEAN_OPP_MAX_PCT and c < o and h >= lo * (1 - near) and c <= hi:        # resistance rejection: RED candle
             return round(up, 1), round(dn, 1), vr
-        if kind == "S" and dn > CLEAN_WICK_PCT and up <= CLEAN_OPP_MAX_PCT and l <= hi * (1 + near) and c >= lo:
+        if kind == "S" and dn > CLEAN_WICK_PCT and up <= CLEAN_OPP_MAX_PCT and c > o and l <= hi * (1 + near) and c >= lo:        # support rejection: GREEN candle
             return round(dn, 1), round(up, 1), vr
     except Exception:
         pass
@@ -1026,7 +1052,7 @@ def _clean_html():
                 ("R", "Clean top rejection at resistance", "Upper wick", "Resistance zone",
                  f"candle touched the resistance zone, upper wick more than {CLEAN_WICK_PCT:g}% of the candle and almost no lower wick (at most {CLEAN_OPP_MAX_PCT:g}%), and volume more than {CLEAN_VOL_X:g}x the previous candle"),
                 ("S", "Clean bottom rejection at support", "Lower wick", "Support zone",
-                 f"candle touched the support zone, lower wick more than {CLEAN_WICK_PCT:g}% of the candle and almost no upper wick (at most {CLEAN_OPP_MAX_PCT:g}%), and volume more than {CLEAN_VOL_X:g}x the previous candle")):
+                 f"candle touched the support zone, lower wick more than {CLEAN_WICK_PCT:g}% of the candle and almost no upper wick (at most {CLEAN_OPP_MAX_PCT:g}%), and a GREEN candle, and volume more than {CLEAN_VOL_X:g}x the previous candle")):
             rows = [x for x in _clean["hits"] if x.get("kind") == kind]
             out += (f'<h2>{head} &mdash; spurt stocks &ge; {WICK_SPURT_MULT:g}x ({len(rows)})</h2>'
                     f'<div class="m">Closed {CAND_TF}-min candle of a stock that reached {WICK_SPURT_MULT:g}x today: {note}. Zones are the {ZONE_TF}m order-block zones. '
@@ -1456,7 +1482,7 @@ def _room_update(top, quotes, now_ist):
                 if not z or (sym, "UREJ", cndl) in _room["keys"] or h - l <= 0:
                     continue
                 wick = (h - max(o, c)) / (h - l) * 100.0
-                if wick >= WICK_PCT and h >= z[0] + UREJ_FROM * (z[1] - z[0]) and c <= z[1]:
+                if wick >= WICK_PCT and c < o and h >= z[0] + UREJ_FROM * (z[1] - z[0]) and c <= z[1]:        # CHANGED 8 Nov: red candle only
                     _room["keys"].add((sym, "UREJ", cndl))
                     x = {"side": "UREJ", "symbol": sym, "candle": cndl, "alert": hm, "price": float(price), "p0": float(price), "broken": f"{z[0]:g}-{z[1]:g}", "next": "",
                          "room": round(wick, 1), "cpct": round((c / o - 1) * 100, 2) if o else 0.0, "mult": round(float((symsm.get(sym) or {}).get("mult", 0.0)), 1), "n0": _nifty_px()[0]}
@@ -1541,7 +1567,7 @@ def _room_html():
         rows = [x for x in _room["hits"] if x["side"] == "UREJ"]
         out += (f'<h2>Rejected at the UPPER part of the resistance zone &mdash; {CAND_TF}-min candle, upper wick &ge; {WICK_PCT:g}% ({len(rows)})</h2>'
                 f'<div class="m">A stock that reached {WICK_SPURT_MULT:g}x today whose closed {CAND_TF}-min candle pushed into the upper part of its resistance zone (the high reached at least {UREJ_FROM * 100:.0f}% of the way up the zone), '
-                f'has an upper wick of {WICK_PCT:g}% or more and closed at / below the zone top. Price went deep into the zone and was still pushed back. Phone alert for each. Information only. '
+                f'has an upper wick of {WICK_PCT:g}% or more, is a RED candle and closed at / below the zone top. Price went deep into the zone and was still pushed back. Phone alert for each. Information only. '
                 '<a href="/spurt10_upper.csv">CSV with follow-up (all days)</a></div>')
         if rows:
             body = "".join(f"<tr><td>{x['candle']}</td><td>{_tvl(x['symbol'])}</td><td>{x['price']:.2f}</td><td>{x['broken']}</td><td><b>{x['room']}%</b></td>"
@@ -1961,6 +1987,11 @@ def run_once():
         spurt_flush.update(rows, now_ist)
     except Exception as _e:
         log.warning(f"spurt_flush failed: {_e}")
+    try:                                                            # ADDED 8 Nov: long-wick spurt candles (BUY lower wick / SELL upper wick), section on /spurt10
+        import spurt_wick
+        spurt_wick.update(rows, now_ist)
+    except Exception as _e:
+        log.warning(f"spurt_wick failed: {_e}")
     rows.sort(key=lambda r: -r["multiple"])
     top = rows[:TOP_N]
     top_ids = {id(x) for x in top}
@@ -2461,6 +2492,14 @@ rows.forEach(function(r){b.appendChild(r);});});});});
 </script>"""
 
 
+def _wickset_html():
+    try:
+        import spurt_wick
+        return spurt_wick.section_html()
+    except Exception:
+        return ""
+
+
 def _link_html():
     try:
         import spurt_link
@@ -2566,6 +2605,7 @@ th,td{{border:1px solid #ddd;padding:6px 8px;text-align:right;font-size:14px}}th
 <div class="w"><table class="sp"><tr><th>#</th><th>Symbol</th><th>Price</th><th>Day %</th><th>Candle</th><th>Candle %</th><th>Candle type</th>
 <th>Candle volume</th><th>{meta['sma_len']}-candle avg vol</th><th>Multiple</th><th><a href="/depth" target="_blank" rel="noopener" title="open the Bids / Offers page" style="color:#fff;text-decoration:underline">Bids %</a></th><th><a href="/depth" target="_blank" rel="noopener" title="open the Bids / Offers page" style="color:#fff;text-decoration:underline">Offers %</a></th><th>Day volume</th><th>Support zone ({ZONE_TF}m)</th><th>Resistance zone ({ZONE_TF}m)</th><th>Zone view</th></tr>{body}</table></div>
 {_link_html()}
+{_wickset_html()}
 {_wick_html()}
 {_clean_html()}
 {_engulf_html()}

@@ -173,8 +173,8 @@ def live_setups(df: pd.DataFrame, tf: str, sym: str) -> list:
                 # CHANGED 8 Nov: the signal candle is the one where RSI crosses back (previous candle still at / beyond the level), not any later candle of the window
                 # RSI was in the extreme on the previous candle, came back on this one, and did NOT stay in the extreme longer than MAX_LOOKBACK candles
                 # (the candle MAX_LOOKBACK + 1 back is already out of the extreme) - otherwise it is not an RSI Flush
-                buy_sig = (rsi[i - 1] <= RSI_OS and rsi[i] > RSI_OS and prev.size == MAX_LOOKBACK + 1 and prev.max() > RSI_OS and (i - last_buy >= COOLDOWN_BARS))
-                sell_sig = (rsi[i - 1] >= RSI_OB and rsi[i] < RSI_OB and prev.size == MAX_LOOKBACK + 1 and prev.min() < RSI_OB and (i - last_sell >= COOLDOWN_BARS))
+                buy_sig = (rsi[i - 1] <= RSI_OS and rsi[i] > RSI_OS and prev.size == MAX_LOOKBACK + 1 and prev.max() > RSI_OS and cl[i] > o[i] and (i - last_buy >= COOLDOWN_BARS))
+                sell_sig = (rsi[i - 1] >= RSI_OB and rsi[i] < RSI_OB and prev.size == MAX_LOOKBACK + 1 and prev.min() < RSI_OB and cl[i] < o[i] and (i - last_sell >= COOLDOWN_BARS))
                 if buy_sig:
                     last_buy = i
                     sl = lo[i - SL_LOOKBACK + 1: i + 1].min()
