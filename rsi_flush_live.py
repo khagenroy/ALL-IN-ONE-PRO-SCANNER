@@ -8,8 +8,8 @@ its own try/except). Results are shown on the same /scanner page, in the Section
 
 THE RULE (same as the Pine indicator, same defaults)
   Signal candle : RSI(14) was <= 30 (buy) / >= 70 (sell) on any of the previous 4 candles and the
-                  current candle's RSI is back above 30 / below 70, AND volume >= 1.5 x its 20-bar
-                  average, AND at least 8 candles since the last signal on that side.
+                  current candle's RSI is back above 30 / below 70, AND volume >= 1.5 x the PREVIOUS candle's
+                  volume AND >= 1.5 x its 50-bar average volume (CHANGED 8 Nov: both must hold - buyers / sellers stepping in; was 1.5 x the 20-bar average only), AND at least 8 candles since the last signal on that side.
   Confirmation  : a LATER candle (within 4 candles) trades through the signal candle's HIGH (buy) /
                   LOW (sell). Dropped if a candle CLOSES beyond the stop first. Anything still
                   pending at a new trading day is dropped.
@@ -44,8 +44,8 @@ MAX_LOOKBACK = 4
 COOLDOWN_BARS = 8
 CONFIRM_EXPIRY = 4
 USE_VOL_FILTER = True
-VOL_MA_LEN = 20
-VOL_MULT = 1.5
+VOL_MA_LEN = 50          # CHANGED 8 Nov: 50 (was 20), same average as the volume spurt scanner
+VOL_MULT = 1.5           # CHANGED 8 Nov: signal candle volume must be >= VOL_MULT x the PREVIOUS candle AND >= VOL_MULT x the VOL_MA_LEN average
 SL_LOOKBACK = 5
 RR = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
 
@@ -102,10 +102,8 @@ def _step_trade(tr: dict, hi: float, lo: float):
             tr["state"] = "T6 DONE"
 
 
-def live_setups(df: pd.DataFrame, tf: str, sym: str, hours=None) -> list:
-    """Rows for TODAY's session (the session of the last closed bar). Never raises on short data - returns [].
-    hours=None (stocks, default): unchanged. hours=N (24x7 crypto): no session reset at IST midnight; rows for every trade
-    whose signal/confirm candle is within the last N hours."""
+def live_setups(df: pd.DataFrame, tf: str, sym: str) -> list:
+    """Rows for TODAY's session (the session of the last closed bar). Never raises on short data - returns []."""
     if df is None or df.empty:
         return []
     n = len(df)
@@ -124,10 +122,6 @@ def live_setups(df: pd.DataFrame, tf: str, sym: str, hours=None) -> list:
     days = np.array([_ist_date(t) for t in idx[-(WINDOW + 1):]])       # per-bar IST date for the replay window
     first = max(1, n - WINDOW)
     today = days[-1]
-    cutoff = (pd.Timestamp(idx[-1]) - pd.Timedelta(hours=hours)) if hours is not None else None
-
-    def in_window(i):
-        return (pd.Timestamp(idx[i]) >= cutoff) if cutoff is not None else (_ist_date(idx[i]) == today)
 
     last_buy = last_sell = -999
     pend = {"BUY": None, "SELL": None}      # {bar, level, sl}
@@ -137,7 +131,7 @@ def live_setups(df: pd.DataFrame, tf: str, sym: str, hours=None) -> list:
     for i in range(first, n):
         d_i = days[i - (n - len(days))]
         d_prev = days[i - 1 - (n - len(days))]
-        new_day = (d_i != d_prev) and hours is None
+        new_day = d_i != d_prev
         if new_day:
             pend["BUY"] = pend["SELL"] = None
             for tr in trades:                           # intraday positions are squared off at the new day
@@ -172,7 +166,8 @@ def live_setups(df: pd.DataFrame, tf: str, sym: str, hours=None) -> list:
         if i >= max(RSI_LEN, VOL_MA_LEN) and not np.isnan(rsi[i]):
             prev = rsi[max(0, i - MAX_LOOKBACK): i]
             prev = prev[~np.isnan(prev)]
-            vol_ok = (not USE_VOL_FILTER) or (not np.isnan(vol_ma[i]) and vol[i] >= vol_ma[i] * VOL_MULT)
+            vol_ok = (not USE_VOL_FILTER) or (i >= 1 and vol[i - 1] > 0 and vol[i] >= vol[i - 1] * VOL_MULT
+                                              and not np.isnan(vol_ma[i]) and vol[i] >= vol_ma[i] * VOL_MULT)   # CHANGED 8 Nov: BOTH 1.5x the previous candle and 1.5x the 50-bar average
             if prev.size and vol_ok and i >= SL_LOOKBACK:
                 buy_sig = prev.min() <= RSI_OS and rsi[i] > RSI_OS and (i - last_buy >= COOLDOWN_BARS)
                 sell_sig = prev.max() >= RSI_OB and rsi[i] < RSI_OB and (i - last_sell >= COOLDOWN_BARS)
@@ -194,7 +189,7 @@ def live_setups(df: pd.DataFrame, tf: str, sym: str, hours=None) -> list:
 
     # trades confirmed TODAY
     for tr in trades:
-        if not in_window(tr["conf_i"]):
+        if _ist_date(idx[tr["conf_i"]]) != today:
             continue
         t = tr["t"]
         state = tr["state"]
@@ -210,12 +205,11 @@ def live_setups(df: pd.DataFrame, tf: str, sym: str, hours=None) -> list:
             "T1": _r(t[0]), "T2": _r(t[1]), "T3": _r(t[2]), "T4": _r(t[3]), "T5": _r(t[4]), "T6": _r(t[5]),
             "risk_pct": _r(tr["risk"] / tr["entry"] * 100.0), "rsi": _r(tr["rsi"]),
             "signal_ts": ts(tr["signal_i"]), "confirm_ts": ts(tr["conf_i"]),
-            "confirm_close": _r(cl[tr["conf_i"]]),
         })
 
     # still waiting for the break on the last closed candle
     for side, p in pend.items():
-        if p is None or not in_window(p["bar"]):
+        if p is None or _ist_date(idx[p["bar"]]) != today:
             continue
         sl, risk, t = _levels(side, p["level"], p["sl"])
         left = CONFIRM_EXPIRY - (n - 1 - p["bar"])
@@ -225,6 +219,6 @@ def live_setups(df: pd.DataFrame, tf: str, sym: str, hours=None) -> list:
             "close": _r(cl[-1]), "entry": _r(p["level"]), "sl": _r(sl), "sl_now": _r(sl),
             "T1": _r(t[0]), "T2": _r(t[1]), "T3": _r(t[2]), "T4": _r(t[3]), "T5": _r(t[4]), "T6": _r(t[5]),
             "risk_pct": _r(risk / p["level"] * 100.0), "rsi": _r(p["rsi"]),
-            "signal_ts": ts(p["bar"]), "confirm_ts": "", "confirm_close": None,
+            "signal_ts": ts(p["bar"]), "confirm_ts": "",
         })
     return rows
