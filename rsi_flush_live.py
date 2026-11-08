@@ -7,8 +7,9 @@ places NO orders, and cannot affect Section A / Section B (live_scanner wraps ev
 its own try/except). Results are shown on the same /scanner page, in the Section A area.
 
 THE RULE (same as the Pine indicator, same defaults)
-  Signal candle : RSI(14) was <= 30 (buy) / >= 70 (sell) on any of the previous 4 candles and the
-                  current candle's RSI is back above 30 / below 70, AND volume >= 1.5 x the PREVIOUS candle's
+  Signal candle : the candle where RSI(14) CROSSES BACK: the previous candle's RSI was <= 30 (buy) / >= 70 (sell)
+                  and the current candle's RSI is back above 30 / below 70, AND RSI did not stay in the extreme for more than 4 candles
+                  (it must come back within 4 candles of entering it; longer = no RSI Flush) (CHANGED 8 Nov), AND volume >= 1.5 x the PREVIOUS candle's
                   volume AND >= 1.5 x its 50-bar average volume (CHANGED 8 Nov: both must hold - buyers / sellers stepping in; was 1.5 x the 20-bar average only), AND at least 8 candles since the last signal on that side.
   Confirmation  : a LATER candle (within 4 candles) trades through the signal candle's HIGH (buy) /
                   LOW (sell). Dropped if a candle CLOSES beyond the stop first. Anything still
@@ -164,13 +165,16 @@ def live_setups(df: pd.DataFrame, tf: str, sym: str) -> list:
 
         # 2) arm new signal candles
         if i >= max(RSI_LEN, VOL_MA_LEN) and not np.isnan(rsi[i]):
-            prev = rsi[max(0, i - MAX_LOOKBACK): i]
+            prev = rsi[max(0, i - MAX_LOOKBACK - 1): i]       # CHANGED 8 Nov: MAX_LOOKBACK + 1 candles before this one
             prev = prev[~np.isnan(prev)]
             vol_ok = (not USE_VOL_FILTER) or (i >= 1 and vol[i - 1] > 0 and vol[i] >= vol[i - 1] * VOL_MULT
                                               and not np.isnan(vol_ma[i]) and vol[i] >= vol_ma[i] * VOL_MULT)   # CHANGED 8 Nov: BOTH 1.5x the previous candle and 1.5x the 50-bar average
             if prev.size and vol_ok and i >= SL_LOOKBACK:
-                buy_sig = prev.min() <= RSI_OS and rsi[i] > RSI_OS and (i - last_buy >= COOLDOWN_BARS)
-                sell_sig = prev.max() >= RSI_OB and rsi[i] < RSI_OB and (i - last_sell >= COOLDOWN_BARS)
+                # CHANGED 8 Nov: the signal candle is the one where RSI crosses back (previous candle still at / beyond the level), not any later candle of the window
+                # RSI was in the extreme on the previous candle, came back on this one, and did NOT stay in the extreme longer than MAX_LOOKBACK candles
+                # (the candle MAX_LOOKBACK + 1 back is already out of the extreme) - otherwise it is not an RSI Flush
+                buy_sig = (rsi[i - 1] <= RSI_OS and rsi[i] > RSI_OS and prev.size == MAX_LOOKBACK + 1 and prev.max() > RSI_OS and (i - last_buy >= COOLDOWN_BARS))
+                sell_sig = (rsi[i - 1] >= RSI_OB and rsi[i] < RSI_OB and prev.size == MAX_LOOKBACK + 1 and prev.min() < RSI_OB and (i - last_sell >= COOLDOWN_BARS))
                 if buy_sig:
                     last_buy = i
                     sl = lo[i - SL_LOOKBACK + 1: i + 1].min()
