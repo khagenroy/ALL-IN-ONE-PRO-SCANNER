@@ -1956,6 +1956,11 @@ def run_once():
                         _d.pop(_k, None)
             except Exception:
                 pass
+    try:                                                            # ADDED 8 Nov: RSI Flush on the stocks that spurted today (page /spurt_flush)
+        import spurt_flush
+        spurt_flush.update(rows, now_ist)
+    except Exception as _e:
+        log.warning(f"spurt_flush failed: {_e}")
     rows.sort(key=lambda r: -r["multiple"])
     top = rows[:TOP_N]
     top_ids = {id(x) for x in top}

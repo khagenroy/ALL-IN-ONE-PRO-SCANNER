@@ -643,6 +643,21 @@ def spurt_daily_page():
         return "<p>Daily spurt page failed - see the logs.</p>", 500
 
 
+@app.route("/spurt_flush", methods=["GET"])
+def spurt_flush_page():
+    try:
+        import spurt_flush
+        return spurt_flush.page_html()
+    except Exception:
+        log.exception("/spurt_flush failed")
+        return "<p>RSI Flush on spurt stocks page failed - see the logs.</p>", 500
+
+
+@app.route("/spurt_flush.csv", methods=["GET"])
+def spurt_flush_csv():
+    return _serve_csv("spurt_flush.csv", "rsi_flush_on_spurt_stocks.csv")
+
+
 @app.route("/daily_rej", methods=["GET"])
 def daily_rej_page():
     try:
