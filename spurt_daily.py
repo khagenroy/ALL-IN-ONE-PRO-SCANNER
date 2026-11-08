@@ -296,7 +296,7 @@ def _send_alert(rows, meta):
     for attempt in range(4):                                  # the alert is sent only once a day: retry a short network problem (e.g. "Network is unreachable")
         try:
             resp = requests.post(f"https://ntfy.sh/{topic}", data=("\n".join(lines) + extra).encode("utf-8"), timeout=8,
-                                 headers={"Title": f"Daily volume spurt at a daily zone ({len(hits)})", "Priority": "high", "Tags": "bar_chart"})
+                                 headers={"Title": f"Daily volume spurt at a daily zone ({len(hits)})", "Priority": "default", "Tags": "bar_chart"})
             if resp.status_code >= 300:
                 log.warning(f"Spurt daily ntfy refused: {resp.status_code} {resp.text[:150]}")
             return
@@ -412,7 +412,7 @@ def _touch_notify(hits):
     extra = f"\n+{len(hits) - TOUCH_MAX_LINES} more on /spurt_daily_touch.csv" if len(hits) > TOUCH_MAX_LINES else ""
     try:
         resp = requests.post(f"https://ntfy.sh/{topic}", data=("\n".join(lines) + extra).encode("utf-8"), timeout=8,
-                             headers={"Title": f"Volume spurt stock at DAILY resistance ({len(hits)})", "Priority": "high", "Tags": "chart_with_upwards_trend"})
+                             headers={"Title": f"Volume spurt stock at DAILY resistance ({len(hits)})", "Priority": "default", "Tags": "chart_with_upwards_trend"})
         if resp.status_code >= 300:
             log.warning(f"Spurt daily touch ntfy refused: {resp.status_code} {resp.text[:150]}")
     except Exception as e:

@@ -84,7 +84,7 @@ def _notify(rows):
         import requests
         lines = [f"{r['symbol']}  Rs {r['price']:.2f}  daily resistance {r['resistance']}  {TF}m upper wick {r['wick_pct']:.0f}%" for r in rows[:12]]
         requests.post(f"https://ntfy.sh/{topic}", data="\n".join(lines).encode("utf-8"), timeout=8,
-                      headers={"Title": f"Rejected at UPPER part of DAILY resistance ({len(rows)})", "Priority": "high", "Tags": "chart_with_downwards_trend"})
+                      headers={"Title": f"Rejected at UPPER part of DAILY resistance ({len(rows)})", "Priority": "urgent", "Tags": "chart_with_downwards_trend"})
     except Exception as e:
         log.warning(f"daily_rej ntfy failed: {e}")
 

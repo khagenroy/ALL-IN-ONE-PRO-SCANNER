@@ -529,7 +529,7 @@ def _send_alerts(rows, now_ist):
     try:
         import requests
         resp = requests.post(f"https://ntfy.sh/{topic}", data=("\n".join(lines) + extra).encode("utf-8"), timeout=8,
-                             headers={"Title": f"Volume spurt >= {ALERT_MULT:g}x ({hits[0]['candle']} candle)", "Priority": "high",
+                             headers={"Title": f"Volume spurt >= {ALERT_MULT:g}x ({hits[0]['candle']} candle)", "Priority": "default",
                                       "Tags": "chart_with_upwards_trend"})
         if resp.status_code >= 300:
             log.warning(f"Spurt10 ntfy refused: {resp.status_code} {resp.text[:150]}")
@@ -663,7 +663,7 @@ def _send_zone_alerts(top, now_ist):
     try:
         import requests
         resp = requests.post(f"https://ntfy.sh/{topic}", data=("\n".join(lines) + extra).encode("utf-8"), timeout=8,
-                             headers={"Title": title, "Priority": "high", "Tags": "bell"})
+                             headers={"Title": title, "Priority": "default", "Tags": "bell"})
         if resp.status_code >= 300:
             log.warning(f"Spurt10 zone ntfy refused: {resp.status_code} {resp.text[:150]}")
             return
@@ -730,7 +730,7 @@ def _send_offers_alerts(top, now_ist):
     try:
         import requests
         resp = requests.post(f"https://ntfy.sh/{topic}", data=("\n".join(lines) + extra).encode("utf-8"), timeout=8,
-                             headers={"Title": f"Selling pressure above {OFFERS_ALERT_PCT:g}% at a zone (spurt stocks)" if OFFERS_ONLY_AT_ZONE else f"Selling pressure above {OFFERS_ALERT_PCT:g}% (spurt stocks)", "Priority": "high",
+                             headers={"Title": f"Selling pressure above {OFFERS_ALERT_PCT:g}% at a zone (spurt stocks)" if OFFERS_ONLY_AT_ZONE else f"Selling pressure above {OFFERS_ALERT_PCT:g}% (spurt stocks)", "Priority": "default",
                                       "Tags": "chart_with_downwards_trend"})
         if resp.status_code >= 300:
             log.warning(f"Spurt10 offers ntfy refused: {resp.status_code} {resp.text[:150]}")
@@ -1106,7 +1106,7 @@ def _engulf_alerts(now_ist):
         try:
             import requests
             resp = requests.post(f"https://ntfy.sh/{topic}", data=("\n".join(lines) + extra).encode("utf-8"), timeout=8,
-                                 headers={"Title": f"{title} ({len(hs)})", "Priority": "high", "Tags": tag})
+                                 headers={"Title": f"{title} ({len(hs)})", "Priority": "urgent", "Tags": tag})
             if resp.status_code >= 300:
                 log.warning(f"Spurt10 engulfing ntfy refused: {resp.status_code} {resp.text[:150]}")
                 continue
@@ -1347,7 +1347,7 @@ def _room_send(side, hs):
     try:
         import requests
         resp = requests.post(f"https://ntfy.sh/{topic}", data=("\n".join(lines) + extra).encode("utf-8"), timeout=8,
-                             headers={"Title": f"{title} ({len(hs)})", "Priority": ("urgent" if side == "UREJ" else "default" if side == "ORBIN" else "high"), "Tags": ("rotating_light," + tag if side == "UREJ" else tag)})
+                             headers={"Title": f"{title} ({len(hs)})", "Priority": ("urgent" if side == "UREJ" else "default"), "Tags": ("rotating_light," + tag if side == "UREJ" else tag)})
         if resp.status_code < 300:
             _room["count"][side] = _room["count"].get(side, 0) + 1
         else:
@@ -1828,7 +1828,7 @@ def _news_alerts(news_list, now_ist):
             try:
                 import requests
                 resp = requests.post(f"https://ntfy.sh/{topic}", data=("\n".join(lines) + extra).encode("utf-8"), timeout=8,
-                                     headers={"Title": f"Spurt stock WITH NEWS ({len(new)})", "Priority": "high", "Tags": "newspaper"})
+                                     headers={"Title": f"Spurt stock WITH NEWS ({len(new)})", "Priority": "default", "Tags": "newspaper"})
                 if resp.status_code >= 300:
                     log.warning(f"Spurt10 news alert refused: {resp.status_code} {resp.text[:150]}")
                     for r in new:
@@ -2929,7 +2929,7 @@ def _early_send(hits):
     try:
         import requests
         resp = requests.post(f"https://ntfy.sh/{topic}", data=("\n".join(lines) + extra).encode("utf-8"), timeout=8,
-                             headers={"Title": f"EARLY volume spurt - candle still forming ({len(hits)})", "Priority": "high", "Tags": "zap"})
+                             headers={"Title": f"EARLY volume spurt - candle still forming ({len(hits)})", "Priority": "default", "Tags": "zap"})
         if resp.status_code < 300:
             _early["count"] += 1
         else:

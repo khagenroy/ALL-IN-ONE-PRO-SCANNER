@@ -643,6 +643,21 @@ def spurt_daily_page():
         return "<p>Daily spurt page failed - see the logs.</p>", 500
 
 
+@app.route("/spurt_sweep", methods=["GET"])
+def spurt_sweep_page():
+    try:
+        import spurt_link
+        return spurt_link.sweep_page_html()
+    except Exception:
+        log.exception("/spurt_sweep failed")
+        return "<p>Sweep signals page failed - see the logs.</p>", 500
+
+
+@app.route("/spurt_sweep.csv", methods=["GET"])
+def spurt_sweep_csv():
+    return _serve_csv("spurt_link.csv", "sweep_and_ob_signals_on_spurt_stocks.csv")
+
+
 @app.route("/spurt_flush", methods=["GET"])
 def spurt_flush_page():
     try:

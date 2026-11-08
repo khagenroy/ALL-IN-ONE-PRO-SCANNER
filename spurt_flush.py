@@ -6,7 +6,7 @@ FLUSH_MIN_MULT x or more, same candles as the Spurt10 page) it runs the RSI Flus
 setups of today: signal candle -> break -> ACTIVE / STOPPED / T6 DONE, with entry, stop and T1..T6.
 
   * The RULE is not new: it is rsi_flush_live.live_setups(), the same Python port of the TradingView "RSI Flush" Section C that the
-    /scanner page uses (RSI 14 at 30 / 70 then back within 4 candles, volume 1.5x, break of the signal candle, cascade stop).
+    /scanner page uses (RSI 14 at 30 / 70 then back within 4 candles, volume 1.5x the previous candle, break of the signal candle, cascade stop).
   * It uses the candles the spurt scan has ALREADY downloaded: NO extra Dhan call, no orders. Any error is caught and logged.
   * The old RSI Flush table on /scanner is not changed. This page is only the RSI Flush signals of spurt stocks.
   * "After spurt" = YES when the RSI Flush signal candle came at / after the stock's first spurt candle of the day.
@@ -179,7 +179,7 @@ def page_html():
             for r in rows) or '<tr><td colspan="18" style="text-align:center">No RSI Flush setup on a spurt stock yet today.</td></tr>'
         return (head + f'<h2>RSI Flush on volume-spurt stocks &mdash; today ({len(rows)} setups, {n_sp} spurt stocks followed)</h2>'
                 f'<div class="m">Stocks that had a closed volume-spurt candle of {FLUSH_MIN_MULT:g}x or more today, and the RSI Flush signals on their 10-minute candles '
-                f'(RSI 14 at 30 / 70 then back within 4 candles, volume 1.5x, then the break of the signal candle). Same rule as the RSI Flush table on /scanner. '
+                f'(RSI 14 crosses back above 30 / below 70, volume 1.5x the previous candle and the 50-candle average, then the break of the signal candle). Same rule as the RSI Flush table on /scanner. '
                 f'"After spurt" = the RSI Flush signal candle came at / after the stock\'s first spurt candle. PENDING = waiting for the break. Information only. '
                 f'Times are IST candle open. <a href="/spurt_flush.csv" target="_blank" rel="noopener">CSV</a> &middot; '
                 f'<a href="/spurt10" target="_blank" rel="noopener">Spurt10</a> &middot; <a href="/scanner" target="_blank" rel="noopener">Scanner (all RSI Flush)</a></div>'
