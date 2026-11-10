@@ -1992,6 +1992,11 @@ def run_once():
         spurt_wick.update(rows, now_ist)
     except Exception as _e:
         log.warning(f"spurt_wick failed: {_e}")
+    try:                                                            # ADDED 9 Nov: CHoCH UP / DOWN (PA Toolkit) on 20x+ spurt stocks, 5-min candles
+        import spurt_choch
+        spurt_choch.update(rows, now_ist)
+    except Exception as _e:
+        log.warning(f"spurt_choch failed: {_e}")
     rows.sort(key=lambda r: -r["multiple"])
     top = rows[:TOP_N]
     top_ids = {id(x) for x in top}
@@ -2492,6 +2497,14 @@ rows.forEach(function(r){b.appendChild(r);});});});});
 </script>"""
 
 
+def _chochset_html():
+    try:
+        import spurt_choch
+        return spurt_choch.section_html()
+    except Exception:
+        return ""
+
+
 def _wickset_html():
     try:
         import spurt_wick
@@ -2605,6 +2618,7 @@ th,td{{border:1px solid #ddd;padding:6px 8px;text-align:right;font-size:14px}}th
 <div class="w"><table class="sp"><tr><th>#</th><th>Symbol</th><th>Price</th><th>Day %</th><th>Candle</th><th>Candle %</th><th>Candle type</th>
 <th>Candle volume</th><th>{meta['sma_len']}-candle avg vol</th><th>Multiple</th><th><a href="/depth" target="_blank" rel="noopener" title="open the Bids / Offers page" style="color:#fff;text-decoration:underline">Bids %</a></th><th><a href="/depth" target="_blank" rel="noopener" title="open the Bids / Offers page" style="color:#fff;text-decoration:underline">Offers %</a></th><th>Day volume</th><th>Support zone ({ZONE_TF}m)</th><th>Resistance zone ({ZONE_TF}m)</th><th>Zone view</th></tr>{body}</table></div>
 {_link_html()}
+{_chochset_html()}
 {_wickset_html()}
 {_wick_html()}
 {_clean_html()}

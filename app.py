@@ -658,9 +658,28 @@ def spurt_sweep_csv():
     return _serve_csv("spurt_link.csv", "sweep_and_ob_signals_on_spurt_stocks.csv")
 
 
+@app.route("/spurt_choch.csv", methods=["GET"])
+def spurt_choch_csv():
+    return _serve_csv("spurt_choch.csv", "choch_on_spurt_stocks.csv")
+
+
 @app.route("/spurt_wick.csv", methods=["GET"])
 def spurt_wick_csv():
     return _serve_csv("spurt_wick.csv", "long_wick_spurt_candles.csv")
+
+
+@app.route("/check", methods=["GET"])
+def scanner_check_page():
+    try:
+        import spurt_flush
+        try:
+            tf = int(request.args.get("tf", "10"))
+        except Exception:
+            tf = 10
+        return spurt_flush.check_html(request.args.get("symbol", ""), tf)
+    except Exception:
+        log.exception("/check failed")
+        return "<p>Check page failed - see the logs.</p>", 500
 
 
 @app.route("/spurt_flush", methods=["GET"])
