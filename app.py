@@ -633,6 +633,21 @@ def spurt10_page():
     return _serve_html("spurt10.html")
 
 
+@app.route("/spurt_daily_follow", methods=["GET"])
+def spurt_daily_follow_page():
+    try:
+        import spurt_daily_follow
+        return spurt_daily_follow.page_html()
+    except Exception:
+        log.exception("/spurt_daily_follow failed")
+        return "<p>Follow-up page failed - see the logs.</p>", 500
+
+
+@app.route("/spurt_daily_follow.csv", methods=["GET"])
+def spurt_daily_follow_csv():
+    return _serve_csv("spurt_daily_follow.csv", "daily_spurt_follow_30d.csv")
+
+
 @app.route("/spurt_daily", methods=["GET"])
 def spurt_daily_page():
     try:
@@ -680,6 +695,21 @@ def scanner_check_page():
     except Exception:
         log.exception("/check failed")
         return "<p>Check page failed - see the logs.</p>", 500
+
+
+@app.route("/spurt_red", methods=["GET"])
+def spurt_red_page():
+    try:
+        import spurt_red
+        return spurt_red.page_html()
+    except Exception:
+        log.exception("/spurt_red failed")
+        return "<p>Red spurt page failed - see the logs.</p>", 500
+
+
+@app.route("/spurt_red.csv", methods=["GET"])
+def spurt_red_csv():
+    return _serve_csv("spurt_red.csv", "red_spurt_candles.csv")
 
 
 @app.route("/spurt_flush", methods=["GET"])

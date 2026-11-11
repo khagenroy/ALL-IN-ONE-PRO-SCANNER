@@ -244,6 +244,11 @@ def run_once():
         _send_alert(rows, meta)
     except Exception as e:
         log.warning(f"Spurt daily alert failed: {e}")
+    try:                                                      # ADDED 11 Nov: 30-trading-day follow-up of every daily spurt stock (page /spurt_daily_follow)
+        import spurt_daily_follow
+        spurt_daily_follow.run(today)
+    except Exception as e:
+        log.warning(f"Spurt daily follow-up failed: {e}")
     log.info(f"Spurt daily: {len(rows)} stocks at {MIN_MULT:g}x or more, {len(names)} liquid stocks scanned in {meta['took_s']}s")
     return True
 
