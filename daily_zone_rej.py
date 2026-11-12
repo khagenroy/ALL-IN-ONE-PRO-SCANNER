@@ -321,6 +321,9 @@ def _notify_weak(weak_rows):
         log.warning(f"daily_weak ntfy failed: {e}")
 
 
+AT_RES = '<b style="color:#c62828">AT RESISTANCE</b>'
+
+
 def _weak_html(with_gap=True):
     try:
         if not os.path.exists(WEAK_PATH):
@@ -332,7 +335,7 @@ def _weak_html(with_gap=True):
         rows = df[df["date"].astype(str) == day].to_dict("records")
         body = "".join(
             f"<tr><td>{sp._tvl(r['symbol'])}</td><td><b>{r['score']}/7</b></td><td>{str(r['flags']).replace('+', ' + ')}</td><td>{float(r['price']):.2f}</td>"
-            f"<td>{r['rsi']}</td><td>{r['ret20_pct']}%</td><td>{r['rel20_pct']}%</td><td>{'<b style=\"color:#c62828\">AT RESISTANCE</b>' if str(r['at_resistance']) == 'True' else '-'}</td></tr>"
+            f"<td>{r['rsi']}</td><td>{r['ret20_pct']}%</td><td>{r['rel20_pct']}%</td><td>{AT_RES if str(r['at_resistance']) == 'True' else '-'}</td></tr>"
             for r in rows) or '<tr><td colspan="8" style="text-align:center">No stock reached the score.</td></tr>'
         return (f'<h2 style="margin-top:{28 if with_gap else 6}px">Weak stocks on the daily chart &mdash; {day} ({len(rows)})</h2>'
                 f'<div class="m">One point for each: <b>STRUCT</b> lower high + lower low &middot; <b>TREND</b> close below the 20 EMA, which is below the 50 EMA &middot; <b>RSI</b> daily RSI under 50 &middot; '
