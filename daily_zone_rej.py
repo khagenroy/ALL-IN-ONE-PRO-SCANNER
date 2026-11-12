@@ -226,13 +226,18 @@ def _weak_score(df, mkt20, zones):
             "at_resistance": any(h[-1] >= z["lo"] * (1 - NEAR_PCT / 100.0) and l[-1] <= z["hi"] for z in res)}
 
 
-def run(today, names=None):
+_stats = {"txt": ""}
+
+
+def run(today, names=None, cache=None):
     """Called by spurt_daily.run_once after the daily scan. Uses the candles cached in sd._LAST. Never raises."""
     if not ON:
         return
     try:
-        cache = dict(getattr(sd, "_LAST", {}) or {})
+        cache = dict(cache if cache is not None else (getattr(sd, "_LAST", {}) or {}))
+        n_in = len(cache)
         rows, weak_rows = [], []
+        n_zone, best = 0, 0
         dfs = {}
         for sym, raw in cache.items():
             if names is not None and sym not in names:
@@ -251,7 +256,10 @@ def run(today, names=None):
                 rows.append(x)
             try:
                 if wk.get("zones") is not None:
+                    n_zone += 1
                     w = _weak_score(dfs[sym], mkt20, wk["zones"])
+                    if w:
+                        best = max(best, w["score"])
                     if w and w["score"] >= WEAK_MIN:
                         w.update(date=today.strftime("%Y-%m-%d"), symbol=sym)
                         weak_rows.append(w)
@@ -280,6 +288,8 @@ def run(today, names=None):
                 log.warning(f"daily_weak csv unreadable, writing today only: {e}")
         wdf.to_csv(WEAK_PATH + ".tmp", index=False)
         os.replace(WEAK_PATH + ".tmp", WEAK_PATH)
+        _stats["txt"] = (f"last run {datetime.now(IST).strftime('%H:%M')}: candles in {n_in}, usable {len(dfs)}, with daily zones {n_zone}, "
+                         f"pattern hits {len(rows)}, weak (score {WEAK_MIN}+) {len(weak_rows)}, highest score {best}")
         _notify(rows)
         _notify_weak(weak_rows)
         log.info(f"Daily weak: {len(weak_rows)} stocks with a weakness score of {WEAK_MIN} or more (market 20-day median {mkt20:+.1f}%)")
@@ -350,6 +360,8 @@ def _weak_html(with_gap=True):
 
 # ---------------------------------------------------------------------------------------- run it by hand (page link "Run now")
 _job = {"running": False, "msg": "", "at": ""}
+PER_STOCK_S = 45          # skip a stock whose candle request takes longer than this
+JOB_MAX_S = 25 * 60       # the whole read stops after this long and uses what it has
 
 
 def _job_body():
@@ -364,16 +376,28 @@ def _job_body():
                 names = [s_ for s_, _i in uni]
         except Exception:
             names = [s_ for s_, _i in uni]
-        done = 0
+        import time as _t
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as _TO
+        done, slow, t0, mine = 0, 0, _t.monotonic(), {}
         for sym in names:
+            if _t.monotonic() - t0 > JOB_MAX_S:                   # overall time cap: use what has been read so far
+                log.warning(f"daily_zone run-now: time cap reached at {done}/{len(names)} - using the candles read so far")
+                break
+            ex = ThreadPoolExecutor(max_workers=1)
             try:
-                sd._daily_candles(sym, sid_of[sym], today)
+                got = ex.submit(sd._daily_candles, sym, sid_of[sym], today).result(timeout=PER_STOCK_S)
+                if got is not None:
+                    mine[sym] = got
+            except _TO:
+                slow += 1                                         # one stuck request must not stop the whole scan: skip this stock
             except Exception:
                 pass
+            ex.shutdown(wait=False)
             done += 1
-            _job["msg"] = f"reading daily candles {done}/{len(names)}"
-        run(today, set(names))
-        _job["msg"] = f"finished {datetime.now(IST).strftime('%H:%M')} IST"
+            _job["msg"] = f"reading daily candles {done}/{len(names)} (skipped {slow} slow)  [{datetime.now(IST).strftime('%H:%M:%S')}]"
+        _job["msg"] = f"analysing {len(mine)} stocks ..."
+        run(today, set(names), cache=mine)
+        _job["msg"] = f"finished {datetime.now(IST).strftime('%H:%M')} IST - {len(mine)} of {len(names)} stocks read"
     except Exception as e:
         _job["msg"] = f"failed: {e}"
         log.warning(f"daily_zone run-now failed: {e}")
@@ -393,6 +417,8 @@ def start_now():
 
 def _runbar():
     st = (" &mdash; " + _job["msg"]) if (_job["running"] or _job["msg"]) else ""
+    if _stats["txt"]:
+        st += "<br>" + _stats["txt"]
     return f'<div class="m"><a href="/daily_zone/run" target="_blank" rel="noopener">Run the scan now</a> (about 5-10 minutes; refresh this page afterwards){st}</div>'
 
 
