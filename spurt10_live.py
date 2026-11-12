@@ -436,7 +436,7 @@ def _score_symbol(sym, sid):
                 zdf = zdf15
         except Exception as e:
             log.warning(f"Spurt10 {ZONE_TF}m zone candles failed for {sym}, using 10m: {e}")
-    sdf = df                                                          # ADDED 5 Nov: candles the Spurt SELL rule / tracker run on (15-min, like the TradingView indicator; spurt_sell_live.BASE_TF)
+    sdf = df                                                          # ADDED 5 Nov: candles the Spurt SELL rule / tracker run on (10-min since 11 Nov, like the TradingView indicator VS SELL; spurt_sell_live.BASE_TF)
     try:
         import spurt_sell_live as _ssl
         if _ssl.BASE_TF != SPURT_TF:
@@ -444,7 +444,7 @@ def _score_symbol(sym, sid):
             if _s15 is not None and len(_s15) >= _ssl.AVG_LEN + 3:
                 sdf = _s15
             else:
-                sdf = None                                            # not enough 15-min candles yet: no SELL check for this stock this cycle
+                sdf = None                                            # not enough BASE_TF candles yet: no SELL check for this stock this cycle
     except Exception as e:
         log.warning(f"Spurt10 SELL candles failed for {sym}: {e}")
     return {
@@ -1982,21 +1982,12 @@ def run_once():
                         _d.pop(_k, None)
             except Exception:
                 pass
-    try:                                                            # ADDED 8 Nov: RSI Flush on the stocks that spurted today (page /spurt_flush)
-        import spurt_flush
-        spurt_flush.update(rows, now_ist)
+    try:                                                            # FIRST in the cycle (11 Nov): red spurt candles page /spurt_red (+ highest-priority phone alert)
+        import spurt_red
+        spurt_red.update(rows, now_ist)
     except Exception as _e:
-        log.warning(f"spurt_flush failed: {_e}")
-    try:                                                            # ADDED 8 Nov: long-wick spurt candles (BUY lower wick / SELL upper wick), section on /spurt10
-        import spurt_wick
-        spurt_wick.update(rows, now_ist)
-    except Exception as _e:
-        log.warning(f"spurt_wick failed: {_e}")
-    try:                                                            # ADDED 9 Nov: CHoCH UP / DOWN (PA Toolkit) on 20x+ spurt stocks, 5-min candles
-        import spurt_choch
-        spurt_choch.update(rows, now_ist)
-    except Exception as _e:
-        log.warning(f"spurt_choch failed: {_e}")
+        log.warning(f"spurt_red failed: {_e}")
+    _hook_rows = [dict(_r) for _r in rows]                        # copy BEFORE the zones / candles are popped from the rows: the later hooks (flush, long wick, CHoCH) use it
     rows.sort(key=lambda r: -r["multiple"])
     top = rows[:TOP_N]
     top_ids = {id(x) for x in top}
@@ -2039,21 +2030,6 @@ def run_once():
                 pass
             if r.get("zone_src"):
                 r["zone_src"] = f"Section A {ztf}m"
-    try:
-        _send_alerts(rows, now_ist)
-    except Exception as e:
-        log.warning(f"Spurt10 alert step failed: {e}")
-    try:
-        _dsnap_meta["run"] = now_ist.strftime("%Y-%m-%d %H:%M:%S IST")
-        _dsnap_meta["spurt"] = {r["symbol"]: r["multiple"] for r in top}
-        _dsnap_meta["zone"] = {r["symbol"]: {"at": r.get("at_zone") or "", "sup": r.get("support") or "", "res": r.get("resistance") or ""} for r in top}
-        _save_depth_snapshot(_dsnap_meta["run"], _dsnap_meta["spurt"], _dsnap_meta["zone"])
-    except Exception:
-        pass
-    try:
-        _send_offers_alerts(top, now_ist)
-    except Exception as e:
-        log.warning(f"Spurt10 offers alert step failed: {e}")
     watch_view = []
     try:                                                            # ADDED: phone alert when a top-30 spurt stock is at a support / resistance zone
         try:
@@ -2074,6 +2050,44 @@ def run_once():
         _clean_alerts(now_ist)
     except Exception as e:
         log.warning(f"Spurt10 clean-rejection step failed: {e}")
+    # ---- order of the alerts in a cycle (11 Nov): 1 red spurt candles (above), 2 all rejections (zone, wick, clean, sweep / OB link), 3 the others (below)
+    try:                                                            # ADDED: link Section A OB_BUY / OB_SELL signals with spurt stocks (spurt_link.py)
+        import spurt_link
+        spurt_link.note_spurts(top, now_ist)
+        spurt_link.process(now_ist)
+    except Exception as e:
+        log.warning(f"Spurt link step failed: {e}")
+    # ---- 3: the other alerts
+    try:
+        _send_alerts(rows, now_ist)
+    except Exception as e:
+        log.warning(f"Spurt10 alert step failed: {e}")
+    try:
+        _dsnap_meta["run"] = now_ist.strftime("%Y-%m-%d %H:%M:%S IST")
+        _dsnap_meta["spurt"] = {r["symbol"]: r["multiple"] for r in top}
+        _dsnap_meta["zone"] = {r["symbol"]: {"at": r.get("at_zone") or "", "sup": r.get("support") or "", "res": r.get("resistance") or ""} for r in top}
+        _save_depth_snapshot(_dsnap_meta["run"], _dsnap_meta["spurt"], _dsnap_meta["zone"])
+    except Exception:
+        pass
+    try:
+        _send_offers_alerts(top, now_ist)
+    except Exception as e:
+        log.warning(f"Spurt10 offers alert step failed: {e}")
+    try:                                                            # ADDED 8 Nov: RSI Flush on the stocks that spurted today (page /spurt_flush)
+        import spurt_flush
+        spurt_flush.update(_hook_rows, now_ist)
+    except Exception as _e:
+        log.warning(f"spurt_flush failed: {_e}")
+    try:                                                            # ADDED 8 Nov: long-wick spurt candles (BUY lower wick / SELL upper wick), section on /spurt10
+        import spurt_wick
+        spurt_wick.update(_hook_rows, now_ist)
+    except Exception as _e:
+        log.warning(f"spurt_wick failed: {_e}")
+    try:                                                            # ADDED 9 Nov: CHoCH UP / DOWN (PA Toolkit) on 20x+ spurt stocks, 5-min candles
+        import spurt_choch
+        spurt_choch.update(_hook_rows, now_ist)
+    except Exception as _e:
+        log.warning(f"spurt_choch failed: {_e}")
     try:
         _engulf_alerts(now_ist)
     except Exception as e:
@@ -2081,12 +2095,6 @@ def run_once():
     _pat_follow(now_ist)
     _room_update(top, quotes, now_ist)
     _state_save()
-    try:                                                            # ADDED: link Section A OB_BUY / OB_SELL signals with spurt stocks (spurt_link.py)
-        import spurt_link
-        spurt_link.note_spurts(top, now_ist)
-        spurt_link.process(now_ist)
-    except Exception as e:
-        log.warning(f"Spurt link step failed: {e}")
     try:                                                            # ADDED: spurt -> red candle SELL signals (own page, own ntfy topic)
         import spurt_sell_live
         _news_purge_tracker(_news.get("syms") if (NEWS_FILTER_ON and NEWS_LEAVE_OUT) else None)
