@@ -117,6 +117,9 @@ def _to_date(ts):
     return datetime.fromtimestamp(t, IST).date()
 
 
+_LAST = {}     # ADDED 12 Nov: the daily candles of the 16:45 scan, kept for daily_zone_rej (cleared after it ran)
+
+
 def _daily_candles(sym, sid, today):
     """Daily candles up to and including today (oldest first, with a date column 'd'), or None. Never raises."""
     frm = (today - timedelta(days=HIST_DAYS)).strftime("%Y-%m-%d")
@@ -137,6 +140,8 @@ def _daily_candles(sym, sid, today):
     df = df.dropna()
     df["d"] = [_to_date(t) for t in df["timestamp"]]
     df = df.sort_values("d").reset_index(drop=True)
+    if len(df):
+        _LAST[sym] = df
     return df if len(df) else None
 
 
@@ -249,6 +254,11 @@ def run_once():
         spurt_daily_follow.run(today)
     except Exception as e:
         log.warning(f"Spurt daily follow-up failed: {e}")
+    try:                                                      # ADDED 12 Nov: daily candle at a daily zone - sweep / OBH / rejections (page /daily_zone)
+        import daily_zone_rej
+        daily_zone_rej.run(today, set(names))
+    except Exception as e:
+        log.warning(f"Daily zone scan failed: {e}")
     log.info(f"Spurt daily: {len(rows)} stocks at {MIN_MULT:g}x or more, {len(names)} liquid stocks scanned in {meta['took_s']}s")
     return True
 

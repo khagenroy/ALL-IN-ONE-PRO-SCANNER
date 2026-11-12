@@ -93,6 +93,17 @@ def _feed_read(n=100):
     return out
 
 
+def _feed_ntfy(url, kw, note):
+    h = kw.get("headers") or {}
+    d = kw.get("data")
+    if isinstance(d, bytes):
+        d = d.decode("utf-8", "replace")
+    title = h.get("Title", "Alert")
+    if note:
+        title = "[%s] %s" % (note, title)
+    _feed_add(title, d or "", h.get("Priority", "default"))
+
+
 def _capture_ntfy():
     """Every phone alert the scanners send to ntfy is also written to the feed, so people without the ntfy app can read it on the web page."""
     try:
@@ -102,14 +113,29 @@ def _capture_ntfy():
         orig = requests.post
 
         def post(url, *a, **kw):
-            resp = orig(url, *a, **kw)
+            is_ntfy = isinstance(url, str) and url.startswith("https://ntfy.sh/")
             try:
-                if isinstance(url, str) and url.startswith("https://ntfy.sh/") and getattr(resp, "status_code", 999) < 300:
-                    h = kw.get("headers") or {}
-                    d = kw.get("data")
-                    if isinstance(d, bytes):
-                        d = d.decode("utf-8", "replace")
-                    _feed_add(h.get("Title", "Alert"), d or "", h.get("Priority", "default"))
+                resp = orig(url, *a, **kw)
+            except Exception as e:
+                if is_ntfy:
+                    _feed_ntfy(url, kw, "NOT SENT (%s)" % type(e).__name__)
+                    try:
+                        print("[ntfy] send failed:", e, flush=True)
+                    except Exception:
+                        pass
+                raise
+            try:
+                if is_ntfy:
+                    sc = getattr(resp, "status_code", 999)
+                    if sc < 300:
+                        _feed_ntfy(url, kw, "")
+                    else:
+                        # ntfy refused it (e.g. 429 = daily limit): still keep it on the Alerts page and say why in the log
+                        _feed_ntfy(url, kw, "PHONE PUSH REFUSED (HTTP %s)" % sc)
+                        try:
+                            print("[ntfy] refused HTTP", sc, (getattr(resp, "text", "") or "")[:200], flush=True)
+                        except Exception:
+                            pass
             except Exception:
                 pass
             return resp
@@ -548,7 +574,7 @@ def add_menu(app):
         return
     app.config["AG_RESTRICT"] = True
     GROUPS = [
-        ("Spurt scanners", ["/spurt10", "/spurt10_history", "/zone_touch", "/spurt_daily", "/spurt_daily_follow", "/daily_rej", "/spurt_flush", "/spurt_red", "/spurt_sweep", "/spurt_sell", "/spurt_paper", "/spurtpb", "/volspurt", "/spz"]),
+        ("Spurt scanners", ["/spurt10", "/spurt10_history", "/zone_touch", "/spurt_daily", "/spurt_daily_follow", "/daily_rej", "/daily_zone", "/spurt_flush", "/spurt_red", "/spurt_sweep", "/spurt_sell", "/spurt_paper", "/spurtpb", "/volspurt", "/spz"]),
         ("Spurt10 sections", ["/spurt10_main", "/spurt10_early", "/spurt10_ob", "/spurt10_wick", "/spurt10_rejres", "/spurt10_rejsup", "/spurt10_engbull", "/spurt10_engbear", "/spurt10_room", "/spurt10_roomdown", "/spurt10_zsell", "/spurt10_upper", "/spurt10_gap", "/spurt10_orb", "/spurt10_watch", "/spurt10_news", "/spurt10_thin", "/depth"]),
         ("SMA / Trend", ["/sma200", "/sma200now", "/trendnow"]),
         ("Bot / Deals", ["/botlog", "/botpnl", "/deals"]),
