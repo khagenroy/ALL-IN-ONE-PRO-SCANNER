@@ -757,6 +757,16 @@ def daily_zone_csv():
     return _serve_csv("daily_zone.csv", "daily_candle_at_daily_zone.csv")
 
 
+@app.route("/daily_zone/run", methods=["GET"])
+def daily_zone_run():
+    try:
+        import daily_zone_rej
+        return daily_zone_rej.start_now() + '<p><a href="/daily_zone">Back to /daily_zone</a> &middot; <a href="/daily_weak">Weak stocks</a></p>'
+    except Exception:
+        log.exception("/daily_zone/run failed")
+        return "<p>Could not start - see the logs.</p>", 500
+
+
 @app.route("/daily_weak", methods=["GET"])
 def daily_weak_page():
     try:

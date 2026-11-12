@@ -348,6 +348,54 @@ def _weak_html(with_gap=True):
         return ""
 
 
+# ---------------------------------------------------------------------------------------- run it by hand (page link "Run now")
+_job = {"running": False, "msg": "", "at": ""}
+
+
+def _job_body():
+    try:
+        now = datetime.now(IST)
+        today = now.date()
+        uni = sp._load_universe()
+        sid_of = dict(uni)
+        try:
+            names = sd._liquid(sd._fetch_quotes(uni))
+            if len(names) < 50:
+                names = [s_ for s_, _i in uni]
+        except Exception:
+            names = [s_ for s_, _i in uni]
+        done = 0
+        for sym in names:
+            try:
+                sd._daily_candles(sym, sid_of[sym], today)
+            except Exception:
+                pass
+            done += 1
+            _job["msg"] = f"reading daily candles {done}/{len(names)}"
+        run(today, set(names))
+        _job["msg"] = f"finished {datetime.now(IST).strftime('%H:%M')} IST"
+    except Exception as e:
+        _job["msg"] = f"failed: {e}"
+        log.warning(f"daily_zone run-now failed: {e}")
+    finally:
+        _job["running"] = False
+
+
+def start_now():
+    """Starts the daily-candle scan in the background (the same job that normally runs after 16:45). Returns a short status text."""
+    import threading
+    if _job["running"]:
+        return "Already running: " + _job["msg"]
+    _job.update(running=True, msg="starting", at=datetime.now(IST).strftime("%H:%M"))
+    threading.Thread(target=_job_body, daemon=True, name="daily-zone-now").start()
+    return "Started. It reads every liquid stock's daily candles (about 5-10 minutes), then fills /daily_zone and /daily_weak."
+
+
+def _runbar():
+    st = (" &mdash; " + _job["msg"]) if (_job["running"] or _job["msg"]) else ""
+    return f'<div class="m"><a href="/daily_zone/run" target="_blank" rel="noopener">Run the scan now</a> (about 5-10 minutes; refresh this page afterwards){st}</div>'
+
+
 def _nav(cur):
     items = [("", "All patterns", "/daily_zone"), ("SWEEP", "Sweep", "/daily_zone?p=SWEEP"), ("OBH", "Order-block hit", "/daily_zone?p=OBH"),
              ("WICK", "Wick rejection", "/daily_zone?p=WICK"), ("CLEAN", "Clean rejection", "/daily_zone?p=CLEAN"), ("ENGULF", "Engulfing", "/daily_zone?p=ENGULF"),
@@ -367,7 +415,7 @@ def _head(title):
 def weak_page_html():
     """Separate page /daily_weak: the weak-stock (sell watch-list) table only."""
     try:
-        return _head("Weak stocks - daily") + _nav("WEAK") + (_weak_html(False) or "<p>Nothing yet - the list is made once a day after 16:45 IST.</p>") + "</body></html>"
+        return _head("Weak stocks - daily") + _nav("WEAK") + _runbar() + (_weak_html(False) or "<p>Nothing yet - the list is made once a day after 16:45 IST.</p>") + "</body></html>"
     except Exception as e:
         log.warning(f"daily_weak page failed: {e}")
         return "<p>The page could not be built - see the logs.</p>"
@@ -397,7 +445,7 @@ def page_html(pattern=""):
             f"<td>{float(r['price']):.2f}</td><td>{pc(r['day_chg_pct'])}</td><td>{r['zone']}</td><td><b>{r['patterns'].replace('+', ' + ')}</b></td>"
             f"<td>{float(r['wick_pct']):.0f}%</td><td>{r['vol_x']}x</td><td>{r['vol_prev_x']}x</td></tr>" for r in rows) \
             or '<tr><td colspan="9" style="text-align:center">Nothing yet - the list is made once a day after 16:45 IST.</td></tr>'
-        return (head + _nav(pattern) + f'<h2>Daily candle at a daily support / resistance zone{" - " + pattern if pattern else ""} &mdash; {day or "-"} ({len(rows)})</h2>'
+        return (head + _nav(pattern) + _runbar() + f'<h2>Daily candle at a daily support / resistance zone{" - " + pattern if pattern else ""} &mdash; {day or "-"} ({len(rows)})</h2>'
                 '<div class="m">Every liquid stock whose finished DAILY candle is at a daily zone and shows: <b>SWEEP</b> (took out the 20-day high/low and closed back), '
                 '<b>OBH</b> (order-block hit: went into the zone and closed on its own side), <b>WICK</b> (wick 70% or more, right colour), <b>CLEAN</b> (wick 70% or more, almost no wick on the other side, volume above the previous day), '
                 '<b>ENGULF</b> (engulfing candle with volume above the previous day). Resistance needs a red candle, support a green one. Made once a day after 16:45 IST. Information only. '
