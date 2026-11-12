@@ -746,7 +746,7 @@ def daily_rej_csv():
 def daily_zone_page():
     try:
         import daily_zone_rej
-        return daily_zone_rej.page_html()
+        return daily_zone_rej.page_html(request.args.get("p", ""))
     except Exception:
         log.exception("/daily_zone failed")
         return "<p>Daily zone page failed - see the logs.</p>", 500
@@ -755,6 +755,21 @@ def daily_zone_page():
 @app.route("/daily_zone.csv", methods=["GET"])
 def daily_zone_csv():
     return _serve_csv("daily_zone.csv", "daily_candle_at_daily_zone.csv")
+
+
+@app.route("/daily_weak", methods=["GET"])
+def daily_weak_page():
+    try:
+        import daily_zone_rej
+        return daily_zone_rej.weak_page_html()
+    except Exception:
+        log.exception("/daily_weak failed")
+        return "<p>Weak stock page failed - see the logs.</p>", 500
+
+
+@app.route("/daily_weak.csv", methods=["GET"])
+def daily_weak_csv():
+    return _serve_csv("daily_weak.csv", "daily_weak_stocks.csv")
 
 
 @app.route("/invest", methods=["GET"])
