@@ -23,12 +23,14 @@ IST = sp.IST
 
 ON = True
 RED_MIN_MULT = 20.0           # CHANGED 11 Nov: 20x (was 10x). The red candle volume must be this many x the 50-candle average
+RSI_MAX = 30.0                # ADDED 12 Nov: the RSI(14) of the 5-minute closes, at the close of the red spurt candle, must be BELOW this (0 = switch the RSI rule off)
+RSI_LEN = 14
 NTFY_ALERT = True             # phone alert, highest priority
 NTFY_PRIORITY = "urgent"      # ntfy: min / low / default / high / urgent (urgent = the highest)
 
 PATH = os.path.join(sp.RESULTS_DIR, "spurt_red.csv")
 STATE = os.path.join(sp.RESULTS_DIR, "spurt_red_state.json")
-COLS = ["date", "candle", "alert_time", "symbol", "price", "candle_pct", "spurt_x", "upper_wick", "lower_wick", "vol_prev_x", "day_chg_pct", "at_zone", "support", "resistance",
+COLS = ["date", "candle", "alert_time", "symbol", "price", "candle_pct", "spurt_x", "upper_wick", "lower_wick", "vol_prev_x", "day_chg_pct", "rsi", "at_zone", "support", "resistance",
         "mv_10m", "mv_30m", "mv_60m", "best_pct", "worst_pct", "last_pct"]
 _st = {"date": "", "rows": []}
 
@@ -79,6 +81,26 @@ def _notify(rows):
         log.warning(f"spurt_red ntfy failed: {e}")
 
 
+def _rsi_at_close(d5, as_of):
+    """Wilder RSI(RSI_LEN) of the closed 5-minute candles (the last one = the spurt candle), or None. Never raises."""
+    try:
+        import live_scanner as ls
+        d = ls.drop_forming_bars(d5, 5, as_of)
+        cl = d["close"].to_numpy(dtype=float)
+        if len(cl) < RSI_LEN + 2:
+            return None
+        diff = cl[1:] - cl[:-1]
+        up = diff.clip(min=0.0)
+        dn = (-diff).clip(min=0.0)
+        au, ad = up[:RSI_LEN].mean(), dn[:RSI_LEN].mean()
+        for i in range(RSI_LEN, len(diff)):
+            au = (au * (RSI_LEN - 1) + up[i]) / RSI_LEN
+            ad = (ad * (RSI_LEN - 1) + dn[i]) / RSI_LEN
+        return 100.0 if ad == 0 else round(100.0 - 100.0 / (1.0 + au / ad), 1)
+    except Exception:
+        return None
+
+
 def update(rows, now_ist):
     """Called by spurt10_live.run_once with the scored rows (before the zones are popped). Never raises."""
     if not ON:
@@ -99,6 +121,11 @@ def update(rows, now_ist):
                 t = r["candle"]
                 if any(x["symbol"] == r["symbol"] and x["candle"] == t for x in _st["rows"]):
                     continue
+                rsi = None
+                if RSI_MAX > 0:                                     # the RSI must be below RSI_MAX; no candles to read it = not listed (cannot be checked)
+                    rsi = _rsi_at_close(r.get("_df5"), r.get("_as_of"))
+                    if rsi is None or not rsi < RSI_MAX:
+                        continue
                 rng = h - l
                 zf = {}
                 try:
@@ -110,7 +137,7 @@ def update(rows, now_ist):
                 row.update(date=today_s, candle=t, alert_time=now_ist.strftime("%H:%M"), symbol=r["symbol"], price=round(float(r["price"]), 2),
                           candle_pct=round((c / o - 1.0) * 100.0, 2), spurt_x=round(float(r["multiple"]), 2),
                           upper_wick=(round((h - max(o, c)) / rng * 100.0, 0) if rng > 0 else ""), lower_wick=(round((min(o, c) - l) / rng * 100.0, 0) if rng > 0 else ""),
-                          vol_prev_x=(round(float(r["candle_vol"]) / prev[4], 2) if prev and prev[4] else ""), day_chg_pct=r.get("day_chg_pct", ""),
+                          vol_prev_x=(round(float(r["candle_vol"]) / prev[4], 2) if prev and prev[4] else ""), day_chg_pct=r.get("day_chg_pct", ""), rsi=("" if rsi is None else rsi),
                           at_zone=zf.get("at_zone", ""), support=zf.get("support", ""), resistance=zf.get("resistance", ""))
                 _st["rows"].append(row)
                 new.append(row)
@@ -159,14 +186,14 @@ def page_html():
             f"<tr><td>{r['candle']}</td><td>{r['alert_time']}</td><td>{sp._tvl(r['symbol'])}</td><td>{float(r['price']):.2f}</td><td>{pc(r['candle_pct'])}</td>"
             f"<td><b>{float(r['spurt_x']):.1f}x</b></td><td>{'-' if r['upper_wick'] == '' else format(float(r['upper_wick']), '.0f') + '%'}</td>"
             f"<td>{'-' if r['lower_wick'] == '' else format(float(r['lower_wick']), '.0f') + '%'}</td><td>{'-' if r['vol_prev_x'] == '' else str(r['vol_prev_x']) + 'x'}</td>"
-            f"<td>{pc(r['day_chg_pct'])}</td><td>{r['at_zone'] or '-'}</td><td>{pc(r['mv_10m'])}</td><td>{pc(r['mv_30m'])}</td><td>{pc(r['mv_60m'])}</td>"
+            f"<td>{pc(r['day_chg_pct'])}</td><td>{'-' if r.get('rsi', '') in ('', None) else r['rsi']}</td><td>{r['at_zone'] or '-'}</td><td>{pc(r['mv_10m'])}</td><td>{pc(r['mv_30m'])}</td><td>{pc(r['mv_60m'])}</td>"
             f"<td>{pc(r['best_pct'])}</td><td>{pc(r['worst_pct'])}</td><td>{pc(r['last_pct'])}</td></tr>"
             for r in reversed(rows)) or '<tr><td colspan="17" style="text-align:center">No red spurt candle yet today.</td></tr>'
         return (head + f'<h2>Red spurt candles &mdash; today ({len(rows)})</h2>'
-                f'<div class="m">Stocks whose closed 5-minute volume-spurt candle ({RED_MIN_MULT:g}x or more of the 50-candle average) is a <b style="color:#c62828">RED</b> candle (close below open). '
+                f'<div class="m">Stocks whose closed 5-minute volume-spurt candle ({RED_MIN_MULT:g}x or more of the 50-candle average) is a <b style="color:#c62828">RED</b> candle (close below open) and the RSI(14) of the 5-minute closes is BELOW {RSI_MAX:g}. '
                 f'Phone alert with the highest priority for each. Moves are the plain price change from the spurt candle close (+ up, - down). Information only. '
                 f'<a href="/spurt_red.csv" target="_blank" rel="noopener">CSV (all days)</a> &middot; <a href="/spurt10" target="_blank" rel="noopener">Spurt10</a></div>'
-                '<table><tr><th>Candle</th><th>Alert</th><th>Symbol</th><th>Price</th><th>Candle</th><th>Spurt</th><th>Upper wick</th><th>Lower wick</th><th>Vol vs prev</th><th>Day</th>'
+                '<table><tr><th>Candle</th><th>Alert</th><th>Symbol</th><th>Price</th><th>Candle</th><th>Spurt</th><th>Upper wick</th><th>Lower wick</th><th>Vol vs prev</th><th>Day</th><th>RSI</th>'
                 '<th>At zone</th><th>10m</th><th>30m</th><th>60m</th><th>Best</th><th>Worst</th><th>Last</th></tr>' + body + '</table></body></html>')
     except Exception as e:
         log.warning(f"spurt_red page failed: {e}")

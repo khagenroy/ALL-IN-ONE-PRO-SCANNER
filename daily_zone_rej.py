@@ -99,14 +99,25 @@ def _eval(df, zones, close_prev_avg):
 OC = ["open", "high", "low", "close", "volume"]
 
 
-def _clean(raw, today):
-    """Cleaned daily candles (oldest first, last row = today) or None."""
+_why = {}
+
+
+def _clean(raw, today, q=None):
+    """Cleaned daily candles (oldest first, last row = today) or None. If Dhan's daily history has no candle for today yet,
+    today's candle is built from the live quote q (open / high / low / last price / volume) - the same way the daily spurt scan does."""
     if raw is None or len(raw) < sd.MIN_HISTORY + 2:
+        _why["short_or_none"] = _why.get("short_or_none", 0) + 1
         return None
     df = raw[OC + ["d"]].reset_index(drop=True)
-    if df["d"].iloc[-1] != today:
-        return None
     df[OC] = df[OC].astype(float)
+    if df["d"].iloc[-1] != today:
+        k = str(df["d"].iloc[-1])
+        _why["last_candle_" + k] = _why.get("last_candle_" + k, 0) + 1
+        if q is None or df["d"].iloc[-1] > today:
+            _why["no_today_and_no_quote"] = _why.get("no_today_and_no_quote", 0) + 1
+            return None
+        df = pd.concat([df, pd.DataFrame([{"open": q["open"], "high": q["high"], "low": q["low"], "close": q["px"], "volume": q["vol"], "d": today}])],
+                       ignore_index=True)
     cl = df["close"].to_numpy(dtype=float)
     with np.errstate(divide="ignore", invalid="ignore"):
         chg = np.abs(cl[1:] / cl[:-1] - 1.0)
@@ -229,7 +240,7 @@ def _weak_score(df, mkt20, zones):
 _stats = {"txt": ""}
 
 
-def run(today, names=None, cache=None):
+def run(today, names=None, cache=None, quotes=None):
     """Called by spurt_daily.run_once after the daily scan. Uses the candles cached in sd._LAST. Never raises."""
     if not ON:
         return
@@ -242,7 +253,7 @@ def run(today, names=None, cache=None):
         for sym, raw in cache.items():
             if names is not None and sym not in names:
                 continue
-            d_ = _clean(raw, today)
+            d_ = _clean(raw, today, (quotes or {}).get(sym))
             if d_ is not None and len(d_) >= 25:
                 dfs[sym] = d_
         r20 = [float(d_["close"].iloc[-1] / d_["close"].iloc[-21] - 1.0) * 100.0 for d_ in dfs.values()]
@@ -289,7 +300,9 @@ def run(today, names=None, cache=None):
         wdf.to_csv(WEAK_PATH + ".tmp", index=False)
         os.replace(WEAK_PATH + ".tmp", WEAK_PATH)
         _stats["txt"] = (f"last run {datetime.now(IST).strftime('%H:%M')}: candles in {n_in}, usable {len(dfs)}, with daily zones {n_zone}, "
-                         f"pattern hits {len(rows)}, weak (score {WEAK_MIN}+) {len(weak_rows)}, highest score {best}")
+                         f"pattern hits {len(rows)}, weak (score {WEAK_MIN}+) {len(weak_rows)}, highest score {best}"
+                         + (f"; skipped: {dict(sorted(_why.items(), key=lambda kv: -kv[1])[:4])}" if _why else "") + (f"; quotes {len(quotes)}" if quotes else "; no quotes"))
+        _why.clear()
         _notify(rows)
         _notify_weak(weak_rows)
         log.info(f"Daily weak: {len(weak_rows)} stocks with a weakness score of {WEAK_MIN} or more (market 20-day median {mkt20:+.1f}%)")
@@ -370,11 +383,14 @@ def _job_body():
         today = now.date()
         uni = sp._load_universe()
         sid_of = dict(uni)
+        quotes = None
         try:
-            names = sd._liquid(sd._fetch_quotes(uni))
+            quotes = sd._fetch_quotes(uni)
+            names = sd._liquid(quotes)
             if len(names) < 50:
                 names = [s_ for s_, _i in uni]
-        except Exception:
+        except Exception as e:
+            log.warning(f"daily_zone run-now: no quotes ({e}) - using the daily candles only")
             names = [s_ for s_, _i in uni]
         import time as _t
         from concurrent.futures import ThreadPoolExecutor, TimeoutError as _TO
@@ -396,7 +412,7 @@ def _job_body():
             done += 1
             _job["msg"] = f"reading daily candles {done}/{len(names)} (skipped {slow} slow)  [{datetime.now(IST).strftime('%H:%M:%S')}]"
         _job["msg"] = f"analysing {len(mine)} stocks ..."
-        run(today, set(names), cache=mine)
+        run(today, set(names), cache=mine, quotes=quotes)
         _job["msg"] = f"finished {datetime.now(IST).strftime('%H:%M')} IST - {len(mine)} of {len(names)} stocks read"
     except Exception as e:
         _job["msg"] = f"failed: {e}"

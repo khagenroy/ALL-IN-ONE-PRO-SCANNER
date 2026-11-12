@@ -256,7 +256,7 @@ def run_once():
         log.warning(f"Spurt daily follow-up failed: {e}")
     try:                                                      # ADDED 12 Nov: daily candle at a daily zone - sweep / OBH / rejections (page /daily_zone)
         import daily_zone_rej
-        daily_zone_rej.run(today, set(names))
+        daily_zone_rej.run(today, set(names), quotes=quotes)
     except Exception as e:
         log.warning(f"Daily zone scan failed: {e}")
     log.info(f"Spurt daily: {len(rows)} stocks at {MIN_MULT:g}x or more, {len(names)} liquid stocks scanned in {meta['took_s']}s")
