@@ -6,8 +6,8 @@ Links the main scanner's Section A signals - Strategy 2 order-block MITIGATION (
   for a BUY signal the LOWER wick is REJ_MIN_PCT (70) % or more of the candle's high-low range, for a SELL signal the UPPER wick is.
   The signal candle is read from Dhan (one 5-minute download per new signal, merged to 10 minutes); the wick % is written to the CSV.
 
-  A stock counts as a "spurt stock" for the day once it has reached SPURT_LINK_MULT (default 10) times its 50-candle volume
-  average in the top-30 spurt table. When Section A then fires OB_BUY / OB_SELL on that stock, you get ONE phone alert
+  A stock counts as a "spurt stock" for the day once it has reached SPURT_LINK_MULT (default 10, for OB_BUY / OB_SELL) or SPURT_SWEEP_MULT
+  (default 3, for SWEEP_BUY / SWEEP_SELL - CHANGED 12 Nov) times its 50-candle volume average in the top-30 spurt table. When Section A then fires OB_BUY / OB_SELL on that stock, you get ONE phone alert
   (same NTFY_TOPIC as the other scanner alerts) and the signal is listed in a table on the /spurt10 page.
 
 It is read-only: it only READS results/latest_signals.csv (the Section A signals the scanner already writes) and the spurt table,
@@ -33,7 +33,9 @@ log = logging.getLogger("spurt_link")
 IST = ZoneInfo("Asia/Kolkata")
 
 ON = os.environ.get("SPURT_LINK", "true").strip().lower() == "true"
-LINK_MULT = float(os.environ.get("SPURT_LINK_MULT", "10") or "10")
+LINK_MULT = float(os.environ.get("SPURT_LINK_MULT", "10") or "10")        # OB_BUY / OB_SELL need a stock at this multiple today
+SWEEP_MULT = float(os.environ.get("SPURT_SWEEP_MULT", "3") or "3")        # CHANGED 12 Nov: SWEEP_BUY / SWEEP_SELL need only 3x (was 10x)
+MIN_MULT = min(LINK_MULT, SWEEP_MULT)                                      # stocks are remembered from this multiple; each signal then checks its own limit
 _DEF_SIGNALS = "OB_BUY,OB_SELL,SWEEP_BUY,SWEEP_SELL"            # CHANGED 8 Nov: sweeps added
 SIGNALS = {s.strip().upper() for s in (os.environ.get("SPURT_LINK_SIGNALS", _DEF_SIGNALS) or _DEF_SIGNALS).split(",") if s.strip()}
 REJ_MIN_PCT = 70.0            # ADDED 8 Nov: the signal candle's rejection wick (lower for BUY, upper for SELL) must be this % of the candle range or more
@@ -66,7 +68,7 @@ def _roll(now_ist):
         if os.path.exists(SPURT_HIST):
             h = pd.read_csv(SPURT_HIST)
             d = h["date"].astype(str).str.replace(r"^(\d\d)-(\d\d)-(\d{4})$", r"\3-\2-\1", regex=True)
-            h = h[(d == today) & (h["multiple"] >= LINK_MULT)]
+            h = h[(d == today) & (h["multiple"] >= MIN_MULT)]
             for r in h.sort_values("candle").itertuples():
                 cur = _st["seen"].get(r.symbol)
                 if cur is None:
@@ -89,7 +91,7 @@ def note_spurts(top, now_ist):
     with _lock:
         _roll(now_ist)
         for r in top:
-            if r.get("multiple", 0) >= LINK_MULT:
+            if r.get("multiple", 0) >= MIN_MULT:
                 cur = _st["seen"].get(r["symbol"])
                 if cur is None:
                     _st["seen"][r["symbol"]] = {"mult": float(r["multiple"]), "at": str(r.get("candle", ""))}
@@ -170,6 +172,8 @@ def process(now_ist=None):
             if r.symbol not in _st["seen"] or key in _st["done"]:
                 continue
             sp = _st["seen"][r.symbol]
+            if sp["mult"] < (SWEEP_MULT if str(r.signal).upper().startswith("SWEEP") else LINK_MULT):
+                continue                                     # this stock has not reached the multiple this kind of signal needs (not marked done: a bigger spurt later counts)
             is_buy = str(r.signal).upper().endswith("BUY")
             ci = _candle_info(r.symbol, str(getattr(r, "timestamp", "")), is_buy)
             wp = None if ci is None else ci["wick"]
@@ -271,7 +275,7 @@ def sweep_page_html(now_ist=None):
     head = ('<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="60">'
             '<title>Sweep signals on spurt stocks</title><style>body{font-family:Arial,sans-serif;margin:12px;background:#fafafa}table{border-collapse:collapse;width:100%;background:#fff}'
             'th,td{border:1px solid #ddd;padding:6px 8px;text-align:right;font-size:14px}th{background:#222;color:#fff;position:sticky;top:0}.m{color:#555;font-size:13px;margin:6px 0 12px}</style></head><body>')
-    intro = (f'<h2>Sweep signals on volume-spurt stocks (&ge; {LINK_MULT:g}x today)</h2><div class="m">Section A Strategy 1 (10-min): SWEEP_BUY / SWEEP_SELL fired on a stock that has reached {LINK_MULT:g}x or more today, '
+    intro = (f'<h2>Sweep signals on volume-spurt stocks (&ge; {SWEEP_MULT:g}x today)</h2><div class="m">Section A Strategy 1 (10-min): SWEEP_BUY / SWEEP_SELL fired on a stock that has reached {SWEEP_MULT:g}x or more today, '
              f'and only when the signal candle is a rejection candle (lower wick for BUY / upper wick for SELL of {REJ_MIN_PCT:g}% or more of the candle range; the candle must be GREEN for BUY and RED for SELL) that is also a RED candle (close below open). '
              f'<b>Volume</b> = the signal candle\'s volume as a multiple of the previous candle and of the 50-candle average; a tick means both are {VOL_MULT:g}x or more '
              f'({"only ticked signals are listed" if VOL_FILTER else "shown for information, the signal is listed either way"}). A phone alert is sent for each. Green = BUY, red = SELL. '
