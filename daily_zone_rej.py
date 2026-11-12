@@ -162,7 +162,7 @@ def _one(sym, raw, today, df=None, weak=None):
 # ------------------------------------------------------------------------------------------------ WEAK STOCK SCORE (ADDED 12 Nov)
 WEAK_PATH = os.path.join(sd.RESULTS_DIR, "daily_weak.csv")
 WEAK_COLS = ["date", "symbol", "price", "score", "flags", "rsi", "ret20_pct", "rel20_pct", "at_resistance", "day_chg_pct"]
-WEAK_MIN = 4                 # listed from this score (0-7)
+WEAK_MIN = 6                 # listed from this score (0-7): 6 or 7 only (changed 12 Nov, was 4)
 WEAK_REL = -5.0              # 20-day return at least this many points BELOW the market (median of all stocks)
 
 
@@ -276,8 +276,13 @@ def run(today, names=None, cache=None, quotes=None):
                         weak_rows.append(w)
             except Exception as e:
                 log.warning(f"weak score {sym} failed: {e}")
-        order = {"SWEEP": 0, "CLEAN": 1, "ENGULF": 2, "WICK": 3, "OBH": 4}
-        rows.sort(key=lambda r: (min(order.get(p, 9) for p in r["patterns"].split("+")), -len(r["patterns"].split("+")), r["symbol"]))
+        W = {"CLEAN": 4, "WICK": 3, "ENGULF": 3, "SWEEP": 2, "OBH": 1}        # a rejection candle counts more than a sweep, a sweep more than a plain zone hit
+        wt = lambda r: sum(W.get(p, 0) for p in r["patterns"].split("+"))
+        best_by = {}
+        for r in rows:                                                       # a stock that touches two zones is listed once, with its strongest zone
+            if r["symbol"] not in best_by or wt(r) > wt(best_by[r["symbol"]]):
+                best_by[r["symbol"]] = r
+        rows = sorted(best_by.values(), key=lambda r: (-wt(r), -float(r["wick_pct"] or 0), r["symbol"]))
         today_s = today.strftime("%Y-%m-%d")
         df = pd.DataFrame(rows, columns=COLS)
         os.makedirs(sd.RESULTS_DIR, exist_ok=True)
@@ -289,7 +294,7 @@ def run(today, names=None, cache=None, quotes=None):
                 log.warning(f"daily_zone csv unreadable, writing today only: {e}")
         df.to_csv(PATH + ".tmp", index=False)
         os.replace(PATH + ".tmp", PATH)
-        weak_rows.sort(key=lambda w: (-w["score"], not w["at_resistance"], w["symbol"]))
+        weak_rows.sort(key=lambda w: (-w["score"], not w["at_resistance"], w["rel20_pct"], w["symbol"]))      # best first: most signs, then at a resistance zone, then the weakest against the market
         wdf = pd.DataFrame(weak_rows, columns=WEAK_COLS)
         if os.path.exists(WEAK_PATH):
             try:
