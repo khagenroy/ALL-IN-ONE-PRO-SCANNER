@@ -2088,6 +2088,11 @@ def run_once():
         spurt_choch.update(_hook_rows, now_ist)
     except Exception as _e:
         log.warning(f"spurt_choch failed: {_e}")
+    try:                                                            # ADDED 13 Nov: spurt -> pullback -> strong candle BUY setups, page /spurt_buy
+        import spurt_buy
+        spurt_buy.update(_hook_rows, now_ist)
+    except Exception as _e:
+        log.warning(f"spurt_buy failed: {_e}")
     try:
         _engulf_alerts(now_ist)
     except Exception as e:

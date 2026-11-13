@@ -178,7 +178,7 @@ def page_html():
             'td:nth-child(3){text-align:left}.m{color:#555;font-size:13px;margin:6px 0 12px}</style></head><body>')
     try:
         today_s = datetime.now(IST).strftime("%Y-%m-%d")
-        if _st["date"] != today_s and os.path.exists(STATE):
+        if os.path.exists(STATE):                                   # ADDED 13 Nov: always re-read the saved file, so the page matches the alerts even if the scanner ran in another worker
             _load(today_s)
         rows = _st["rows"] if _st["date"] == today_s else []
         pc = lambda v: "-" if v in ("", None) else f'<span style="color:{"#0a7d33" if float(v) > 0 else "#c62828" if float(v) < 0 else "#555"}">{float(v):+.2f}%</span>'

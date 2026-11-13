@@ -712,6 +712,21 @@ def spurt_red_csv():
     return _serve_csv("spurt_red.csv", "red_spurt_candles.csv")
 
 
+@app.route("/spurt_buy", methods=["GET"])
+def spurt_buy_page():
+    try:
+        import spurt_buy
+        return spurt_buy.page_html()
+    except Exception:
+        log.exception("/spurt_buy failed")
+        return "<p>Spurt buy page failed - see the logs.</p>", 500
+
+
+@app.route("/spurt_buy.csv", methods=["GET"])
+def spurt_buy_csv():
+    return _serve_csv("spurt_buy.csv", "spurt_buy_setups.csv")
+
+
 @app.route("/spurt_flush", methods=["GET"])
 def spurt_flush_page():
     try:
