@@ -1,11 +1,15 @@
 """
-SPURT -> PULLBACK -> STRONG CANDLE BUY  (page: /spurt_buy   csv: /spurt_buy.csv)                                      ADDED 13 Nov
+SPURT RETRACEMENT BUY  (page: /spurt_buy   csv: /spurt_buy.csv)                                      ADDED 13 Nov, rule changed 14 Nov
 
 The same rule as the VS BUY (Section S) of the ALL IN ONE PRO indicator, run on the closed 5-minute candles:
-  1. SPURT      a GREEN candle with volume SPURT_MULT x or more of the average of the 50 candles before it.
-  2. PULLBACK   within WAIT candles the price falls back at least RETR_PCT % of the spurt candle's range. A candle that CLOSES below the spurt candle's low cancels it.
-  3. STRONG     a green candle with body >= BODY_PCT % of its range that closes ABOVE the previous candle's high = BUY at that close.
-SL = the lowest low since the spurt (pullback low). T1 / T2 = 1x / 2x the risk. One signal per spurt. Only today's candles are used (a spurt of an earlier day never counts).
+  1. SPURT          a GREEN candle with volume SPURT_MULT x or more of the average of the 50 candles before it.
+  2. LOWER LOW      after the spurt the price starts falling: the first candle whose low is below the previous candle's low. It keeps falling while each candle
+                    makes a new lower low; the lowest low so far is the hold low.
+  3. HOLD           a candle that does NOT break the hold low: the lower low is holding, for at least HOLD candles.
+  4. HIGHER HIGH    a GREEN candle whose high is above the previous candle's high, that does not break the hold low, with volume higher than the previous candle
+                    (NEED_VOL) = BUY at that close.
+Cancelled when a candle CLOSES below the spurt candle's low or WAIT candles after the spurt are over. SL = the hold low. T1 / T2 = 1x / 2x the risk.
+One signal per spurt. Only today's candles are used (a spurt of an earlier day never counts).
 
   * Uses the 5-minute candles the spurt scan has ALREADY downloaded: NO extra Dhan call, no orders. Any error is caught and logged.
   * After the signal the page follows the stock: T1 hit / SL hit (if both in one candle the SL is counted first) and the best / worst / last move.
@@ -27,9 +31,9 @@ IST = sp.IST
 ON = True
 SPURT_MULT = 20.0             # same size as the red spurt page (the indicator default is 10)
 AVG_LEN = 50
-WAIT = 15                     # candles after the spurt in which the pullback and the strong candle must happen
-RETR_PCT = 30.0               # pullback = at least this % of the spurt candle range
-BODY_PCT = 60.0               # strong candle: body at least this % of its range
+WAIT = 20                     # candles after the spurt in which the lower low, the hold and the higher high must all happen
+HOLD = 1                      # the lower low must hold (no new lower low) for at least this many candles before the higher high
+NEED_VOL = True               # the higher-high candle needs volume higher than the previous candle
 RR1, RR2 = 1.0, 2.0
 NTFY_ALERT = True
 NTFY_PRIORITY = "high"
@@ -45,37 +49,37 @@ def buy_events(o, h, l, c, v, day_ok):
     n = len(c)
     out = []
     sBar = None
-    sHi = sLo = pb = sMult = 0.0
-    pulled = False
-    deep = 0.0
+    sLo = sHi = pb = sMult = 0.0
+    llBar = None
+    fell = False
     for i in range(1, n):
         if not day_ok[i]:
             sBar = None
+            fell = False
             continue
         active = sBar is not None and i > sBar and i - sBar <= WAIT
-        rng = h[i] - l[i]
-        body = (c[i] - o[i]) / rng * 100.0 if rng > 0 else 0.0
-        strong = c[i] > o[i] and body >= BODY_PCT and c[i] > h[i - 1]
-        buy = active and pulled and strong and c[i] > sLo
+        held = fell and llBar is not None and i - llBar >= HOLD and l[i] >= pb
+        vol_ok = (not NEED_VOL) or v[i] > v[i - 1]
+        buy = active and held and h[i] > h[i - 1] and vol_ok and c[i] > o[i] and c[i] > sLo
         if buy:
-            sl = min(pb, l[i])
-            out.append(dict(i=i, spurt=sBar, mult=sMult, sl=sl, deep=deep))
+            deep = (sHi - pb) / (sHi - sLo) * 100.0 if sHi > sLo else 0.0
+            out.append(dict(i=i, spurt=sBar, mult=sMult, sl=pb, deep=max(deep, 0.0)))
             sBar = None
-            pulled = False
+            fell = False
         elif active:
-            pb = min(pb, l[i])
             if c[i] < sLo:
                 sBar = None
-                pulled = False
-            elif not pulled and l[i] <= sHi - (sHi - sLo) * RETR_PCT / 100.0:
-                pulled = True
-            if sBar is not None and sHi > sLo:
-                deep = max(deep, (sHi - l[i]) / (sHi - sLo) * 100.0)
+                fell = False
+            elif not fell:
+                if l[i] < l[i - 1]:
+                    fell, pb, llBar = True, l[i], i
+            elif l[i] < pb:
+                pb, llBar = l[i], i
         if i >= AVG_LEN:
             avg = float(np.mean(v[i - AVG_LEN:i]))
             m = v[i] / avg if avg > 0 else 0.0
             if m >= SPURT_MULT and c[i] > o[i]:
-                sBar, sHi, sLo, pb, sMult, pulled, deep = i, h[i], l[i], l[i], m, False, 0.0
+                sBar, sLo, sHi, sMult, llBar, fell = i, l[i], h[i], m, None, False
     return out
 
 
@@ -220,11 +224,11 @@ def page_html():
             f"<td>{pc(r['best_pct'])}</td><td>{pc(r['worst_pct'])}</td><td>{pc(r['last_pct'])}</td></tr>"
             for r in reversed(rows)) or '<tr><td colspan="15" style="text-align:center">No spurt buy setup yet today.</td></tr>'
         return (head + f'<h2>Spurt buy setups &mdash; today ({len(rows)})</h2>'
-                f'<div class="m">A GREEN 5-minute spurt candle ({SPURT_MULT:g}x or more of the 50-candle average), then a pullback of at least {RETR_PCT:g}% of that candle, then a strong green candle '
-                f'(body {BODY_PCT:g}% or more) closing above the previous candle high = BUY at that close. SL = the pullback low; T1 / T2 = {RR1:g}x / {RR2:g}x the risk. '
+                f'<div class="m">A GREEN 5-minute spurt candle ({SPURT_MULT:g}x or more of the 50-candle average); the price then makes a LOWER LOW, the lower low HOLDS ({HOLD} candle or more), '
+                f'then a green candle makes a HIGHER HIGH{" with volume above the previous candle" if NEED_VOL else ""} = BUY at that close. SL = the hold low; T1 / T2 = {RR1:g}x / {RR2:g}x the risk. '
                 f'Status counts the SL first if both are in one candle. Information only, no orders. '
                 f'<a href="/spurt_buy.csv" target="_blank" rel="noopener">CSV (all days)</a> &middot; <a href="/spurt10" target="_blank" rel="noopener">Spurt10</a></div>'
-                '<table><tr><th>Candle</th><th>Alert</th><th>Symbol</th><th>Buy</th><th>SL</th><th>T1</th><th>T2</th><th>Risk</th><th>Spurt at</th><th>Spurt</th><th>Pullback</th><th>Status</th>'
+                '<table><tr><th>Candle</th><th>Alert</th><th>Symbol</th><th>Buy</th><th>SL</th><th>T1</th><th>T2</th><th>Risk</th><th>Spurt at</th><th>Spurt</th><th>Fall from spurt high</th><th>Status</th>'
                 '<th>Best</th><th>Worst</th><th>Last</th></tr>' + body + '</table></body></html>')
     except Exception as e:
         log.warning(f"spurt_buy page failed: {e}")
