@@ -181,6 +181,11 @@ def update(rows, now_ist):
                 today = np.array([t.strftime("%Y-%m-%d") == today_s for t in ist])
                 if not today.any():
                     continue
+                try:                                                    # follow earlier signals of this stock: target or SL?
+                    bars = [(ist[k].strftime("%Y-%m-%d %H:%M"), o[k], h[k], l[k], c[k]) for k in range(len(v)) if today[k]]
+                    signals_page.update_outcomes(sym, bars, now_ist.hour * 60 + now_ist.minute >= 930)
+                except Exception as e:
+                    log.warning("signals_scan: outcome %s failed: %s", sym, e)
                 n0 = len(v)
                 idx = [i for i in range(max(VS_AVG, 0), n0) if today[i]]
                 if not any(v[i - VS_AVG:i].mean() > 0 and v[i] / v[i - VS_AVG:i].mean() >= VS_MULT for i in idx):
@@ -202,12 +207,16 @@ def update(rows, now_ist):
                     t1, t2, t6 = _levels(entry, sl, side)
                     cand = ist[i].strftime("%H:%M")
                     key = "%s|%s|%s|%s" % (today_s, sym, name, cand)
-                    if signals_page.add(sym, name, side, entry, sl, t1, t2, t6, "", key, "scan"):
+                    if signals_page.add(sym, name, side, entry, sl, t1, t2, t6, "", key, "scan", (ist[i] + pd.Timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M")):
                         age = (now_ist.replace(tzinfo=None) - ist[i].to_pydatetime().replace(tzinfo=None)).total_seconds() / 60.0
                         if age <= ALERT_MINUTES:
                             fresh.append(dict(signal=name, side=side, symbol=sym, price=entry, sl=sl, t1=t1, t2=t2, t6=t6, candle=cand))
             except Exception as e:
                 log.warning("signals_scan: %s failed: %s", sym, e)
+        try:
+            signals_page.close_old_days()
+        except Exception:
+            pass
         if fresh:
             signals_page.notify(fresh)
             log.info("signals_scan: new signals %s", [(x["symbol"], x["signal"]) for x in fresh])

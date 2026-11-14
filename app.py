@@ -739,7 +739,13 @@ def signals_page():
 
 @app.route("/spurt10_all_in_one_pro_signals.csv", methods=["GET"])
 def signals_csv():
-    return _serve_csv("signals.csv", "all_in_one_pro_signals.csv")
+    import re
+    from flask import Response
+    import signals_page
+    day = request.args.get("date", "")
+    day = day if re.fullmatch(r"\d{4}-\d{2}-\d{2}", day) else None
+    name = "all_in_one_pro_signals_%s.csv" % (day or "all_days")
+    return Response(signals_page.csv_text(day), mimetype="text/csv", headers={"Content-Disposition": "attachment; filename=" + name})
 
 
 @app.route("/signals_in", methods=["POST"])

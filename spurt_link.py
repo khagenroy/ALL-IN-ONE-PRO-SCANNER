@@ -24,7 +24,7 @@ import os
 import csv
 import logging
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -219,7 +219,8 @@ def process(now_ist=None):
                     _sg = str(n_["signal"]).upper()
                     _nm = "SWEEP" if _sg.startswith("SWEEP") else "OB MITIGATION"
                     signals_page.add(n_["symbol"], _nm, "BUY" if _sg.endswith("BUY") else "SELL", n_["entry"] if n_["entry"] != "" else n_["price"], n_["sl"], n_["T1"], n_["T2"],
-                                     None, "", "%s|%s|%s|%s" % (n_["date"], n_["symbol"], _sg, n_["signal_candle"]), "section A")
+                                     None, "", "%s|%s|%s|%s" % (n_["date"], n_["symbol"], _sg, n_["signal_candle"]), "section A",
+                                     (datetime.strptime("%s %s" % (n_["date"], str(n_["signal_candle"])[:5]), "%Y-%m-%d %H:%M") + timedelta(minutes=10)).strftime("%Y-%m-%d %H:%M"))
                 except Exception:
                     pass
         except Exception:
