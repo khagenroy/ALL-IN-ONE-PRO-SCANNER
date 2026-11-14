@@ -214,7 +214,33 @@ def sym_refresh(force=False):
         _sym["loading"] = False
 
 
+def _sym_fallback():
+    """Fallback (14 Nov): when the paper engine's own download failed / list is empty, use the NSE equity list of the scanner's scrip master."""
+    try:
+        import scrip_master as sm
+        if sm._eq_lookup is None or sm._mcx_lookup is None:
+            sm._build_lookup()
+        m = {k: (str(v), k) for k, v in (sm._eq_lookup or {}).items()}
+        if len(m) >= 500:
+            with _LOCK:
+                if not _sym["map"]:
+                    _sym["map"], _sym["loaded"], _sym["err"] = m, time.time() - 80000, ""
+            log.info("paper: %d NSE equities loaded from the scanner scrip master (fallback)", len(m))
+    except Exception as e:
+        log.warning("paper: fallback symbol list failed: %s", e)
+
+
+def _ent(symbol):
+    if not _sym["map"]:
+        _sym_load_file()
+    if not _sym["map"]:
+        _sym_fallback()
+    return _sym["map"].get(symbol)
+
+
 def sym_search(q, n=15):
+    if not _sym["map"]:
+        _ent("")
     q = (q or "").strip().upper()
     if not q:
         return []
@@ -270,7 +296,7 @@ prices.last_err = ""
 
 def quote(symbol):
     symbol = (symbol or "").strip().upper()
-    ent = _sym["map"].get(symbol)
+    ent = _ent(symbol)
     if not ent:
         return None, "Unknown symbol (NSE equities only)."
     p = prices([ent[0]]).get(ent[0])
@@ -302,7 +328,7 @@ def _zint(v, lo, hi, default):
 def chart_info(symbol, tf=15, zz=None, nob=None, zatr=None):
     """Nearest support / resistance zone, volume-spurt multiple and day change of one stock. Cached for 60 s. Returns (dict, error)."""
     symbol = (symbol or "").strip().upper()
-    ent = _sym["map"].get(symbol)
+    ent = _ent(symbol)
     if not ent:
         return None, "Unknown symbol."
     tf = _tf(tf, "15")
@@ -582,7 +608,7 @@ def _closed_bars(sid, tf, asof):
 def candles_json(symbol, tf):
     """Candles of one stock for the chart: tf = 5/15/30/45/60/120/180/240 minutes or D/W/M (the forming candle included)."""
     symbol = (symbol or "").strip().upper()
-    ent = _sym["map"].get(symbol)
+    ent = _ent(symbol)
     if not ent:
         return None, "Unknown symbol (NSE equities only)."
     tf = _tf(tf, "5")
@@ -669,7 +695,7 @@ def place_order(user, symbol, side, qty, sl, t1=None, t2=None, limit=None, produ
     symbol = (symbol or "").strip().upper()
     side = (side or "").upper()
     product = _product(product)
-    ent = _sym["map"].get(symbol)
+    ent = _ent(symbol)
     if not ent:
         return False, "Unknown symbol (NSE equities only)."
     if side not in ("BUY", "SELL"):
