@@ -577,15 +577,12 @@ def add_menu(app):
         ("Spurt scanners", ["/spurt10", "/spurt10_history", "/zone_touch", "/spurt_daily", "/spurt_daily_follow", "/daily_rej", "/daily_zone", "/daily_weak", "/spurt_flush", "/spurt_red", "/spurt_buy", "/spurt_sweep", "/spurt_sell", "/spurt_paper", "/spurtpb", "/volspurt", "/spz"]),
         ("Spurt10 sections", ["/spurt10_main", "/spurt10_all_in_one_pro_signals", "/spurt10_early", "/spurt10_ob", "/spurt10_wick", "/spurt10_rejres", "/spurt10_rejsup", "/spurt10_engbull", "/spurt10_engbear", "/spurt10_room", "/spurt10_roomdown", "/spurt10_zsell", "/spurt10_upper", "/spurt10_gap", "/spurt10_orb", "/spurt10_watch", "/spurt10_news", "/spurt10_thin", "/depth"]),
         ("SMA / Trend", ["/sma200", "/sma200now", "/trendnow"]),
-        ("Bot / Deals", ["/botlog", "/botpnl", "/deals"]),
-        ("Commodity tables", ["/mcx_oizones", "/mcx_signals", "/mcx_signals_all", "/mcx_spurt"]),
-        ("Commodity / Crypto", ["/commodity", "/mcx_sell", "/crypto", "/crypto_sell"]),
         ("Investing", ["/invest"]),
         ("Practice trading", ["/paper", "/paper/history", "/paper/leaderboard", "/paper/help"]),
-        ("Crypto tables", ["/crypto_oizones", "/crypto_signals", "/crypto_signals_all", "/crypto_spurt"]),
         ("OI zones / ORB", ["/oizones", "/oizones_signals", "/orb"]),
         ("Best setups", ["/best", "/bestnow"]),
         ("Scanner / Swing / Gainers", ["/scanner", "/swing", "/gainers"]),
+        ("Bot / Deals", ["/botlog", "/botpnl", "/deals"]),          # 14 Nov: moved down to the empty place at the bottom right
             ]
     SKIP = ("/", "/health", "/login", "/logout", "/register", "/setup", "/alerts", "/indices.json", "/password", "/risk_mgmt")
 
@@ -593,6 +590,8 @@ def add_menu(app):
         pages, csvs = [], []
         for r in sorted(app.url_map.iter_rules(), key=lambda x: x.rule):
             if "GET" not in r.methods or r.arguments or r.rule in SKIP or r.rule.startswith(("/admin", "/static", "/paper/api")):
+                continue
+            if r.rule.startswith(("/mcx", "/crypto", "/commodity")):      # 14 Nov: MCX / commodity / crypto are on the F&O scanner now - not listed on this home page (the pages still open by their address)
                 continue
             (csvs if r.rule.endswith(".csv") else pages).append(r.rule)
         owner = {}
@@ -633,7 +632,7 @@ def add_menu(app):
         for title, plist in groups:
             rows = "".join(f"<div class=r><a class=pg href='{escape(p)}' target=_blank rel=noopener>{escape(p[1:])}</a>{chips(p)}</div>" for p in plist if ok(p))
             if rows:
-                if title == "Spurt10 sections":              # wide tile: the long button list is split into 2 columns, so the row is not so tall and the small tiles can sit below
+                if title in ("Spurt10 sections", "Spurt scanners"):              # wide tile: the long button list is split into 2 columns, so the row is not so tall and the small tiles can sit below
                     cards += f"<section class=w2><h3>{escape(title)}</h3><div class=cols>{rows}</div></section>"
                 else:
                     cards += f"<section><h3>{escape(title)}</h3>{rows}</section>"

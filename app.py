@@ -465,7 +465,7 @@ def _invest_loop():
 if INVEST_AUTORUN:
     threading.Thread(target=_invest_loop, daemon=True, name="invest-autorun").start()
 
-MCX_AUTORUN = os.environ.get("MCX_AUTORUN", "true").strip().lower() == "true"
+MCX_AUTORUN = os.environ.get("MCX_AUTORUN", "false").strip().lower() == "true"   # 14 Nov: MCX / crypto no longer run in the stock scanner (they are on the F&O scanner / switched off) - set MCX_AUTORUN=true to bring it back
 
 
 def _mcx_loop():
@@ -480,7 +480,7 @@ def _mcx_loop():
 if MCX_AUTORUN:
     threading.Thread(target=_mcx_loop, daemon=True, name="mcx-autorun").start()
 
-CRYPTO_AUTORUN = os.environ.get("CRYPTO_AUTORUN", "true").strip().lower() == "true"
+CRYPTO_AUTORUN = os.environ.get("CRYPTO_AUTORUN", "false").strip().lower() == "true"   # 14 Nov: MCX / crypto no longer run in the stock scanner (they are on the F&O scanner / switched off) - set CRYPTO_AUTORUN=true to bring it back
 
 
 def _crypto_loop():
@@ -1444,7 +1444,7 @@ for _r, _f, _t in _TABLE_PAGES:
 
 import indices_strip
 indices_strip.install(app)   # NIFTY / BANKNIFTY / ... strip at the top of every page
-app.config["AG_LINKS"] = [("F&O scanner", "https://f-o-scanner-42tp.onrender.com")]   # button on the home page and in the top bar
+app.config["AG_LINKS"] = [("F&O scanner", "https://f-o-scanner-42tp.onrender.com"), ("MCX commodities (F&O scanner)", "https://f-o-scanner-42tp.onrender.com/mcx"), ("Commodity signals + CSVs (F&O scanner)", "https://f-o-scanner-42tp.onrender.com/commodity"), ("Crypto + CSVs (F&O scanner)", "https://f-o-scanner-42tp.onrender.com/crypto")]   # button on the home page and in the top bar
 app.config["AG_RISK_LINKS"] = [   # admin-only box "Risk management" on the home page
     ("Crypto risk (Delta)", "https://delta-bridge-leq3.onrender.com/risk/khagenindrajeetsujitakabitakartik"),
     ("Dhan risk (stocks / MCX)", "https://dhan-bridge-tv.onrender.com/risk/khagenindrajeetmuktakabitakartiksanjucta"),
