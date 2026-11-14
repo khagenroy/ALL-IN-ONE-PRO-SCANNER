@@ -33,6 +33,7 @@ SPURT_MULT = 20.0             # same size as the red spurt page (the indicator d
 AVG_LEN = 50
 WAIT = 20                     # candles after the spurt in which the lower low, the hold and the higher high must all happen
 HOLD = 1                      # the lower low must hold (no new lower low) for at least this many candles before the higher high
+LL_MIN = 2                    # a real lower low = at least this many candles IN A ROW, each with a lower low than the one before
 NEED_VOL = True               # the higher-high candle needs volume higher than the previous candle
 RR1, RR2 = 1.0, 2.0
 NTFY_ALERT = True
@@ -52,10 +53,12 @@ def buy_events(o, h, l, c, v, day_ok):
     sLo = sHi = pb = sMult = 0.0
     llBar = None
     fell = False
+    llCnt = 0
     for i in range(1, n):
         if not day_ok[i]:
             sBar = None
             fell = False
+            llCnt = 0
             continue
         active = sBar is not None and i > sBar and i - sBar <= WAIT
         held = fell and llBar is not None and i - llBar >= HOLD and l[i] >= pb
@@ -66,20 +69,28 @@ def buy_events(o, h, l, c, v, day_ok):
             out.append(dict(i=i, spurt=sBar, mult=sMult, sl=pb, deep=max(deep, 0.0)))
             sBar = None
             fell = False
+            llCnt = 0
         elif active:
             if c[i] < sLo:
                 sBar = None
                 fell = False
+                llCnt = 0
             elif not fell:
                 if l[i] < l[i - 1]:
-                    fell, pb, llBar = True, l[i], i
+                    llCnt += 1
+                    pb, llBar = l[i], i
+                    if llCnt >= LL_MIN:
+                        fell = True
+                else:
+                    llCnt = 0
+                    llBar = None
             elif l[i] < pb:
                 pb, llBar = l[i], i
         if i >= AVG_LEN:
             avg = float(np.mean(v[i - AVG_LEN:i]))
             m = v[i] / avg if avg > 0 else 0.0
             if m >= SPURT_MULT and c[i] > o[i]:
-                sBar, sLo, sHi, sMult, llBar, fell = i, l[i], h[i], m, None, False
+                sBar, sLo, sHi, sMult, llBar, fell, llCnt = i, l[i], h[i], m, None, False, 0
     return out
 
 
