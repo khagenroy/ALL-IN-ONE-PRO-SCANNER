@@ -106,21 +106,37 @@ def add(symbol, signal, side, price, sl, t1, t2, t6=None, qty="", key="", source
 
 
 def notify(items):
-    """One phone alert headed ALL IN ONE PRO, one block per new signal (name, side, stock, entry, SL, T1, T2, T6)."""
+    """ONE phone alert per scan cycle, headed ALL IN ONE PRO: a block per new signal (name, side, stock, entry, SL, T1, T2, T6).
+    One message instead of one per signal keeps the phone-alert service from refusing them (HTTP 429); a refused message is tried again."""
     topic = os.environ.get("NTFY_TOPIC", "").strip()
     if not topic or not items:
         return
-    try:
-        import requests
-        for it in items[:8]:
-            msg = "%s %s - %s\nEntry %s\nSL %s\nT1 %s\nT2 %s\nT6 %s\nSignal candle %s IST (scanner)" % (
-                it["signal"], it["side"], it["symbol"], _f(_num(it["price"])), _f(_num(it["sl"])), _f(_num(it["t1"])), _f(_num(it["t2"])), _f(_num(it.get("t6"))), it.get("candle", ""))
-            requests.post("https://ntfy.sh/" + topic, data=msg.encode("utf-8"), timeout=8, headers={"Title": "ALL IN ONE PRO", "Priority": "high", "Tags": "zap"})
-        if len(items) > 8:
-            requests.post("https://ntfy.sh/" + topic, data=("+%d more on the all in one pro signals page" % (len(items) - 8)).encode("utf-8"), timeout=8,
-                          headers={"Title": "ALL IN ONE PRO", "Priority": "high"})
-    except Exception:
-        pass
+    blocks = []
+    for it in items[:10]:
+        blocks.append("%s %s - %s\nEntry %s | SL %s\nT1 %s | T2 %s | T6 %s\nSignal candle %s IST" % (
+            it["signal"], it["side"], it["symbol"], _f(_num(it["price"])), _f(_num(it["sl"])),
+            _f(_num(it["t1"])), _f(_num(it["t2"])), _f(_num(it.get("t6"))), it.get("candle", "")))
+    if len(items) > 10:
+        blocks.append("+%d more on the all in one pro signals page" % (len(items) - 10))
+    body = "\n\n".join(blocks).encode("utf-8")
+    title = "ALL IN ONE PRO" if len(items) == 1 else "ALL IN ONE PRO (%d signals)" % len(items)
+
+    def _send():
+        import time
+        try:
+            import requests
+        except Exception:
+            return
+        for attempt in range(3):
+            try:
+                r = requests.post("https://ntfy.sh/" + topic, data=body, timeout=10, headers={"Title": title, "Priority": "high", "Tags": "zap"})
+                if r.status_code < 300:
+                    return
+            except Exception:
+                pass
+            time.sleep(8 * (attempt + 1))
+
+    threading.Thread(target=_send, daemon=True, name="signals-ntfy").start()
 
 
 def page_html(show_all=False):
@@ -148,7 +164,7 @@ def page_html(show_all=False):
             "<meta http-equiv='refresh' content='30'><title>Signals</title><style>body{background:#0f1419;color:#e6edf3;font-family:Arial,sans-serif;margin:18px}"
             "table{border-collapse:collapse;width:100%%}th,td{padding:7px 10px;border-bottom:1px solid #243040;text-align:left;font-size:14px}th{color:#9fb0c0}"
             "a{color:#8ab4f8}</style></head><body><h2>ALL IN ONE PRO signals (%s)</h2><p>%s</p>"
-            "<p style='color:#9fb0c0'>Every signal the indicator sent, whether or not the bridge traded it. Times are IST. Refreshes by itself every 30 seconds. "
+            "<p style='color:#9fb0c0'>Signals found by the scanner on every spurt stock (same rules as the indicator). Times are IST. Refreshes by itself every 30 seconds. "
             "%s &nbsp;|&nbsp; <a href='/spurt10_all_in_one_pro_signals.csv' target='_blank' rel='noopener'>CSV</a> &nbsp;|&nbsp; <a href='/' target='_blank' rel='noopener'>Home</a></p>"
             "<table><tr><th>Time</th><th>Stock</th><th>Signal</th><th>Entry</th><th>SL</th><th>T1</th><th>T2</th><th>Qty</th></tr>%s</table></body></html>"
             ) % ("last 500" if show_all else "today", chips, other, "".join(body))
