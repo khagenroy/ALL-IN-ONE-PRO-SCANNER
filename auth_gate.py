@@ -21,7 +21,7 @@ from flask import request, redirect, session, Response
 from werkzeug.security import generate_password_hash, check_password_hash
 
 _LOCK = threading.Lock()
-_OPEN = ("/health", "/login", "/register", "/setup", "/logout", "/bg/home.jpg", "/bg/page.jpg")
+_OPEN = ("/health", "/login", "/register", "/setup", "/logout", "/bg/home.jpg", "/bg/page.jpg", "/signals_in")
 _FAILS = {}  # ip -> [timestamps] of recent failed logins
 
 
@@ -575,7 +575,7 @@ def add_menu(app):
     app.config["AG_RESTRICT"] = True
     GROUPS = [
         ("Spurt scanners", ["/spurt10", "/spurt10_history", "/zone_touch", "/spurt_daily", "/spurt_daily_follow", "/daily_rej", "/daily_zone", "/daily_weak", "/spurt_flush", "/spurt_red", "/spurt_buy", "/spurt_sweep", "/spurt_sell", "/spurt_paper", "/spurtpb", "/volspurt", "/spz"]),
-        ("Spurt10 sections", ["/spurt10_main", "/spurt10_early", "/spurt10_ob", "/spurt10_wick", "/spurt10_rejres", "/spurt10_rejsup", "/spurt10_engbull", "/spurt10_engbear", "/spurt10_room", "/spurt10_roomdown", "/spurt10_zsell", "/spurt10_upper", "/spurt10_gap", "/spurt10_orb", "/spurt10_watch", "/spurt10_news", "/spurt10_thin", "/depth"]),
+        ("Spurt10 sections", ["/spurt10_main", "/spurt10_all_in_one_pro_signals", "/spurt10_early", "/spurt10_ob", "/spurt10_wick", "/spurt10_rejres", "/spurt10_rejsup", "/spurt10_engbull", "/spurt10_engbear", "/spurt10_room", "/spurt10_roomdown", "/spurt10_zsell", "/spurt10_upper", "/spurt10_gap", "/spurt10_orb", "/spurt10_watch", "/spurt10_news", "/spurt10_thin", "/depth"]),
         ("SMA / Trend", ["/sma200", "/sma200now", "/trendnow"]),
         ("Bot / Deals", ["/botlog", "/botpnl", "/deals"]),
         ("Commodity tables", ["/mcx_oizones", "/mcx_signals", "/mcx_signals_all", "/mcx_spurt"]),

@@ -23,7 +23,7 @@ import threading
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from flask import Flask, send_file, request, redirect, Response
+from flask import Flask, send_file, request, redirect, Response, jsonify
 
 
 def _link_results_to_disk(disks=("/var/data", "/data")):
@@ -725,6 +725,33 @@ def spurt_buy_page():
 @app.route("/spurt_buy.csv", methods=["GET"])
 def spurt_buy_csv():
     return _serve_csv("spurt_buy.csv", "spurt_buy_setups.csv")
+
+
+@app.route("/spurt10_all_in_one_pro_signals", methods=["GET"])
+def signals_page():
+    try:
+        import signals_page
+        return signals_page.page_html(request.args.get("all") == "1")
+    except Exception:
+        log.exception("/signals failed")
+        return "<p>Signals page failed - see the logs.</p>", 500
+
+
+@app.route("/spurt10_all_in_one_pro_signals.csv", methods=["GET"])
+def signals_csv():
+    return _serve_csv("signals.csv", "all_in_one_pro_signals.csv")
+
+
+@app.route("/signals_in", methods=["POST"])
+def signals_in():
+    """Receives the signals the Dhan bridge forwards (token-checked). Open to the bridge (no login), but nothing is stored without the token."""
+    try:
+        import signals_page
+        ok, msg = signals_page.receive(request.get_json(silent=True))
+        return jsonify({"ok": ok, "msg": msg}), (200 if ok else 403)
+    except Exception:
+        log.exception("/signals_in failed")
+        return jsonify({"ok": False}), 500
 
 
 @app.route("/spurt_flush", methods=["GET"])

@@ -2093,6 +2093,11 @@ def run_once():
         spurt_buy.update(_hook_rows, now_ist)
     except Exception as _e:
         log.warning(f"spurt_buy failed: {_e}")
+    try:                                                            # ADDED 14 Nov: all six ALL IN ONE PRO signals on every spurt stock, page spurt10_all_in_one_pro_signals + phone alert
+        import signals_scan
+        signals_scan.update(_hook_rows, now_ist)
+    except Exception as _e:
+        log.warning(f"signals_scan failed: {_e}")
     try:
         _engulf_alerts(now_ist)
     except Exception as e:

@@ -45,7 +45,7 @@ COLS = ["date", "spurt_time", "spurt_x", "candle", "alert_time", "symbol", "pric
 _st = {"date": "", "rows": []}
 
 
-def buy_events(o, h, l, c, v, day_ok):
+def buy_events(o, h, l, c, v, day_ok, spurt_mult=None):
     """Bar-by-bar copy of the Pine rule. day_ok[i] = candle i is from today. Returns a list of dicts (index of the signal candle, spurt index, ...)."""
     n = len(c)
     out = []
@@ -89,7 +89,7 @@ def buy_events(o, h, l, c, v, day_ok):
         if i >= AVG_LEN:
             avg = float(np.mean(v[i - AVG_LEN:i]))
             m = v[i] / avg if avg > 0 else 0.0
-            if m >= SPURT_MULT and c[i] > o[i]:
+            if m >= (SPURT_MULT if spurt_mult is None else spurt_mult) and c[i] > o[i]:
                 sBar, sLo, sHi, sMult, llBar, fell, llCnt = i, l[i], h[i], m, None, False, 0
     return out
 

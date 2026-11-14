@@ -212,6 +212,18 @@ def process(now_ist=None):
                 w.writeheader()
             for n in new:
                 w.writerow(n)
+        try:                                                    # ADDED 14 Nov: also list them on the page "spurt10_all_in_one_pro_signals"
+            import signals_page
+            for n_ in new:
+                try:
+                    _sg = str(n_["signal"]).upper()
+                    _nm = "SWEEP" if _sg.startswith("SWEEP") else "OB MITIGATION"
+                    signals_page.add(n_["symbol"], _nm, "BUY" if _sg.endswith("BUY") else "SELL", n_["entry"] if n_["entry"] != "" else n_["price"], n_["sl"], n_["T1"], n_["T2"],
+                                     None, "", "%s|%s|%s|%s" % (n_["date"], n_["symbol"], _sg, n_["signal_candle"]), "section A")
+                except Exception:
+                    pass
+        except Exception:
+            pass
         if _st["count"] >= MAX_PER_DAY:
             return
         _notify(new)
