@@ -97,6 +97,9 @@ def _insert(row, key=""):
                     return False
         for r in reversed(rows[-60:]):          # same signal on the same stock within 10 minutes (e.g. also sent by the bridge) is listed once
             if r.get("symbol") == row["symbol"] and r.get("signal") == row["signal"] and abs(r.get("sec", 0) - row["sec"]) < DUP_SECONDS:
+                if row.get("src") == "bridge":          # 15 Nov: the TradingView alert of a signal the scanner found first - the scanner must not trade it (scanner_trade.py)
+                    r["tv"] = True
+                    _save(day)
                 return False
         row["key"] = key
         rows.append(row)
@@ -113,7 +116,15 @@ def _mk(symbol, signal, side, price, sl, t1, t2, t6, qty, source, from_ts):
 
 def add(symbol, signal, side, price, sl, t1, t2, t6=None, qty="", key="", source="scanner", from_ts=""):
     """Called by the scanner's own scans. from_ts = 'YYYY-MM-DD HH:MM' = open time of the first 5-minute candle to follow. True when NEW."""
-    return _insert(_mk(symbol, signal, side, price, sl, t1, t2, t6, qty, source, from_ts), key)
+    row = _mk(symbol, signal, side, price, sl, t1, t2, t6, qty, source, from_ts)
+    ok = _insert(row, key)
+    if ok and source in ("scan", "section A"):
+        try:
+            import scanner_trade
+            scanner_trade.schedule(row)         # 15 Nov: scanner auto-trade (1 share, via the bridge) - only for a fresh signal, after a short wait for the TradingView one
+        except Exception:
+            pass
+    return ok
 
 
 def receive(d):
