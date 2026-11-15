@@ -310,7 +310,7 @@ def page_html(show_all=False):
             "table{border-collapse:collapse;width:100%%}th,td{padding:7px 10px;border-bottom:1px solid #243040;text-align:left;font-size:14px}th{color:#9fb0c0}"
             "a{color:#8ab4f8}</style></head><body><h2>ALL IN ONE PRO signals (%s)</h2><p>%s</p>"
             "<p style='color:#9fb0c0'>Signals found by the scanner on every spurt stock (same rules as the indicator), followed afterwards: which target or the SL was touched "
-            "(stop moves like the bridge: T1 -> entry, T2 -> T1 ...). Times are IST. Refreshes every 30 seconds. %s &nbsp;|&nbsp; <a href='/' target='_blank' rel='noopener'>Home</a></p>"
+            "(stop moves like the bridge: T1 -> entry, T2 -> T1 ...). Times are IST. Refreshes every 30 seconds. %s &nbsp;|&nbsp; <a href='/spurt10_all_in_one_pro_signals_daily' target='_blank' rel='noopener'>Daily signals</a> &nbsp;|&nbsp; <a href='/' target='_blank' rel='noopener'>Home</a></p>"
             "<p style='color:#9fb0c0'>Download CSV: <a href='/spurt10_all_in_one_pro_signals.csv' target='_blank' rel='noopener'><b>all days</b></a> &middot; %s</p>"
             "<table><tr><th>Time</th><th>Stock</th><th>Signal</th><th>Entry</th><th>SL</th><th>T1</th><th>T2</th><th>What happened</th><th>updated</th></tr>%s</table>%s</body></html>"
             ) % ("last 500" if show_all else "today", chips, other, dl, "".join(body), perf)

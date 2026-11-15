@@ -748,6 +748,41 @@ def signals_csv():
     return Response(signals_page.csv_text(day), mimetype="text/csv", headers={"Content-Disposition": "attachment; filename=" + name})
 
 
+@app.route("/spurt10_all_in_one_pro_signals_daily", methods=["GET"])
+def signals_daily_page():
+    try:
+        import signals_daily
+        return signals_daily.page_html()
+    except Exception:
+        log.exception("/signals_daily failed")
+        return "<p>Daily signals page failed - see the logs.</p>", 500
+
+
+@app.route("/spurt10_all_in_one_pro_signals_daily/run", methods=["GET"])
+def signals_daily_run():
+    """Admin only: starts a daily-signal scan now (it also works at the weekend, on the newest daily candles)."""
+    try:
+        if not auth_gate._admin():
+            return "Only the admin can start the scan.", 403
+        import signals_daily
+        started = signals_daily.run_now()
+        return redirect("/spurt10_all_in_one_pro_signals_daily")
+    except Exception:
+        log.exception("/signals_daily/run failed")
+        return "Could not start the scan - see the logs.", 500
+
+
+@app.route("/spurt10_all_in_one_pro_signals_daily.csv", methods=["GET"])
+def signals_daily_csv():
+    import re
+    from flask import Response
+    import signals_daily
+    day = request.args.get("date", "")
+    day = day if re.fullmatch(r"\d{4}-\d{2}-\d{2}", day) else None
+    name = "all_in_one_pro_signals_daily_%s.csv" % (day or "all_days")
+    return Response(signals_daily.csv_text(day), mimetype="text/csv", headers={"Content-Disposition": "attachment; filename=" + name})
+
+
 @app.route("/signals_in", methods=["POST"])
 def signals_in():
     """Receives the signals the Dhan bridge forwards (token-checked). Open to the bridge (no login), but nothing is stored without the token."""

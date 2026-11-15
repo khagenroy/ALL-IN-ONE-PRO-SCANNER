@@ -150,6 +150,11 @@ def _score(sym, sid, q, today):
     raw = _daily_candles(sym, sid, today)
     if raw is None:
         return {"_nodata": True}
+    try:                                                      # ADDED 15 Nov: the six ALL IN ONE PRO signals on the DAILY candle (same candles, no extra Dhan call)
+        import signals_daily
+        signals_daily.scan_stock(sym, raw, today)
+    except Exception as e:
+        log.warning(f"Daily signals {sym} failed: {e}")
     _oc = ["open", "high", "low", "close", "volume"]
     df = raw[raw["d"] < today][_oc + ["d"]].reset_index(drop=True)                                              # earlier days only (+ the date, for the zones)
     df[_oc] = df[_oc].astype(float)
@@ -213,6 +218,11 @@ def run_once():
         log.warning(f"Spurt daily: quote step not available ({e}) - using today's daily candle instead (slower: every stock's candles are read)")
         quotes, names, mode = None, [s_ for s_, _i in uni], "candle"
     rows, failed, scanned, nodata, illiq = [], 0, 0, 0, 0
+    try:                                                      # ADDED 15 Nov: daily-candle signals (page /spurt10_all_in_one_pro_signals_daily)
+        import signals_daily
+        signals_daily.begin()
+    except Exception as e:
+        log.warning(f"Daily signals begin failed: {e}")
     for sym in names:
         try:
             r = _score(sym, sid_of[sym], (quotes[sym] if quotes else None), today)
@@ -259,6 +269,11 @@ def run_once():
         daily_zone_rej.run(today, set(names), quotes=quotes)
     except Exception as e:
         log.warning(f"Daily zone scan failed: {e}")
+    try:
+        import signals_daily
+        signals_daily.finish(today)
+    except Exception as e:
+        log.warning(f"Daily signals finish failed: {e}")
     log.info(f"Spurt daily: {len(rows)} stocks at {MIN_MULT:g}x or more, {len(names)} liquid stocks scanned in {meta['took_s']}s")
     return True
 

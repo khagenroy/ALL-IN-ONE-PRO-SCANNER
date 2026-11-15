@@ -101,7 +101,7 @@ def _spurt_d(o, h, l, c, v, today, rsi):
     return out
 
 
-def _vs_sell(o, h, l, c, v, today, rsi, ist, d):
+def _vs_sell(o, h, l, c, v, today, rsi, ist, d, htf=("30min", "15min", None)):
     """Section V (VS SELL). Returns [(i, entry, sl)]."""
     import spurt_zones
     n = len(c)
@@ -109,7 +109,9 @@ def _vs_sell(o, h, l, c, v, today, rsi, ist, d):
     # 30-minute candles (TradingView NSE: 09:15, 09:45 ...), a 30m candle counts once it is complete
     dfi = d.copy()
     dfi.index = pd.DatetimeIndex(ist)
-    d30 = dfi.resample("30min", offset="15min", label="left", closed="left").agg(
+    _rule, _off, _delta = htf                       # 5-minute scan: 30-minute candles; daily scan: weekly candles ("W-MON", None, 7 days)
+    _delta = _delta if _delta is not None else pd.Timedelta(minutes=30)
+    d30 = dfi.resample(_rule, offset=_off, label="left", closed="left").agg(
         {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}).dropna()
 
     def res_touch_5(i, lo_i, hi_i):
@@ -119,7 +121,7 @@ def _vs_sell(o, h, l, c, v, today, rsi, ist, d):
         return False
 
     def htf_touch(i, lo_i, hi_i):
-        done = d30[d30.index + pd.Timedelta(minutes=30) <= ist[i]]
+        done = d30[d30.index + _delta <= ist[i]]
         zs = [z for z in spurt_zones.live_zones(done) if z["type"] == "RESISTANCE"]
         if not zs:
             return False
