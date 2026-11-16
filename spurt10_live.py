@@ -2055,8 +2055,7 @@ def _strong_update(top, now_ist, sid_of):
                     cau = []
                     if (up and zone == "RESISTANCE") or ((not up) and zone == "SUPPORT"):
                         cau.append("into " + ("resistance" if up else "support") + " zone")
-                    if (up and wall == "SELL") or ((not up) and wall == "BUY"):
-                        cau.append(wall + " SIDE wall against")
+                    # the order-book wall is only RECORDED in the "wall" column (it changes every second and can be spoofed), it no longer decides STRONG / CAUTION
                     stop = abs(cl - (e["lo"] if up else e["hi"])) / cl * 100.0
                     hit = {"date": today, "candle": cndl, "symbol": sym, "dir": e["dir"], "price": f"{cl:.2f}", "box_low": f"{e['lo']:g}", "box_high": f"{e['hi']:g}",
                            "box_candles": e["n"], "vol_x": e["vol_x"], "body_pct": e["body"], "sma9": f"{s9v:.2f}", "sma21": f"{s21v:.2f}", "sma60": f"{s60v:.2f}", "zone": zone, "wall": wall,
@@ -2097,7 +2096,7 @@ def _strong_html():
             return ""
         out = (f'<h2>Strong breakout signals &mdash; consolidation box + volume + SMA 9/21/60 &middot; spurt stocks &ge; {WICK_SPURT_MULT:g}x</h2>'
                f'<div class="m">A 5-min candle that CLOSES out of a consolidation box ({STRONG_N}+ candles inside {STRONG_ATR:g}x ATR, volume dried up inside) with volume &ge; {STRONG_VOLX:g}x average and a body &ge; {STRONG_BODY:g}%, '
-               'and closes beyond ALL THREE of SMA 9, SMA 21 and SMA 60. <b>STRONG</b> = not running into an opposite zone / wall (phone alert sent). <b>CAUTION</b> = it runs into a zone / wall (listed, no alert). '
+               'and closes beyond ALL THREE of SMA 9, SMA 21 and SMA 60. <b>STRONG</b> = not running into an opposite zone (phone alert sent). <b>CAUTION</b> = it runs into a zone (listed, no alert). The wall column is only a record (order books change every second), it does not decide anything. '
                'Stop = other side of the box (stop % is the distance). Same box rule as the CONSOL BOX indicator; checked every 10 minutes on the last two closed 5-min candles. '
                'Follow-up columns = % move after the signal in its direction (+ = it worked). Information only. <a href="/strong_signals.csv">CSV (all days)</a></div>')
         rows = [h for h in _strong["hits"] if h.get("date") == _strong.get("date")]
@@ -2117,6 +2116,116 @@ def _strong_html():
         out += ('<div class="w"><table class="sp"><tr><th>Candle</th><th>Symbol</th><th>Direction</th><th>Price</th><th>Box</th><th>Volume</th><th>Stop</th><th>Verdict</th>'
                 '<th>At zone</th><th>Wall</th><th>Spurt</th><th>10m %</th><th>30m %</th><th>60m %</th><th>Result</th></tr>' + body + '</table></div>')
         return out
+    except Exception:
+        return ""
+
+
+# ---------------------------------------------------------------- ADDED 16 Nov: SMA200 setups (sma200_live.py) of the SPURT stocks - link only, no new scan
+# The SMA200 scan already writes results/sma200_now.json (support / rejection of the SMA200 on 10m / 1H / 4H / 1D / 1W). Here the setups of the stocks that are in the spurt list
+# (followed spurt stocks + today's table) are shown in their own section and one phone alert is sent per new setup. Nothing is calculated here and no Dhan call is made.
+SMALINK_ON = True
+SMALINK_PATH = os.path.join(RESULTS_DIR, "sma200_now.json")
+SMALINK_ALERT_MAX = 40
+_smalink = {"date": None, "keys": set(), "count": 0}
+
+
+def _smalink_rows(now_ist, top=None):
+    """Setups of the spurt stocks from the SMA200 file. Intraday ones only from today. Never raises."""
+    try:
+        with open(SMALINK_PATH) as f:
+            rows = (json.load(f) or {}).get("rows", {})
+    except Exception:
+        return None
+    today = now_ist.strftime("%Y-%m-%d")
+    syms = dict(_wick.get("syms") or {})
+    for r in (top or []):
+        if r.get("symbol") and r["symbol"] not in syms:
+            syms[r["symbol"]] = {"since": r.get("candle", ""), "mult": r.get("multiple", 0.0)}
+    out = []
+    for k, r in rows.items():
+        try:
+            if r.get("symbol") not in syms:
+                continue
+            if r.get("tf") in ("10m", "1H", "4H") and str(r.get("bar_time", ""))[:10] != today:
+                continue
+            if r.get("tf") in ("1D", "1W"):
+                age = (now_ist.date() - datetime.strptime(str(r["bar_time"])[:10], "%Y-%m-%d").date()).days
+                if age > 3:                                   # daily / weekly: only fresh ones count for a spurt stock
+                    continue
+            x = dict(r)
+            x["_key"] = k
+            x["_mult"] = float((syms[r["symbol"]] or {}).get("mult") or 0.0)
+            x["_strong"] = float(r.get("vol_x") or 0) >= 1.5 and float(r.get("slope_x") or 0) >= 1.0
+            out.append(x)
+        except Exception:
+            continue
+    out.sort(key=lambda x: (not x["_strong"], -x["_mult"]))
+    return out
+
+
+def _smalink_update(top, now_ist):
+    """Phone alert (once per setup) for the SMA200 setups of spurt stocks. Never raises."""
+    try:
+        if not SMALINK_ON:
+            return
+        today = now_ist.strftime("%Y-%m-%d")
+        if _smalink["date"] != today:
+            _smalink.update(date=today, keys=set(), count=0)
+        rows = _smalink_rows(now_ist, top)
+        if not rows:
+            return
+        new = [x for x in rows if x["_key"] not in _smalink["keys"]]
+        if not new:
+            return
+        for x in new:
+            _smalink["keys"].add(x["_key"])
+        if len(new) == len(rows) and len(rows) > 25:           # first run after a restart: do not flood the phone with setups already seen
+            new = [x for x in new if x["_strong"]]
+        log.info(f"Spurt10 SMA200 link: {[(x['symbol'], x['tf'], x['side']) for x in new]}")
+        topic = os.environ.get("NTFY_TOPIC", "").strip()
+        if not new or not (NTFY_ON and topic) or _smalink["count"] >= SMALINK_ALERT_MAX:
+            return
+        lines = [f"{x['symbol']}  {x['side']}  {x['tf']}{'  STRONG' if x['_strong'] else ''}  close {float(x['close']):.2f}  SMA200 {float(x['sma200']):.2f}  stop {x.get('stop')}  "
+                 f"vol {float(x.get('vol_x') or 0):.1f}x  spurt {x['_mult']:.1f}x" for x in new[:12]]
+        try:
+            import requests
+            resp = requests.post(f"https://ntfy.sh/{topic}", data="\n".join(lines).encode("utf-8"), timeout=8,
+                                 headers={"Title": f"SMA200 setup on spurt stock ({len(new)})", "Priority": "urgent", "Tags": "mag,chart_with_upwards_trend"})
+            if resp.status_code >= 300:
+                log.warning(f"Spurt10 SMA200 ntfy refused: {resp.status_code} {resp.text[:150]}")
+                return
+        except Exception as ex:
+            log.warning(f"Spurt10 SMA200 ntfy failed: {ex}")
+            return
+        _smalink["count"] += 1
+    except Exception as e:
+        log.warning(f"Spurt10 SMA200 link step failed: {e}")
+
+
+def _smalink_html():
+    """Section: SMA200 setups of the spurt stocks. Never raises."""
+    try:
+        if not SMALINK_ON:
+            return ""
+        out = (f'<h2>SMA200 setups on spurt stocks &mdash; support / rejection of the SMA200</h2>'
+               '<div class="m">From the SMA200 scan (<a href="/sma200now" target="_blank" rel="noopener">/sma200now</a>), only the stocks that are in the spurt list. '
+               '<b>LONG</b> = SMA200 rising, price above it, a candle dipped to the SMA200 and closed back above. <b>SHORT</b> = SMA200 falling, price below it, a candle rallied to it and closed back below. '
+               '&#9733; = volume &ge; 1.5x average and SMA slope &ge; 1x normal. A phone alert is sent once per new setup. The rule is still being backtested: treat as a watch list. Information only.</div>')
+        rows = _smalink_rows(datetime.now(ZoneInfo("Asia/Kolkata")).replace(tzinfo=None), None)
+        if rows is None:
+            return out + '<div class="m">The SMA200 file (results/sma200_now.json) was not found. It is written by the intraday / swing scan.</div>'
+        syms_now = None
+        if not rows:
+            return out + '<div class="m">None of the spurt stocks has an SMA200 setup right now.</div>'
+        body = ""
+        for x in rows:
+            long_ = x.get("side") == "LONG"
+            cl = "#0a7d33" if long_ else "#c62828"
+            body += (f"<tr><td>{_tvl(x['symbol'])}{' &#9733;' if x['_strong'] else ''}</td><td>{x.get('tf')}</td><td><b style=\"color:{cl}\">{x.get('side')}</b></td><td>{x.get('bar_time')}</td>"
+                     f"<td>{float(x['close']):.2f}</td><td>{float(x['sma200']):.2f}</td><td>{float(x.get('dist_pct') or 0):.2f}%</td><td>{float(x.get('vol_x') or 0):.1f}x</td>"
+                     f"<td>{x.get('stop')}</td><td>{x.get('risk_pct')}%</td><td>{x['_mult']:.1f}x</td><td>{str(x.get('first_seen', ''))[11:16]}</td></tr>")
+        return out + ('<div class="w"><table class="sp"><tr><th>Symbol</th><th>TF</th><th>Side</th><th>Signal candle</th><th>Close</th><th>SMA200</th><th>Distance</th>'
+                      '<th>Volume</th><th>Stop</th><th>Risk</th><th>Spurt</th><th>Seen</th></tr>' + body + '</table></div>')
     except Exception:
         return ""
 
@@ -3058,6 +3167,7 @@ def run_once():
     except Exception as e:
         log.warning(f"Spurt10 engulfing step failed: {e}")
     _strong_update(top, now_ist, sid_of)
+    _smalink_update(top, now_ist)
     _pat_follow(now_ist)
     _room_update(top, quotes, now_ist)
     _state_save()
@@ -3598,6 +3708,7 @@ th,td{{border:1px solid #ddd;padding:6px 8px;text-align:right;font-size:14px}}th
 {_clean_html()}
 {_engulf_html()}
 {_strong_html()}
+{_smalink_html()}
 {_room_html()}
 {_watch_html(meta)}
 {_news_html(meta)}
