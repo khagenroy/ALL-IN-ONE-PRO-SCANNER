@@ -62,7 +62,7 @@ WORKERS = int(os.environ.get("SPURT10_WORKERS", "4") or "4")
 ALERT_MULT = float(os.environ.get("SPURT10_ALERT_MULT", "3.0") or "3.0")
 NTFY_ON = os.environ.get("SPURT10_NTFY", "true").strip().lower() == "true"
 NTFY_MAX_PER_DAY = int(os.environ.get("SPURT10_NTFY_MAX_PER_DAY", "40") or "40")
-SPURT_TF = 5                 # CHANGED 7 Nov: candle size (minutes) of the main volume spurt - 5 (was 10). The cycle runs every SPURT_TF minutes and the volume average is of the last 50 candles of this size. Set 10 to go back.
+SPURT_TF = 10                # CHANGED 7 Nov: candle size (minutes) of the main volume spurt - 5 (was 10). The cycle runs every SPURT_TF minutes and the volume average is of the last 50 candles of this size. Set 10 to go back.
 ZONE_TF = max(5, int(os.environ.get("SPURT10_ZONE_TF", "15") or "15") // 5 * 5)     # zone candles, minutes (multiple of 5)
 WATCH_MULT = float(os.environ.get("SPURT10_WATCH_MULT", "20") or "20")
 WATCH_MAX = int(os.environ.get("SPURT10_WATCH_MAX", "100") or "100")
@@ -3152,6 +3152,11 @@ def run_once():
         spurt_choch.update(_hook_rows, now_ist)
     except Exception as _e:
         log.warning(f"spurt_choch failed: {_e}")
+    try:                                                            # ADDED 16 Nov: pullback (retrace) after each CHoCH on a spurt stock, section on /spurt10 + phone alert on the trigger
+        import spurt_retrace
+        spurt_retrace.update(_hook_rows, now_ist)
+    except Exception as _e:
+        log.warning(f"spurt_retrace failed: {_e}")
     try:                                                            # ADDED 13 Nov: spurt -> pullback -> strong candle BUY setups, page /spurt_buy
         import spurt_buy
         spurt_buy.update(_hook_rows, now_ist)
@@ -3589,6 +3594,14 @@ def _chochset_html():
         return ""
 
 
+def _retraceset_html():
+    try:
+        import spurt_retrace
+        return spurt_retrace.section_html()
+    except Exception:
+        return ""
+
+
 def _wickset_html():
     try:
         import spurt_wick
@@ -3698,11 +3711,12 @@ th,td{{border:1px solid #ddd;padding:6px 8px;text-align:right;font-size:14px}}th
 <h2>Volume Spurt &mdash; latest {SPURT_TF}-min candle vs {meta['sma_len']}-candle volume average (top {len(top)})</h2>
 <div class="m">Run: {meta['run']} (took {meta['took_s']}s) &middot; {meta['universe']} NSE stocks (ETFs left out: {meta.get('etf_excluded', 0)}; thin stocks left out: {meta.get('thin_removed', 0)}), {meta['price_ok']} priced &ge; {meta['min_price']:.0f},
 {meta['shortlisted']} shortlisted, {meta['scored']} scored, {meta['failed']} errors &middot; refreshes every {SPURT_TF} min &middot; {LEGEND} &middot; phone alert at {meta.get('alert_mult', 3.0):g}x or more &middot; zones = ALL IN ONE PRO order-block zones on the {ZONE_TF}-min chart (same as the indicator on a {ZONE_TF}-min chart); purple "{ZONE_TF}m+{CONF_TF}m zone" = the same zone also exists on the {CONF_TF}-min chart (stronger); volume spurt = 10-min candles &middot;
-<a href="/spurt10.csv">CSV</a> (this cycle) &middot; <a href="/spurt10_history">full-day history page</a> &middot; <a href="/spurt10_history.csv">history CSV</a> &middot; <a href="/spurt_sell">Spurt SELL signals</a> &middot; <a href="/spurt_daily">Daily volume spurt</a> &middot; <a href="/scanner">Scanner</a></div>
+<a href="/spurt10.csv">CSV</a> (this cycle) &middot; <a href="/spurt10_history">full-day history page</a> &middot; <a href="/spurt10_history.csv">history CSV</a> &middot; <a href="/spurt_scans">each scan: CSV + TradingView watchlist</a> &middot; <a href="/spurt_sell">Spurt SELL signals</a> &middot; <a href="/spurt_daily">Daily volume spurt</a> &middot; <a href="/scanner">Scanner</a></div>
 <div class="w"><table class="sp"><tr><th>#</th><th>Symbol</th><th>Price</th><th>Day %</th><th>Candle</th><th>Candle %</th><th>Candle type</th>
 <th>Candle volume</th><th>{meta['sma_len']}-candle avg vol</th><th>Multiple</th><th><a href="/depth" target="_blank" rel="noopener" title="open the Bids / Offers page" style="color:#fff;text-decoration:underline">Bids %</a></th><th><a href="/depth" target="_blank" rel="noopener" title="open the Bids / Offers page" style="color:#fff;text-decoration:underline">Offers %</a></th><th>Day volume</th><th>Support zone ({ZONE_TF}m)</th><th>Resistance zone ({ZONE_TF}m)</th><th>Zone view</th></tr>{body}</table></div>
 {_link_html()}
 {_chochset_html()}
+{_retraceset_html()}
 {_wickset_html()}
 {_wick_html()}
 {_clean_html()}
