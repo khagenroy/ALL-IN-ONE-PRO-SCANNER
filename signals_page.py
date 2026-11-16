@@ -18,6 +18,11 @@ import json
 import html
 import glob
 import threading
+import contextlib
+try:
+    import fcntl
+except Exception:          # not on Linux: no cross-process lock
+    fcntl = None
 from datetime import datetime, timezone, timedelta
 
 import spurt10_live as sp
@@ -33,6 +38,7 @@ CSV_COLS = ["date", "time", "symbol", "signal", "side", "entry", "sl", "t1", "t2
             "t1_time", "t2_time", "t3_time", "t4_time", "t5_time", "t6_time", "exit_time", "last_price", "updated"]
 _lock = threading.RLock()
 _days = {}          # date -> rows (only days touched in this run are kept in memory)
+_mt = {}            # date -> modified time of the day file when it was last read / written by THIS process
 
 
 def _now():
@@ -55,8 +61,41 @@ def _path(day):
     return os.path.join(DAYS_DIR, day + ".json")
 
 
-def _rows(day):
-    if day not in _days:
+def _mtime(day):
+    try:
+        return os.path.getmtime(_path(day))
+    except OSError:
+        return 0
+
+
+@contextlib.contextmanager
+def _flock():
+    """CHANGED 16 Nov: lock shared by every worker process (the file lock), so two workers never write the day file at the same time."""
+    fh = None
+    try:
+        os.makedirs(DAYS_DIR, exist_ok=True)
+        fh = open(os.path.join(DAYS_DIR, ".lock"), "w")
+        if fcntl:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+    except Exception:
+        pass
+    try:
+        yield
+    finally:
+        try:
+            if fh:
+                if fcntl:
+                    fcntl.flock(fh, fcntl.LOCK_UN)
+                fh.close()
+        except Exception:
+            pass
+
+
+def _rows(day, fresh=False):
+    """CHANGED 16 Nov: the day file is re-read whenever another worker process has changed it (it used to be read once and kept, so a worker that
+    did not run the scan showed 'No signal yet' while the phone alert had already gone out)."""
+    if fresh or day not in _days or _mt.get(day) != _mtime(day):
+        _mt[day] = _mtime(day)
         try:
             with open(_path(day)) as f:
                 d = json.load(f)
@@ -75,6 +114,7 @@ def _save(day):
         with open(_path(day) + ".tmp", "w") as f:
             json.dump(_days.get(day, []), f)
         os.replace(_path(day) + ".tmp", _path(day))
+        _mt[day] = _mtime(day)
     except Exception:
         pass
 
@@ -89,17 +129,14 @@ def _day_list():
 # ------------------------------------------------------------------------------------------------------- adding signals
 def _insert(row, key=""):
     day = row["date"]
-    with _lock:
-        rows = _rows(day)
+    with _lock, _flock():
+        rows = _rows(day, True)
         if key:
             for r in rows:
                 if r.get("key") == key:
                     return False
         for r in reversed(rows[-60:]):          # same signal on the same stock within 10 minutes (e.g. also sent by the bridge) is listed once
             if r.get("symbol") == row["symbol"] and r.get("signal") == row["signal"] and abs(r.get("sec", 0) - row["sec"]) < DUP_SECONDS:
-                if row.get("src") == "bridge":          # 15 Nov: the TradingView alert of a signal the scanner found first - the scanner must not trade it (scanner_trade.py)
-                    r["tv"] = True
-                    _save(day)
                 return False
         row["key"] = key
         rows.append(row)
@@ -116,15 +153,7 @@ def _mk(symbol, signal, side, price, sl, t1, t2, t6, qty, source, from_ts):
 
 def add(symbol, signal, side, price, sl, t1, t2, t6=None, qty="", key="", source="scanner", from_ts=""):
     """Called by the scanner's own scans. from_ts = 'YYYY-MM-DD HH:MM' = open time of the first 5-minute candle to follow. True when NEW."""
-    row = _mk(symbol, signal, side, price, sl, t1, t2, t6, qty, source, from_ts)
-    ok = _insert(row, key)
-    if ok and source in ("scan", "section A"):
-        try:
-            import scanner_trade
-            scanner_trade.schedule(row)         # 15 Nov: scanner auto-trade (1 share, via the bridge) - only for a fresh signal, after a short wait for the TradingView one
-        except Exception:
-            pass
-    return ok
+    return _insert(_mk(symbol, signal, side, price, sl, t1, t2, t6, qty, source, from_ts), key)
 
 
 def receive(d):
@@ -181,8 +210,8 @@ def update_outcomes(symbol, bars, day_over=False):
     """bars = [(open time 'YYYY-MM-DD HH:MM', o, h, l, c)] oldest first (candles of today). Called by signals_scan for each scanned stock."""
     day = _now().strftime("%Y-%m-%d")
     changed = False
-    with _lock:
-        rows = _rows(day)
+    with _lock, _flock():
+        rows = _rows(day, True)
         for r in rows:
             if r.get("symbol") != symbol or r.get("exit") not in ("OPEN",) or not r.get("from_ts"):
                 continue
