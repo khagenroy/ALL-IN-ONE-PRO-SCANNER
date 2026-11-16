@@ -193,6 +193,429 @@ def _load_depth_snapshot():
     return None
 
 
+# ---------------------------------------------------------------- ADDED 16 Nov: Dhan 20-level market depth + WALLS (big single price levels)
+WALL_ON = True              # ADDED 16 Nov: after every 10-min cycle read the 20-level depth of the top spurt stocks and list the ones standing AT A WALL on /depth. False = off
+WALL_SHARE = 25.0           # a wall = one price level holding at least this % of that side's total 20-level quantity ...
+WALL_MULT = 3.0             # ... and at least this many times the average level of that side ...
+WALL_DIST_PCT = 0.5         # ... and sitting within this % of the last price (a wall far away does not matter now)
+WALL_MAX_STOCKS = 50        # Dhan allows 50 instruments per 20-level connection
+WALL_WAIT_SEC = 6.0         # how long one snapshot waits for the first full bid + ask packets
+WALL_PATH = os.path.join(os.path.dirname(__file__), "results", "walls_snapshot.json")   # saved like the /depth snapshot so every worker shows the same list
+_ws_lock = threading.Lock()  # one 20-level connection at a time (Dhan closes the oldest when more than 5 are open)
+
+
+def _ws_open(host, port, path, tls=True, timeout=8.0):
+    """Minimal WebSocket client (standard library only, no new package). Returns (socket, bytes already read after the handshake)."""
+    import socket, ssl, base64
+    raw = socket.create_connection((host, port), timeout=timeout)
+    s = ssl.create_default_context().wrap_socket(raw, server_hostname=host) if tls else raw
+    s.settimeout(timeout)
+    key = base64.b64encode(os.urandom(16)).decode()
+    s.sendall((f"GET {path} HTTP/1.1\r\nHost: {host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+               f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n").encode())
+    buf = b""
+    while b"\r\n\r\n" not in buf:
+        c = s.recv(4096)
+        if not c:
+            raise RuntimeError("Dhan closed the connection during the handshake")
+        buf += c
+    head, _, rest = buf.partition(b"\r\n\r\n")
+    first = head.split(b"\r\n")[0]
+    if b" 101" not in first:
+        raise RuntimeError("Dhan refused the depth connection: " + first.decode("latin1")[:60])
+    return s, rest
+
+
+class _WsBuf:
+    """Reads WebSocket frames from a socket."""
+    def __init__(self, s, rest=b""):
+        self.s, self.b = s, bytearray(rest)
+
+    def _need(self, n):
+        while len(self.b) < n:
+            c = self.s.recv(65536)
+            if not c:
+                raise EOFError("connection closed")
+            self.b += c
+
+    def frame(self):
+        self._need(2)
+        b0, b1 = self.b[0], self.b[1]
+        fin, op, ln, off = b0 & 0x80, b0 & 0x0F, b1 & 0x7F, 2
+        if ln == 126:
+            self._need(4)
+            ln, off = int.from_bytes(self.b[2:4], "big"), 4
+        elif ln == 127:
+            self._need(10)
+            ln, off = int.from_bytes(self.b[2:10], "big"), 10
+        mk = None
+        if b1 & 0x80:
+            self._need(off + 4)
+            mk, off = bytes(self.b[off:off + 4]), off + 4
+        self._need(off + ln)
+        data = bytes(self.b[off:off + ln])
+        del self.b[:off + ln]
+        if mk:
+            data = bytes(x ^ mk[i % 4] for i, x in enumerate(data))
+        return fin, op, data
+
+
+def _ws_send(s, op, data=b""):
+    mk, n = os.urandom(4), len(data)
+    h = bytes([0x80 | op])
+    h += bytes([0x80 | n]) if n < 126 else (bytes([0x80 | 126]) + n.to_bytes(2, "big") if n < 65536 else bytes([0x80 | 127]) + n.to_bytes(8, "big"))
+    s.sendall(h + mk + bytes(x ^ mk[i % 4] for i, x in enumerate(data)))
+
+
+def _parse_depth20(msg, want, acc):
+    """Dhan 20-level binary message -> acc[symbol] = {"bids": [(price, qty, orders)], "asks": [...]}.
+    Header 12 bytes (int16 length, byte feed code 41 = bid / 51 = ask / 50 = disconnect, byte segment, int32 security id, uint32 sequence)
+    + 20 x 16 bytes (float64 price, uint32 qty, uint32 orders). Bid and ask packets of each stock follow each other in one message.
+    Byte order is checked against the security ids we asked for (Dhan feeds are little-endian)."""
+    import struct
+    n, off, notes = len(msg), 0, []
+    while off + 12 <= n:
+        code = msg[off + 2]
+        E = "<"
+        sid = struct.unpack_from("<i", msg, off + 4)[0]
+        if sid not in want:
+            sid2 = struct.unpack_from(">i", msg, off + 4)[0]
+            if sid2 in want:
+                sid, E = sid2, ">"
+        if code == 50:
+            try:
+                notes.append("Dhan disconnected us, code " + str(struct.unpack_from(E + "h", msg, off + 12)[0]))
+            except Exception:
+                notes.append("Dhan disconnected us")
+            break
+        if code in (41, 51) and sid in want and off + 332 <= n:
+            lv = []
+            for k in range(20):
+                p, q, o = struct.unpack_from(E + "dII", msg, off + 12 + 16 * k)
+                if p == p and 0 < p < 1e7 and q > 0:
+                    lv.append((float(p), int(q), int(o)))
+            acc.setdefault(want[sid], {})["bids" if code == 41 else "asks"] = lv
+            off += 332
+        else:
+            break
+    return notes
+
+
+def _depth20_snapshot(pairs, wait=None, host="depth-api-feed.dhan.co", port=443, tls=True):
+    """ONE short 20-level connection: subscribe to up to 50 stocks, read the first bid + ask packet of each, close. pairs = [(symbol, security id)].
+    Returns ({symbol: {"bids": [...], "asks": [...]}}, note). Never raises."""
+    import socket
+    res, note = {}, ""
+    pairs = [(s_, i_) for s_, i_ in pairs][:WALL_MAX_STOCKS]
+    if not pairs:
+        return res, "no stocks"
+    tok = str(getattr(ls, "DHAN_ACCESS_TOKEN", "") or os.environ.get("DHAN_ACCESS_TOKEN", ""))
+    cid = str(getattr(ls, "DHAN_CLIENT_ID", "") or os.environ.get("DHAN_CLIENT_ID", ""))
+    if not tok or not cid:
+        return res, "Dhan token / client id missing"
+    want = {int(i_): s_ for s_, i_ in pairs}
+    wait = WALL_WAIT_SEC if wait is None else wait
+    with _ws_lock:
+        s = None
+        try:
+            s, rest = _ws_open(host, port, f"/twentydepth?token={tok}&clientId={cid}&authType=2", tls=tls)
+            wb = _WsBuf(s, rest)
+            _ws_send(s, 1, json.dumps({"RequestCode": 23, "InstrumentCount": len(pairs),
+                                       "InstrumentList": [{"ExchangeSegment": "NSE_EQ", "SecurityId": str(i_)} for _, i_ in pairs]}).encode())
+            t_end, cont = time.time() + wait, b""
+            while time.time() < t_end and not all(("bids" in res.get(sy, {}) and "asks" in res.get(sy, {})) for sy in want.values()):
+                s.settimeout(max(0.5, t_end - time.time()))
+                try:
+                    fin, op, data = wb.frame()
+                except socket.timeout:
+                    break
+                if op == 9:
+                    _ws_send(s, 10, data)
+                elif op == 8:
+                    note = "Dhan closed the depth connection"
+                    break
+                elif op in (0, 1, 2):
+                    cont += data
+                    if fin:
+                        if op != 1 or cont[:1] != b"{":
+                            nt = _parse_depth20(cont, want, res)
+                            if nt:
+                                note = "; ".join(nt)
+                        else:
+                            note = "Dhan message: " + cont[:120].decode("utf8", "replace")
+                        cont = b""
+            if not res and not note:
+                note = "no depth packets arrived (market closed, or Dhan sent a format this reader does not know)"
+        except Exception as e:
+            note = f"{type(e).__name__}: {str(e)[:120]}".replace(tok, "***")
+        finally:
+            if s is not None:
+                try:
+                    _ws_send(s, 1, json.dumps({"RequestCode": 11}).encode())
+                    _ws_send(s, 8, b"\x03\xe8")
+                except Exception:
+                    pass
+                try:
+                    s.close()
+                except Exception:
+                    pass
+    return res, note
+
+
+def _wall_side(levels, ltp):
+    """The biggest WALL on one side (dict) or None. levels = [(price, qty, orders)] best first."""
+    try:
+        if not levels or ltp <= 0:
+            return None
+        tot = float(sum(q for _, q, _ in levels))
+        avg = tot / len(levels)
+        best = None
+        for p, q, o in levels:
+            share, mult, dist = q / tot * 100.0, q / avg, abs(p - ltp) / ltp * 100.0
+            if share >= WALL_SHARE and mult >= WALL_MULT and dist <= WALL_DIST_PCT and (best is None or q > best["qty"]):
+                best = {"price": p, "qty": q, "orders": o, "share": round(share, 1), "mult": round(mult, 1), "dist": round(dist, 2)}
+        return best
+    except Exception:
+        return None
+
+
+def _wall_eval(d, ltp):
+    """None when the stock stands at no wall, else a row: side BUY (big bid wall just below = support) or SELL (big ask wall just above = resistance)."""
+    bids, asks = d.get("bids") or [], d.get("asks") or []
+    if ltp <= 0 and bids and asks:
+        ltp = (bids[0][0] + asks[0][0]) / 2.0
+    b, a = _wall_side(bids, ltp), _wall_side(asks, ltp)
+    if not b and not a:
+        return None
+    pick, side = (b, "BUY") if (b and (not a or b["mult"] >= a["mult"])) else (a, "SELL")
+    bq, aq = float(sum(q for _, q, _ in bids)), float(sum(q for _, q, _ in asks))
+    row = dict(pick)
+    row.update({"side": side, "both": bool(b and a), "ltp": round(ltp, 2),
+                "bids_pct": round(bq / (bq + aq) * 100.0, 1) if bq + aq > 0 else None})
+    return row
+
+
+WALL_HIST_PATH = os.path.join(os.path.dirname(__file__), "results", "walls_history.csv")   # ADDED 16 Nov: every wall seen + what the price did 10 / 30 / 60 min later
+WALL_HIST_COLS = ["date", "time", "symbol", "side", "wall_price", "ltp", "dist_pct", "qty", "orders", "share_pct", "x_avg_level", "bids_pct_20", "spurt_x", "zone",
+                  "ltp_10m", "ltp_30m", "ltp_60m", "move30_pct", "held30", "match"]
+
+
+def _wall_log(rows, now_ist):
+    """ADDED 16 Nov: append the new walls of this cycle to results/walls_history.csv and fill in the price 10 / 30 / 60 minutes after each earlier wall of today.
+    move30_pct = % move after 30 min in the wall's direction (BUY wall: up is +, SELL wall: down is +). held30 = YES when the price 30 min later had not gone through the wall
+    by more than 0.1% (a single price sample, not the low / high in between). Never raises."""
+    import csv
+    try:
+        today = now_ist.strftime("%Y-%m-%d")
+        hist = []
+        try:
+            with open(WALL_HIST_PATH, newline="") as f:
+                hist = [dict(r) for r in csv.DictReader(f)]
+        except FileNotFoundError:
+            pass
+        for h in hist:                                              # fill the later prices of today's walls
+            if h.get("date") != today:
+                continue
+            try:
+                age = (now_ist.replace(tzinfo=None) - datetime.strptime(h["date"] + " " + h["time"], "%Y-%m-%d %H:%M:%S")).total_seconds() / 60.0
+            except Exception:
+                continue
+            px = (_dsnap.get(h.get("symbol")) or {}).get("px")
+            if not px:
+                continue
+            for col, mins in (("ltp_10m", 9), ("ltp_30m", 28), ("ltp_60m", 58)):
+                if not h.get(col) and age >= mins:
+                    h[col] = f"{float(px):.2f}"
+            if h.get("ltp_30m") and not h.get("held30"):
+                try:
+                    l0, l30, wp = float(h["ltp"]), float(h["ltp_30m"]), float(h["wall_price"])
+                    buy = h["side"] == "BUY"
+                    h["move30_pct"] = f"{((l30 - l0) / l0 * 100.0) * (1 if buy else -1):.2f}"
+                    h["held30"] = "YES" if ((l30 >= wp * 0.999) if buy else (l30 <= wp * 1.001)) else "NO"
+                except Exception:
+                    pass
+        seen = {(h.get("date"), h.get("symbol"), h.get("side"), h.get("wall_price")) for h in hist}
+        new = []
+        for r in rows:                                              # a wall that stands for hours is logged once
+            key = (today, r["symbol"], r["side"], f"{r['price']:.2f}")
+            if key in seen:
+                continue
+            seen.add(key)
+            new.append(r)
+            hist.append({"date": today, "time": now_ist.strftime("%H:%M:%S"), "symbol": r["symbol"], "side": r["side"], "wall_price": f"{r['price']:.2f}", "ltp": f"{r['ltp']:.2f}",
+                         "dist_pct": r["dist"], "qty": int(r["qty"]), "orders": int(r["orders"]), "share_pct": r["share"], "x_avg_level": r["mult"],
+                         "bids_pct_20": r.get("bids_pct") if r.get("bids_pct") is not None else "", "spurt_x": r.get("mult_spurt") or "",
+                         "zone": (("AT SUPPORT" if r.get("at") == "SUPPORT" else "AT RESISTANCE" if r.get("at") == "RESISTANCE" else "")),
+                         "ltp_10m": "", "ltp_30m": "", "ltp_60m": "", "move30_pct": "", "held30": "", "match": r.get("match", "")})
+        os.makedirs(os.path.dirname(WALL_HIST_PATH), exist_ok=True)
+        tmp = WALL_HIST_PATH + ".tmp"
+        with open(tmp, "w", newline="") as f:
+            wr = csv.DictWriter(f, fieldnames=WALL_HIST_COLS, extrasaction="ignore")
+            wr.writeheader()
+            wr.writerows(hist)
+        os.replace(tmp, WALL_HIST_PATH)
+        return new
+    except Exception as e:
+        log.warning(f"Spurt10: wall history log failed: {e}")
+        return []
+
+
+def _wall_stats_html():
+    """ADDED 16 Nov: one line per side - how often the price stayed on the right side of the wall 30 min later (from results/walls_history.csv). Never raises."""
+    import csv
+    try:
+        with open(WALL_HIST_PATH, newline="") as f:
+            hist = [r for r in csv.DictReader(f) if r.get("held30") in ("YES", "NO")]
+        if not hist:
+            return '<div class="m">Wall history: walls are logged to results/walls_history.csv with the price 10 / 30 / 60 minutes later; the hold rate shows here once 30-minute outcomes exist.</div>'
+        out = []
+        for side, nm in (("BUY", "BUY SIDE walls"), ("SELL", "SELL SIDE walls")):
+            xs = [r for r in hist if r["side"] == side]
+            if xs:
+                ok = sum(1 for r in xs if r["held30"] == "YES")
+                mv = [float(r["move30_pct"]) for r in xs if r.get("move30_pct")]
+                out.append(f"{nm}: held {ok} of {len(xs)} ({ok / len(xs) * 100:.0f}%), average move after 30 min in the wall's direction {sum(mv) / len(mv):+.2f}%")
+        return '<div class="m"><b>Wall history</b> (' + str(len(hist)) + " walls with a 30-min outcome, all days): " + " &middot; ".join(out) + ' &middot; "held" = 30 min later the price had not gone through the wall by more than 0.1%</div>'
+    except FileNotFoundError:
+        return '<div class="m">Wall history: walls are logged to results/walls_history.csv with the price 10 / 30 / 60 minutes later; the hold rate shows here once 30-minute outcomes exist.</div>'
+    except Exception:
+        return ""
+
+
+WALL_ALERT_ON = True        # ADDED 16 Nov: phone alert (ntfy, same topic as the other alerts) when a top spurt stock is found standing at a wall. False = off
+WALL_ALERT_MAX = 40         # at most this many wall alerts a day
+_wall_alerted = {"date": None, "count": 0}
+
+
+def _wall_alert(new_rows, now_ist):
+    """ADDED 16 Nov: phone notification for each NEW wall (a wall is announced once a day per stock, side and wall price). Information only. Never raises."""
+    try:
+        topic = os.environ.get("NTFY_TOPIC", "").strip()
+        if not (WALL_ALERT_ON and NTFY_ON and topic and new_rows):
+            return
+        today = now_ist.strftime("%Y-%m-%d")
+        if _wall_alerted["date"] != today:
+            _wall_alerted.update(date=today, count=0)
+        if _wall_alerted["count"] >= WALL_ALERT_MAX:
+            return
+        import requests
+        sent = False
+        for grp, title, prio, tag in (([r for r in new_rows if r.get("match") == "MATCH"], "MATCH: {n} spurt stock(s) at a wall AND a zone", "high", "white_check_mark"),
+                                      ([r for r in new_rows if r.get("match") != "MATCH"], "{n} spurt stock(s) at a wall", "default", "brick")):
+            if not grp:
+                continue
+            lines = []
+            for r in sorted(grp, key=lambda x: -x["mult"])[:12]:
+                buy = r["side"] == "BUY"
+                zt = f"  AT {'SUPPORT ' + str(r.get('sup')) if r.get('at') == 'SUPPORT' else 'RESISTANCE ' + str(r.get('res'))}" if r.get("at") in ("SUPPORT", "RESISTANCE") else ""
+                cf = "  (CONFLICT with the zone)" if r.get("match") == "CONFLICT" else ""
+                lines.append(f"{r['symbol']}  {'BUY SIDE (support)' if buy else 'SELL SIDE (resistance)'} wall {r['price']:.2f}  price {r['ltp']:.2f} ({r['dist']:.2f}% away)  "
+                             f"{int(r['qty']):,} sh, {r['share']:g}% of side, {r['mult']:g}x avg" + zt + cf)
+            extra = f"\n+{len(grp) - 12} more on the /depth page" if len(grp) > 12 else ""
+            resp = requests.post(f"https://ntfy.sh/{topic}", data=("\n".join(lines) + extra).encode("utf-8"), timeout=8,
+                                 headers={"Title": title.format(n=len(grp)), "Priority": prio, "Tags": tag})
+            if resp.status_code >= 300:
+                log.warning(f"Spurt10 wall ntfy refused: {resp.status_code} {resp.text[:150]}")
+            else:
+                sent = True
+        if not sent:
+            return
+        _wall_alerted["count"] += 1
+    except Exception as e:
+        log.warning(f"Spurt10 wall ntfy failed: {e}")
+
+
+def _wall_match(w):
+    """ADDED 16 Nov: "MATCH" = BUY SIDE wall while the stock is AT SUPPORT, or SELL SIDE wall while AT RESISTANCE (zone and order book agree);
+    "CONFLICT" = the opposite pairing; "" = the stock is not at a zone."""
+    at, side = w.get("at"), w.get("side")
+    if (side == "BUY" and at == "SUPPORT") or (side == "SELL" and at == "RESISTANCE"):
+        return "MATCH"
+    if (side == "BUY" and at == "RESISTANCE") or (side == "SELL" and at == "SUPPORT"):
+        return "CONFLICT"
+    return ""
+
+
+def _wall_scan(top, now_ist, sid_of):
+    """ADDED 16 Nov: after the cycle - 20-level depth of the top spurt stocks, list those AT A WALL, save to disk. Never raises."""
+    try:
+        if not WALL_ON:
+            return
+        pairs = [(r["symbol"], sid_of[r["symbol"]]) for r in top if r.get("symbol") in sid_of][:WALL_MAX_STOCKS]
+        res, note = _depth20_snapshot(pairs)
+        rows = []
+        for r in top:
+            sym = r.get("symbol")
+            d = res.get(sym)
+            if not d or not d.get("bids") or not d.get("asks"):
+                continue
+            ltp = float((_dsnap.get(sym) or {}).get("px") or r.get("price") or r.get("close") or 0)
+            w = _wall_eval(d, ltp)
+            if w:
+                w.update({"symbol": sym, "mult_spurt": r.get("multiple"), "at": r.get("at_zone") or "", "sup": r.get("support") or "", "res": r.get("resistance") or ""})
+                w["match"] = _wall_match(w)
+                rows.append(w)
+        rows.sort(key=lambda x: (0 if x.get("match") == "MATCH" else 1, -x["mult"]))
+        _wall_alert(_wall_log(rows, now_ist), now_ist)
+        out = {"run": now_ist.strftime("%Y-%m-%d %H:%M:%S IST"), "read": len(res), "asked": len(pairs), "note": note, "rows": rows}
+        os.makedirs(os.path.dirname(WALL_PATH), exist_ok=True)
+        tmp = WALL_PATH + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(out, f)
+        os.replace(tmp, WALL_PATH)
+        log.info(f"Spurt10: 20-level depth read for {len(res)} of {len(pairs)} stocks, {len(rows)} at a wall" + (f" ({note})" if note else ""))
+    except Exception as e:
+        log.warning(f"Spurt10: wall scan failed: {e}")
+
+
+def _load_walls():
+    try:
+        with open(WALL_PATH, "r") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _walls_section_html():
+    """ADDED 16 Nov: the 'Stocks at a wall' table shown at the top of /depth. Never raises."""
+    try:
+        w = _load_walls()
+        if not WALL_ON:
+            return ""
+        intro = (f'<div class="m">A <b>wall</b> = one price level holding at least {WALL_SHARE:g}% of that side\'s 20-level quantity (and {WALL_MULT:g}x the average level) within {WALL_DIST_PCT:g}% of the price. '
+                 '<b>MATCH</b> = BUY SIDE wall at a support zone, or SELL SIDE wall at a resistance zone (zone and order book agree, listed first); <b>CONFLICT</b> = the opposite pairing. '
+                 '<b style="color:#0a7d33">BUY SIDE</b> = big bid wall just below the price (support, buyers waiting). <b style="color:#c62828">SELL SIDE</b> = big ask wall just above the price (resistance, sellers waiting). '
+                 'Read from Dhan 20-level depth for the top spurt stocks every 10 minutes. Information only.</div>')
+        if not w:
+            return "<h2>Stocks at a wall</h2>" + intro + '<p class="m">No 20-level reading yet. It fills at the next 10-min cycle.</p>'
+        rows = w.get("rows") or []
+        body = ""
+        for i, r in enumerate(rows, 1):
+            buy = r["side"] == "BUY"
+            col, bgc = ("#0a7d33", "#d4f0dc") if buy else ("#c62828", "#f8d9d6")
+            tag = f'<td style="background:{bgc};text-align:left"><b style="color:{col}">{"BUY SIDE" if buy else "SELL SIDE"}</b> {"support" if buy else "resistance"}{" (both sides)" if r.get("both") else ""}</td>'
+            zi = r.get("at")
+            zt = f'AT SUPPORT {r.get("sup", "")}' if zi == "SUPPORT" else f'AT RESISTANCE {r.get("res", "")}' if zi == "RESISTANCE" else "-"
+            sym = r["symbol"]
+            lk = f'<a href="/depth/{sym}" target="_blank" rel="noopener" title="open the 20-level depth of this stock" style="color:inherit;text-decoration:none;border-bottom:1px dotted #888">'
+            ms = r.get("mult_spurt")
+            mt = r.get("match")
+            mtc = ('<td style="background:#2e9e4f;color:#fff"><b>MATCH</b></td>' if mt == "MATCH" else '<td style="background:#f3e3b0"><b>CONFLICT</b></td>' if mt == "CONFLICT" else "<td>-</td>")
+            trs = ' style="outline:2px solid #2e9e4f"' if mt == "MATCH" else ""
+            body += (f"<tr{trs}><td>{i}</td><td>{_tvl(sym)}</td><td>{r['ltp']:.2f}</td>{tag}{mtc}<td><b>{lk}{r['price']:.2f}</a></b></td><td>{r['dist']:.2f}%</td>"
+                     f"<td>{int(r['qty']):,}</td><td>{int(r['orders']):,}</td><td>{r['share']:g}%</td><td>{r['mult']:g}x</td>"
+                     f"<td>{'-' if r.get('bids_pct') is None else format(r['bids_pct'], '.1f') + '%'}</td><td>{'-' if not ms else format(float(ms), '.2f') + 'x'}</td><td style='text-align:left'>{zt}</td></tr>")
+        hdr = ("<tr><th>#</th><th>Symbol</th><th>Price</th><th>Direction</th><th>Zone match</th><th>Wall price</th><th>Distance</th><th>Wall qty</th><th>Orders</th>"
+               "<th>Share of side</th><th>x avg level</th><th>Bids % (20)</th><th>Spurt</th><th>Zone</th></tr>")
+        msg = (f'<div class="m">Run: {w.get("run")} &middot; 20-level depth read for {w.get("read")} of {w.get("asked")} top spurt stocks &middot; {len(rows)} at a wall'
+               + (f' &middot; <span style="color:#c62828">{w.get("note")}</span>' if w.get("note") else "") + ' &middot; <a href="/walls_history.csv">wall history CSV</a></div>')
+        return ("<h2>Stocks at a wall</h2>" + intro + msg + _wall_stats_html()
+                + ('<div class="w"><table class="sp">' + hdr + body + "</table></div>" if rows else '<p class="m">No top spurt stock stands at a wall right now.</p>'))
+    except Exception as e:
+        log.warning(f"Spurt10: walls section failed: {e}")
+        return ""
+
+
 def _parse_depth(q):
     """(spread %, total buy qty / total sell qty) from one marketfeed/quote row, or None when the depth fields are not there."""
     try:
@@ -2069,6 +2492,7 @@ def run_once():
         _save_depth_snapshot(_dsnap_meta["run"], _dsnap_meta["spurt"], _dsnap_meta["zone"])
     except Exception:
         pass
+    _wall_scan(top, now_ist, sid_of)                                # ADDED 16 Nov: 20-level depth -> stocks at a wall (never raises)
     try:
         _send_offers_alerts(top, now_ist)
     except Exception as e:
@@ -2689,6 +3113,60 @@ def stock_depth_html(sym):
         resp = ls._dhan_post("marketfeed/quote", {"NSE_EQ": [int(sid)]}, f"depth {sym}")
         q = ((resp.json().get("data") or {}).get("NSE_EQ") or {}).get(str(sid)) or {}
         d = q.get("depth") or {}
+        _note20 = ""
+        try:                                                            # ADDED 16 Nov: 20-level depth (one short Dhan connection); the 5-level view below is the fallback
+            d20, _note20 = _depth20_snapshot([(sym, sid)], wait=4.0)
+            x = d20.get(sym) or {}
+            bl, al = x.get("bids") or [], x.get("asks") or []
+            if bl and al:
+                px20 = q.get("last_price")
+                try:
+                    px20 = float(px20)
+                except (TypeError, ValueError):
+                    px20 = (bl[0][0] + al[0][0]) / 2.0
+                try:
+                    nc20 = float(q.get("net_change"))
+                    ch20 = nc20 / (px20 - nc20) * 100.0
+                    chs20 = f' <span class="{"g" if ch20 >= 0 else "r"}">{ch20:+.2f}%</span>'
+                except Exception:
+                    chs20 = ""
+                bq20, sq20 = float(sum(v[1] for v in bl)), float(sum(v[1] for v in al))
+                bp20 = bq20 / (bq20 + sq20) * 100.0
+                wl = _wall_eval({"bids": bl, "asks": al}, px20)
+                wb_, wa_ = _wall_side(bl, px20), _wall_side(al, px20)
+                mq20 = float(max([v[1] for v in bl + al] + [1]))
+
+                def rows20(lv, col, to, wall, bid):
+                    h = ""
+                    for p_, q_, o_ in lv:
+                        w_ = min(100.0, q_ / mq20 * 100.0)
+                        iswall = bool(wall and abs(wall["price"] - p_) < 1e-9)
+                        st = f' style="background:linear-gradient(to {to},{col} {w_:.0f}%,transparent {w_:.0f}%)' + (';outline:2px solid ' + ("#0a7d33" if bid else "#c62828") + ';font-weight:700"' if iswall else '"')
+                        qc = f"<td{st}>{q_:,}</td>"
+                        pc = f"<td class='{'g' if bid else 'r'}'>{p_:.2f}</td>"
+                        oc = f"<td>{o_:,}</td>"
+                        h += ("<tr>" + oc + qc + pc + "</tr>") if bid else ("<tr>" + pc + qc + oc + "</tr>")
+                    return h
+                if wl:
+                    isb = wl["side"] == "BUY"
+                    wtxt = (f'<div style="margin:8px 0;padding:8px 10px;border-radius:6px;background:{"#d4f0dc" if isb else "#f8d9d6"}"><b style="color:{"#0a7d33" if isb else "#c62828"}">'
+                            f'{"BUY SIDE wall (support)" if isb else "SELL SIDE wall (resistance)"}</b> at {wl["price"]:.2f} &middot; {wl["dist"]:.2f}% from the price &middot; {wl["qty"]:,} shares '
+                            f'({wl["orders"]:,} orders) &middot; {wl["share"]:g}% of that side, {wl["mult"]:g}x the average level</div>')
+                else:
+                    wtxt = f'<div class="m">No wall near the price (a wall = one level with at least {WALL_SHARE:g}% of its side 20-level quantity, {WALL_MULT:g}x the average level, within {WALL_DIST_PCT:g}% of the price).</div>'
+                return (head.replace('content="10"', 'content="15"') + f'<h2>{_tvl(sym)} &mdash; Bids / Offers (20 levels)</h2>'
+                        f'<div class="m">Price {px20:.2f}{chs20} &middot; Dhan 20-level depth &middot; refreshes every 15 s &middot; <a href="/depth">Bids / Offers list</a> &middot; <a href="/spurt10">Volume spurt</a></div>'
+                        + wtxt +
+                        f'<div class="h"><div><b>Buy Orders</b><table><tr><th>Orders</th><th>Quantity</th><th>Bid</th></tr>{rows20(bl, "#dff3e4", "left", wb_, True)}'
+                        f'<tr><td colspan="3" style="text-align:center"><b>{int(bq20):,}</b> Total</td></tr></table></div>'
+                        f'<div><b>Sell Orders</b><table><tr><th>Ask</th><th>Quantity</th><th>Orders</th></tr>{rows20(al, "#fbe1de", "right", wa_, False)}'
+                        f'<tr><td colspan="3" style="text-align:center">Total <b>{int(sq20):,}</b></td></tr></table></div></div>'
+                        f'<div style="display:flex;justify-content:space-between;margin-top:14px"><b class="g">Bids: {bp20:.2f}%</b><b class="r">Offers: {100.0 - bp20:.2f}%</b></div>'
+                        f'<div class="bar"><div style="width:{bp20:.2f}%;background:#2e9e4f"></div><div style="width:{100.0 - bp20:.2f}%;background:#d9534f"></div></div>'
+                        '</body></html>')
+        except Exception as e:
+            _note20 = f"20-level view failed: {e}"
+            log.warning(f"Spurt10 /depth/{sym} 20-level failed: {e}")
         buy, sell = (d.get("buy") or [])[:5], (d.get("sell") or [])[:5]
         if not buy and not sell:
             return head + f"<h3>{_tvl(sym)}</h3><p>Dhan sent no bid / ask depth for this stock right now (market closed or no quote).</p><p><a href='/depth'>Back to the Bids / Offers list</a></p></body></html>"
@@ -2723,7 +3201,7 @@ def stock_depth_html(sym):
             brow += (f"<tr><td>{_inr(b.get('orders'))}</td>{cell_bar(b.get('quantity'), '#dff3e4')}<td class='g'>{float(b['price']):.2f}</td></tr>" if b else "<tr><td colspan='3'>&nbsp;</td></tr>")
             srow += (f"<tr><td class='r'>{float(a['price']):.2f}</td>{cell_bar(a.get('quantity'), '#fbe1de', 'right')}<td>{_inr(a.get('orders'))}</td></tr>" if a else "<tr><td colspan='3'>&nbsp;</td></tr>")
         return (head + f'<h2>{_tvl(sym)} &mdash; Bids / Offers</h2>'
-                f'<div class="m">Price {float(px):.2f}{chg_s} &middot; read live from Dhan (5 best bids / offers) &middot; refreshes every 10 s &middot; <a href="/depth">Bids / Offers list</a> &middot; <a href="/spurt10">Volume spurt</a></div>'
+                f'<div class="m">Price {float(px):.2f}{chg_s} &middot; read live from Dhan (5 best bids / offers)' + ((' - 20 levels not available: ' + _h.escape(_note20)) if _note20 else '') + ' &middot; refreshes every 10 s &middot; <a href="/depth">Bids / Offers list</a> &middot; <a href="/spurt10">Volume spurt</a></div>'
                 f'<div class="h"><div><b>Buy Orders</b><table><tr><th>Orders</th><th>Quantity</th><th>Bid</th></tr>{brow}'
                 f'<tr><td colspan="3" style="text-align:center"><b>{_inr(bq)}</b> Total</td></tr></table></div>'
                 f'<div><b>Sell Orders</b><table><tr><th>Ask</th><th>Quantity</th><th>Orders</th></tr>{srow}'
@@ -2754,7 +3232,7 @@ def depth_html():
                 'th,td{border:1px solid #ddd;padding:6px 8px;text-align:right;font-size:14px}th{background:#222;color:#fff}td:nth-child(2){text-align:left}'
                 '.m{color:#555;font-size:13px;margin:6px 0 12px}.w{overflow-x:auto}</style></head><body>')
         if not run or not spurt:
-            return head + "<h2>Volume-spurt stocks &mdash; Bids / Offers</h2><p>No scan has run yet. It fills at the first 10-min cycle after 09:25 IST on a trading day.</p></body></html>"
+            return head + _walls_section_html() + "<h2>Volume-spurt stocks &mdash; Bids / Offers</h2><p>No scan has run yet. It fills at the first 10-min cycle after 09:25 IST on a trading day.</p></body></html>"
         rows = sorted(((sym, mult) for sym, mult in spurt.items()), key=lambda x: -x[1])
         total_spurt = len(rows)
         if DEPTH_ONLY_AT_ZONE:                                          # ADDED: only stocks at a zone with one side above DEPTH_PCT
@@ -2789,7 +3267,7 @@ def depth_html():
             body += (f"<tr><td>{i}</td><td>{_tvl(sym)}</td><td>{d['px']:.2f}</td><td>{chg_s}</td><td><b>{mult:.2f}x</b></td>"
                      f"<td{bg_b}><b>{dl}{100.0 - off:.1f}%</a></b></td><td{bg_o}><b>{dl}{off:.1f}%</a></b></td>"
                      f"<td>{'-' if d['spread'] is None else format(d['spread'], '.2f') + '%'}</td>{zc}</tr>")
-        return (head + '<h2>Volume-spurt stocks &mdash; Bids / Offers</h2>'
+        return (head + _walls_section_html() + '<h2>Volume-spurt stocks &mdash; Bids / Offers</h2>'
                 f'<div class="m">Run: {run} &middot; ' + (f'{len(rows)} of the {total_spurt} volume-spurt stocks: only those AT a support / resistance zone with Bids % or Offers % above {DEPTH_PCT:g}%' if DEPTH_ONLY_AT_ZONE else f'the {len(rows)} stocks of the 10-min volume-spurt table') + f', biggest spurt first &middot; '
                 f'Bids % / Offers % = total buy / sell quantity in the Dhan depth window (green / red cell = above {DEPTH_PCT:g}%) &middot; click a value for that stock\'s 5-level depth &middot; '
                 'refreshes every 10 min &middot; <a href="/spurt10">Volume spurt</a> &middot; <a href="/spurt_sell">Spurt SELL signals</a></div>'
