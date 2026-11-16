@@ -937,6 +937,11 @@ def btst_history_csv():
     return _serve_csv("btst_history.csv", "btst_candidates_history.csv")
 
 
+@app.route("/strong_signals.csv", methods=["GET"])
+def strong_signals_csv():
+    return _serve_csv("strong_signals_history.csv", "strong_breakout_signals_history.csv")
+
+
 @app.route("/walls_history.csv", methods=["GET"])
 def walls_history_csv():
     return _serve_csv("walls_history.csv", "depth_walls_history.csv")
@@ -1383,7 +1388,7 @@ def sma200_trades_csv():
 
 # ---- /spurt10 split into separate pages (one per section), built from the same saved spurt10.html - nothing is recomputed
 _S10_PARTS = [("main", "Top 30 spurt", None), ("early", "Early spurt (forming)", "\x00early"), ("ob", "OB signals", "OB mitigation signals on spurt stocks"),
-              ("wick", "Rejected at resistance", "Spurt stocks rejected at resistance"), ("rejres", "Clean rejection: resistance", "Clean top rejection at resistance"), ("rejsup", "Clean rejection: support", "Clean bottom rejection at support"), ("engbull", "Bullish engulfing", "Bullish engulfing at support"), ("engbear", "Bearish engulfing", "Bearish engulfing at resistance"), ("room", "Breakout with room (BUY)", "Breakout with room"), ("roomdown", "Breakdown with room (SELL)", "Breakdown with room"), ("zsell", "SELL at 15m+30m zone", "SELL at 15m+30m resistance zone"), ("gap", "Gap up / gap down + spurt", "Gap up with a volume spurt candle"), ("upper", "Rejected at upper zone", "Rejected at the UPPER part of the resistance zone"), ("orb", "Opening range (ORB)", "Opening range breakout UP"), ("watch", "Watch list", "Watch list &mdash;"),
+              ("wick", "Rejected at resistance", "Spurt stocks rejected at resistance"), ("rejres", "Clean rejection: resistance", "Clean top rejection at resistance"), ("rejsup", "Clean rejection: support", "Clean bottom rejection at support"), ("engbull", "Bullish engulfing", "Bullish engulfing at support"), ("engbear", "Bearish engulfing", "Bearish engulfing at resistance"), ("strong", "STRONG breakouts", "Strong breakout signals"), ("room", "Breakout with room (BUY)", "Breakout with room"), ("roomdown", "Breakdown with room (SELL)", "Breakdown with room"), ("zsell", "SELL at 15m+30m zone", "SELL at 15m+30m resistance zone"), ("gap", "Gap up / gap down + spurt", "Gap up with a volume spurt candle"), ("upper", "Rejected at upper zone", "Rejected at the UPPER part of the resistance zone"), ("orb", "Opening range (ORB)", "Opening range breakout UP"), ("watch", "Watch list", "Watch list &mdash;"),
               ("news", "Left out: news", "Spurt stocks with news today"), ("thin", "Illiquid", "Illiquid stocks with a volume spurt")]
 
 
