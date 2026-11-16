@@ -616,6 +616,255 @@ def _walls_section_html():
         return ""
 
 
+# ---------------------------------------------------------------- ADDED 16 Nov: BTST candidates (buy today, sell tomorrow) - a section on /depth, not a new scanner
+BTST_ON = True                 # ADDED 16 Nov: rank the stocks that spurted today as BTST candidates (information only). False = off
+BTST_FROM_MIN = 14 * 60 + 25   # the candidate list is shown and refreshed every cycle from this time (minutes after midnight, IST)
+BTST_LOG_MIN = 15 * 60 + 15    # at the first cycle from this time the list is FROZEN, logged to results/btst_history.csv and one phone alert is sent
+BTST_MIN_SPURT = 3.0           # a stock must have reached this spurt multiple today
+BTST_MIN_TURNOVER = 5e7        # day turnover of at least Rs 5 crore (you must be able to sell at tomorrow's open)
+BTST_MIN_PRICE = 20.0
+BTST_MIN_POS = 70.0            # the price must sit in the top 30% of the day's high-low range (close position %)
+BTST_MIN_CHG = 0.5             # day change % must be within this band (not flat, not a runaway / circuit chase)
+BTST_MAX_CHG = 9.0
+BTST_TOP_N = 10
+BTST_STRONG_SCORE = 75         # score at or above this = STRONGEST
+BTST_PATH = os.path.join(os.path.dirname(__file__), "results", "btst_snapshot.json")
+BTST_HIST_PATH = os.path.join(os.path.dirname(__file__), "results", "btst_history.csv")
+BTST_COLS = ["date", "time", "symbol", "score", "strong", "price", "day_chg_pct", "close_pos_pct", "spurt_x", "turnover_cr", "bids_pct", "vs_vwap_pct", "zone", "wall",
+             "next_date", "next_open", "next_high", "next_low", "next_last", "gap_pct", "next_move_pct", "next_best_pct"]
+_btst = {}                     # {symbol: {px, hi, lo, op, vol, chg, avgp, bids}} filled by _fetch_quotes every cycle (all stocks)
+_btst_seen = {"date": None, "mult": {}}   # {symbol: best spurt multiple today}
+
+
+def _btst_score(sym, b, mult, zone_at, wall_side):
+    """(score 0-100, details) or None when the stock is left out. Heuristic, not tested: the history file is for checking it."""
+    try:
+        px, hi, lo, vol = b["px"], b["hi"], b["lo"], b["vol"]
+        if not (px and hi and lo and hi > lo and px >= BTST_MIN_PRICE):
+            return None
+        if _circ.get(sym) or _thin_now(sym) or sym in (news_symbols() or {}):
+            return None
+        turn = vol * (b.get("avgp") or px)
+        pos = (px - lo) / (hi - lo) * 100.0
+        chg = b.get("chg")
+        if turn < BTST_MIN_TURNOVER or pos < BTST_MIN_POS or chg is None or not (BTST_MIN_CHG <= chg <= BTST_MAX_CHG) or mult < BTST_MIN_SPURT:
+            return None
+        sc = (pos - BTST_MIN_POS) / (100.0 - BTST_MIN_POS) * 30.0                                   # close near the high of the day: up to 30
+        sc += 20 if mult >= 10 else 15 if mult >= 5 else 10                                         # spurt strength: 10 / 15 / 20
+        sc += 15 if 1.0 <= chg <= 6.0 else 8                                                        # healthy day move
+        vw = None
+        if b.get("avgp"):
+            vw = (px - b["avgp"]) / b["avgp"] * 100.0
+            sc += 10 if vw > 0 else 0                                                               # above the day's VWAP
+        bp = b.get("bids")
+        if bp is not None:
+            sc += 10 if bp >= 55 else 5 if bp >= 50 else 0                                          # buyers waiting
+        sc += 5 if turn >= 2.5e8 else 0                                                             # very liquid
+        sc += 5 if zone_at == "SUPPORT" else -15 if zone_at == "RESISTANCE" else 0                  # sitting on a resistance zone is a warning
+        sc += 10 if wall_side == "BUY" else -10 if wall_side == "SELL" else 0                       # waiting orders from the 20-level depth
+        return max(0.0, min(100.0, round(sc, 1))), {"pos": round(pos, 1), "chg": round(chg, 2), "turn_cr": round(turn / 1e7, 1), "bids": bp, "vw": None if vw is None else round(vw, 2)}
+    except Exception:
+        return None
+
+
+def _btst_read_hist():
+    import csv
+    try:
+        with open(BTST_HIST_PATH, newline="") as f:
+            return [dict(r) for r in csv.DictReader(f)]
+    except FileNotFoundError:
+        return []
+    except Exception:
+        return []
+
+
+def _btst_write_hist(rows):
+    import csv
+    os.makedirs(os.path.dirname(BTST_HIST_PATH), exist_ok=True)
+    tmp = BTST_HIST_PATH + ".tmp"
+    with open(tmp, "w", newline="") as f:
+        wr = csv.DictWriter(f, fieldnames=BTST_COLS, extrasaction="ignore")
+        wr.writeheader()
+        wr.writerows(rows)
+    os.replace(tmp, BTST_HIST_PATH)
+
+
+def _btst_fill_next_day(today):
+    """The first cycle of the next trading day: write that day's open / high / low / last next to each logged candidate (and keep updating them during that day)."""
+    hist = _btst_read_hist()
+    changed = False
+    for h in hist:
+        if h.get("date") and h["date"] < today and not h.get("next_date"):
+            h["next_date"] = today
+            changed = True
+        if h.get("next_date") != today:
+            continue
+        b = _btst.get(h.get("symbol"))
+        if not b or not b.get("px"):
+            continue
+        try:
+            p0 = float(h["price"])
+            if not h.get("next_open") and b.get("op"):
+                h["next_open"] = f"{b['op']:.2f}"
+            if b.get("hi"):
+                h["next_high"] = f"{b['hi']:.2f}"
+            if b.get("lo"):
+                h["next_low"] = f"{b['lo']:.2f}"
+            h["next_last"] = f"{b['px']:.2f}"
+            if h.get("next_open"):
+                h["gap_pct"] = f"{(float(h['next_open']) - p0) / p0 * 100.0:.2f}"
+            h["next_move_pct"] = f"{(b['px'] - p0) / p0 * 100.0:.2f}"
+            if b.get("hi"):
+                h["next_best_pct"] = f"{(b['hi'] - p0) / p0 * 100.0:.2f}"
+            changed = True
+        except Exception:
+            continue
+    if changed:
+        _btst_write_hist(hist)
+
+
+def _btst_alert(rows, now_ist):
+    try:
+        topic = os.environ.get("NTFY_TOPIC", "").strip()
+        if not (NTFY_ON and topic and rows):
+            return
+        lines = []
+        for r in rows[:6]:
+            lines.append(f"{'STRONGEST ' if r['strong'] else ''}{r['symbol']}  score {r['score']:g}  Rs {r['price']:.2f}  day {r['chg']:+.1f}%  close at {r['pos']:.0f}% of range  spurt {r['mult']:g}x"
+                         + (f"  AT {r['zone']}" if r.get("zone") else "") + (f"  {r['wall']} wall" if r.get("wall") else ""))
+        import requests
+        n_s = sum(1 for r in rows if r["strong"])
+        requests.post(f"https://ntfy.sh/{topic}", data=("\n".join(lines) + "\nOvernight gap risk, no stop-loss carries overnight. Information only.").encode("utf-8"), timeout=8,
+                      headers={"Title": f"BTST candidates: {len(rows)}" + (f" ({n_s} strongest)" if n_s else ""), "Priority": "high" if n_s else "default", "Tags": "crescent_moon"})
+    except Exception as e:
+        log.warning(f"Spurt10 BTST ntfy failed: {e}")
+
+
+def _btst_update(top, now_ist, sid_of):
+    """ADDED 16 Nov: after every cycle - remember the stocks that spurted today, fill the next-day columns of earlier candidates, and from BTST_FROM_MIN rank today's candidates.
+    At BTST_LOG_MIN the list is frozen, logged to results/btst_history.csv and a phone alert is sent. Never raises."""
+    try:
+        if not BTST_ON:
+            return
+        today = now_ist.strftime("%Y-%m-%d")
+        mins = now_ist.hour * 60 + now_ist.minute
+        if _btst_seen["date"] != today:
+            _btst_seen.update(date=today, mult={})
+            try:                                                    # after a restart: today's spurt stocks from the history file
+                import pandas as _pd
+                if os.path.exists(HIST_PATH):
+                    _h = _pd.read_csv(HIST_PATH)
+                    _d = _h["date"].astype(str).str.replace(r"^(\d\d)-(\d\d)-(\d{4})$", r"\3-\2-\1", regex=True)
+                    for _r in _h[(_d == today) & (_h["multiple"] >= BTST_MIN_SPURT)].itertuples():
+                        if float(_r.multiple) > _btst_seen["mult"].get(_r.symbol, 0):
+                            _btst_seen["mult"][_r.symbol] = float(_r.multiple)
+            except Exception:
+                pass
+        for r in top:
+            if r.get("symbol") and (r.get("multiple") or 0) > _btst_seen["mult"].get(r["symbol"], 0):
+                _btst_seen["mult"][r["symbol"]] = float(r["multiple"])
+        _btst_fill_next_day(today)
+        if mins < BTST_FROM_MIN:
+            return
+        try:
+            with open(BTST_PATH, "r") as f:
+                cur = json.load(f)
+        except Exception:
+            cur = None
+        if cur and cur.get("date") == today and cur.get("frozen"):
+            return
+        zone_of = {r["symbol"]: (r.get("at_zone") or "") for r in top if r.get("symbol")}
+        walls = {}
+        try:
+            w = _load_walls()
+            if w:
+                walls = {x["symbol"]: x["side"] for x in (w.get("rows") or [])}
+        except Exception:
+            pass
+        rows = []
+        for sym, mult in _btst_seen["mult"].items():
+            b = _btst.get(sym)
+            if not b:
+                continue
+            res = _btst_score(sym, b, mult, zone_of.get(sym, ""), walls.get(sym, ""))
+            if res:
+                sc, det = res
+                rows.append({"symbol": sym, "score": sc, "strong": sc >= BTST_STRONG_SCORE, "price": b["px"], "chg": det["chg"], "pos": det["pos"], "mult": round(mult, 1),
+                             "turn_cr": det["turn_cr"], "bids": det["bids"], "vw": det["vw"], "zone": zone_of.get(sym, "") if zone_of.get(sym) in ("SUPPORT", "RESISTANCE") else "", "wall": walls.get(sym, "")})
+        rows.sort(key=lambda x: -x["score"])
+        rows = rows[:BTST_TOP_N]
+        frozen = mins >= BTST_LOG_MIN
+        snap = {"date": today, "run": now_ist.strftime("%Y-%m-%d %H:%M:%S IST"), "frozen": frozen, "rows": rows, "universe": len(_btst_seen["mult"])}
+        os.makedirs(os.path.dirname(BTST_PATH), exist_ok=True)
+        tmp = BTST_PATH + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(snap, f)
+        os.replace(tmp, BTST_PATH)
+        if frozen:
+            hist = _btst_read_hist()
+            if rows and not any(h.get("date") == today for h in hist):
+                for r in rows:
+                    hist.append({"date": today, "time": now_ist.strftime("%H:%M:%S"), "symbol": r["symbol"], "score": r["score"], "strong": "YES" if r["strong"] else "", "price": f"{r['price']:.2f}",
+                                 "day_chg_pct": r["chg"], "close_pos_pct": r["pos"], "spurt_x": r["mult"], "turnover_cr": r["turn_cr"], "bids_pct": "" if r["bids"] is None else r["bids"],
+                                 "vs_vwap_pct": "" if r["vw"] is None else r["vw"], "zone": r["zone"], "wall": r["wall"]})
+                _btst_write_hist(hist)
+                _btst_alert(rows, now_ist)
+            log.info(f"Spurt10: BTST list frozen with {len(rows)} candidate(s)")
+    except Exception as e:
+        log.warning(f"Spurt10: BTST step failed: {e}")
+
+
+def _btst_section_html():
+    """ADDED 16 Nov: 'BTST candidates' table for /depth plus the results so far from results/btst_history.csv. Never raises."""
+    try:
+        if not BTST_ON:
+            return ""
+        intro = ('<h2>BTST candidates (buy today, sell tomorrow)</h2>'
+                 f'<div class="m">Stocks that spurted {BTST_MIN_SPURT:g}x or more today, still liquid (turnover &ge; Rs {BTST_MIN_TURNOVER / 1e7:g} crore), no news, not near a circuit, price in the top {100 - BTST_MIN_POS:g}% of the day\'s range and up {BTST_MIN_CHG:g}-{BTST_MAX_CHG:g}% on the day. '
+                 'Score out of 100: close near the high, spurt strength, day move, above VWAP, Bids %, liquidity, zone (AT RESISTANCE lowers it) and the 20-level wall (BUY SIDE raises it, SELL SIDE lowers it). '
+                 f'<b>STRONGEST</b> = score {BTST_STRONG_SCORE} or more. Listed from {BTST_FROM_MIN // 60}:{BTST_FROM_MIN % 60:02d}, frozen and logged at {BTST_LOG_MIN // 60}:{BTST_LOG_MIN % 60:02d} IST. '
+                 'The scoring is a first guess: results below show whether it works. Overnight gap risk, no stop-loss carries overnight. Information only. <a href="/btst_history.csv">BTST history CSV</a></div>')
+        try:
+            with open(BTST_PATH, "r") as f:
+                s = json.load(f)
+        except Exception:
+            s = None
+        out = intro
+        if not s:
+            out += '<p class="m">No list yet. It appears from the first cycle after the start time.</p>'
+        else:
+            rows = s.get("rows") or []
+            body = ""
+            for i, r in enumerate(rows, 1):
+                st = '<b style="background:#2e9e4f;color:#fff;padding:1px 6px;border-radius:4px">STRONGEST</b> ' if r["strong"] else ""
+                zt = ("AT " + r["zone"]) if r.get("zone") else "-"
+                body += (f"<tr><td>{i}</td><td style='text-align:left'>{st}{_tvl(r['symbol'])}</td><td><b>{r['score']:g}</b></td><td>{r['price']:.2f}</td><td>{r['chg']:+.2f}%</td><td>{r['pos']:.0f}%</td>"
+                         f"<td>{r['mult']:g}x</td><td>{r['turn_cr']:g}</td><td>{'-' if r['bids'] is None else format(r['bids'], '.0f') + '%'}</td><td>{'-' if r['vw'] is None else format(r['vw'], '+.2f') + '%'}</td>"
+                         f"<td>{zt}</td><td>{r['wall'] or '-'}</td></tr>")
+            out += (f'<div class="m">Date {s.get("date")} &middot; last update {s.get("run")} &middot; ' + ("<b>FROZEN (logged)</b>" if s.get("frozen") else "still updating until the freeze time")
+                    + f' &middot; {s.get("universe")} stocks spurted today</div>')
+            out += ('<div class="w"><table class="sp"><tr><th>#</th><th>Symbol</th><th>Score</th><th>Price</th><th>Day %</th><th>Close in range</th><th>Spurt</th><th>Turnover Cr</th><th>Bids %</th><th>vs VWAP</th><th>Zone</th><th>Wall</th></tr>'
+                    + body + '</table></div>' if rows else '<p class="m">No stock passes all the BTST conditions right now.</p>')
+        hist = [h for h in _btst_read_hist() if h.get("next_move_pct") not in (None, "") and h.get("gap_pct") not in (None, "")]
+        done = [h for h in hist if h.get("next_date") and h.get("date") and h["next_date"] > h["date"]]
+        if done:
+            def _st(xs):
+                g = [float(x["gap_pct"]) for x in xs]
+                m = [float(x["next_move_pct"]) for x in xs]
+                return f"{len(xs)} trades: average gap {sum(g) / len(g):+.2f}%, gap up in {sum(1 for v in g if v > 0) * 100 // len(g)}%, average move to the latest price {sum(m) / len(m):+.2f}%"
+            parts = ["all candidates: " + _st(done)]
+            sg = [x for x in done if x.get("strong") == "YES"]
+            if sg:
+                parts.append("STRONGEST only: " + _st(sg))
+            out += '<div class="m"><b>BTST results so far</b> (' + " &middot; ".join(parts) + ", next-day price is the latest reading, not necessarily the close)</div>"
+        else:
+            out += '<div class="m">BTST results appear here from the day after the first logged list.</div>'
+        return out
+    except Exception as e:
+        log.warning(f"Spurt10: BTST section failed: {e}")
+        return ""
+
+
 def _parse_depth(q):
     """(spread %, total buy qty / total sell qty) from one marketfeed/quote row, or None when the depth fields are not there."""
     try:
@@ -685,6 +934,7 @@ def _fetch_quotes(uni):
     out, bad = {}, 0
     _depth.clear()
     _dsnap.clear()
+    _btst.clear()
     _circ.clear()
     for i in range(0, len(ids), 1000):
         chunk = ids[i:i + 1000]
@@ -713,6 +963,15 @@ def _fetch_quotes(uni):
                     _dsnap[sym] = {"px": px, "chg": chg, "vol": vol, "spread": dp[0], "offers": dp[2]}
                 except Exception:
                     pass
+            try:                                                    # ADDED 16 Nov: day high / low / open / VWAP of every stock, for the BTST ranking
+                _oh = q.get("ohlc") or {}
+                _nc = q.get("net_change")
+                _ap = float(q.get("average_price") or 0)
+                _btst[sym] = {"px": px, "vol": vol, "hi": float(_oh.get("high") or 0), "lo": float(_oh.get("low") or 0), "op": float(_oh.get("open") or 0),
+                              "chg": (round(float(_nc) / (px - float(_nc)) * 100.0, 2) if _nc is not None and (px - float(_nc)) > 0 else None),
+                              "avgp": _ap if _ap > 0 else None, "bids": (None if not dp or dp[2] is None else round(100.0 - dp[2], 1))}
+            except Exception:
+                pass
         time.sleep(1.1)
     if not out:
         raise RuntimeError("marketfeed/quote returned no usable rows (price/volume fields missing?)")
@@ -2493,6 +2752,7 @@ def run_once():
     except Exception:
         pass
     _wall_scan(top, now_ist, sid_of)                                # ADDED 16 Nov: 20-level depth -> stocks at a wall (never raises)
+    _btst_update(top, now_ist, sid_of)                              # ADDED 16 Nov: BTST candidates (never raises)
     try:
         _send_offers_alerts(top, now_ist)
     except Exception as e:
@@ -3232,7 +3492,7 @@ def depth_html():
                 'th,td{border:1px solid #ddd;padding:6px 8px;text-align:right;font-size:14px}th{background:#222;color:#fff}td:nth-child(2){text-align:left}'
                 '.m{color:#555;font-size:13px;margin:6px 0 12px}.w{overflow-x:auto}</style></head><body>')
         if not run or not spurt:
-            return head + _walls_section_html() + "<h2>Volume-spurt stocks &mdash; Bids / Offers</h2><p>No scan has run yet. It fills at the first 10-min cycle after 09:25 IST on a trading day.</p></body></html>"
+            return head + _walls_section_html() + _btst_section_html() + "<h2>Volume-spurt stocks &mdash; Bids / Offers</h2><p>No scan has run yet. It fills at the first 10-min cycle after 09:25 IST on a trading day.</p></body></html>"
         rows = sorted(((sym, mult) for sym, mult in spurt.items()), key=lambda x: -x[1])
         total_spurt = len(rows)
         if DEPTH_ONLY_AT_ZONE:                                          # ADDED: only stocks at a zone with one side above DEPTH_PCT
@@ -3267,7 +3527,7 @@ def depth_html():
             body += (f"<tr><td>{i}</td><td>{_tvl(sym)}</td><td>{d['px']:.2f}</td><td>{chg_s}</td><td><b>{mult:.2f}x</b></td>"
                      f"<td{bg_b}><b>{dl}{100.0 - off:.1f}%</a></b></td><td{bg_o}><b>{dl}{off:.1f}%</a></b></td>"
                      f"<td>{'-' if d['spread'] is None else format(d['spread'], '.2f') + '%'}</td>{zc}</tr>")
-        return (head + _walls_section_html() + '<h2>Volume-spurt stocks &mdash; Bids / Offers</h2>'
+        return (head + _walls_section_html() + _btst_section_html() + '<h2>Volume-spurt stocks &mdash; Bids / Offers</h2>'
                 f'<div class="m">Run: {run} &middot; ' + (f'{len(rows)} of the {total_spurt} volume-spurt stocks: only those AT a support / resistance zone with Bids % or Offers % above {DEPTH_PCT:g}%' if DEPTH_ONLY_AT_ZONE else f'the {len(rows)} stocks of the 10-min volume-spurt table') + f', biggest spurt first &middot; '
                 f'Bids % / Offers % = total buy / sell quantity in the Dhan depth window (green / red cell = above {DEPTH_PCT:g}%) &middot; click a value for that stock\'s 5-level depth &middot; '
                 'refreshes every 10 min &middot; <a href="/spurt10">Volume spurt</a> &middot; <a href="/spurt_sell">Spurt SELL signals</a></div>'

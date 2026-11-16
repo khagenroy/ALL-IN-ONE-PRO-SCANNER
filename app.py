@@ -932,6 +932,11 @@ def news_day_csv():
     return _serve_csv("news_day.csv", "spurt_stocks_with_news.csv")
 
 
+@app.route("/btst_history.csv", methods=["GET"])
+def btst_history_csv():
+    return _serve_csv("btst_history.csv", "btst_candidates_history.csv")
+
+
 @app.route("/walls_history.csv", methods=["GET"])
 def walls_history_csv():
     return _serve_csv("walls_history.csv", "depth_walls_history.csv")
