@@ -13,10 +13,16 @@ different history, so compare the first few signals with the chart. Signals olde
 Read-only. Any error is caught and logged. Needs no settings.
 """
 import logging
+import threading
+import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 
 import spurt10_live as sp
+
+IST_TZ = ZoneInfo("Asia/Kolkata")
 
 log = logging.getLogger("signals_scan")
 ON = True
@@ -249,8 +255,71 @@ def _frames(df5, as_of, ls):
     return out
 
 
+_last = {"syms": [], "t": 0.0, "slot": -1, "started": False}
+_run_lock = threading.Lock()
+
+
 def update(rows, now_ist):
-    """Called by spurt10_live.run_once (same place as spurt_buy). Never raises."""
+    """Called by spurt10_live.run_once (same place as spurt_buy), once per main cycle. Remembers the spurt stocks of this cycle for the 5-minute timer below. Never raises."""
+    if not ON:
+        return
+    try:
+        _last["syms"] = [r["symbol"] for r in rows if r.get("symbol")][:60]
+        _last["t"] = time.time()
+        if not _last["started"]:
+            _last["started"] = True
+            threading.Thread(target=_timer_loop, name="signals_scan_timer", daemon=True).start()
+    except Exception as e:
+        log.warning("signals_scan: timer start failed: %s", e)
+    with _run_lock:
+        _run(rows, now_ist)
+
+
+def _timer_loop():
+    """ADDED 17 Nov: the six signals are looked for EVERY 5 MINUTES (about 1.5 minutes after each 5-minute candle closes), not only once per 10-minute spurt cycle.
+    It uses the spurt stocks of the latest main cycle and downloads their 5-minute candles itself. A main cycle that ran in the last 3 minutes already did the job, so the timer skips that slot."""
+    while True:
+        try:
+            time.sleep(15)
+            now = datetime.now(IST_TZ).replace(tzinfo=None)
+            m = now.hour * 60 + now.minute
+            if m < 9 * 60 + 20 or m > 15 * 60 + 35 or now.weekday() >= 5:
+                continue
+            slot = m // 5
+            if now.minute % 5 != 1 or now.second < 20 or slot == _last["slot"]:
+                continue
+            _last["slot"] = slot
+            if time.time() - _last["t"] < 180 or not _last["syms"]:
+                continue
+            if not _run_lock.acquire(blocking=False):
+                continue
+            try:
+                _timer_run(now)
+            finally:
+                _run_lock.release()
+        except Exception as e:
+            log.warning("signals_scan timer: %s", e)
+
+
+def _timer_run(now_ist):
+    import live_scanner as ls
+    from concurrent.futures import ThreadPoolExecutor
+    uni = dict(sp._load_universe())
+    syms = [x for x in _last["syms"] if x in uni]
+    as_of = pd.Timestamp(datetime.utcnow())
+
+    def one(sym):
+        try:
+            return {"symbol": sym, "_df5": ls.fetch_intraday_history(uni[sym], "NSE_EQ", 5, getattr(sp, "HISTORY_DAYS", 5)), "_as_of": as_of}
+        except Exception as e:
+            log.warning("signals_scan timer: candles of %s failed: %s", sym, e)
+            return None
+    with ThreadPoolExecutor(max_workers=max(1, sp.WORKERS)) as ex:
+        rows = [r for r in ex.map(one, syms) if r]
+    _run(rows, now_ist)
+
+
+def _run(rows, now_ist):
     if not ON:
         return
     try:
