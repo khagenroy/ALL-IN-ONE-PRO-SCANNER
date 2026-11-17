@@ -65,12 +65,21 @@ RSI_MIN = _f("SPURT_SELL_RSI_MIN", 70)
 HTF_MIN = int(_f("SPURT_SELL_HTF_MIN", 30))                                               # checklist point 5 (CHANGED 5 Nov: now REQUIRED)
 NEED_HTF = os.environ.get("SPURT_SELL_NEED_HTF", "true").strip().lower() == "true"       # ADDED 5 Nov: the 30-min resistance zone must also be touched (false = information only, as before)
 BASE_TF = int(_f("SPURT_SELL_BASE_TF", 10))                                               # CHANGED 11 Nov: candle size in minutes the rule runs on = the TradingView indicator "VS SELL" on a 10-min chart (15 from 5 Nov to 10 Nov)
+SMA9_MIN_PCT = _f("SPURT_SELL_SMA9_MIN_PCT", 2.0)                                         # ADDED 17 Nov: the signal candle's close must be at least this % ABOVE its 9-SMA (10-min closes). A stock close to the 9-SMA usually bounces; only a stretched one comes down. 0 = switch this check off
 SKIP_OPEN = os.environ.get("SPURT_SELL_SKIP_OPEN", "false").strip().lower() == "true"     # default: the 09:15 candle COUNTS as a spurt
+
+def _sma_pct():
+    try:
+        import sma_rule
+        return sma_rule.PCT if sma_rule.ON else 0.0
+    except Exception:
+        return SMA9_MIN_PCT
+
 
 RESULTS_DIR = os.path.join(os.path.dirname(__file__), "results")
 HIST_PATH = os.path.join(RESULTS_DIR, "spurt_sell_history.csv")
 COLS = ["date", "run", "candle", "symbol", "entry", "sl", "t1", "t2", "risk_pct", "spurt_candle", "spurt_mult",
-        "candles_after_spurt", "red_vol_vs_prev", "day_chg_pct", "res_zone", "rsi_peak", "htf_zone", "score", "sig_ohlc"]
+        "candles_after_spurt", "red_vol_vs_prev", "day_chg_pct", "res_zone", "rsi_peak", "htf_zone", "score", "sig_ohlc", "sma9_gap_pct"]
 
 _seen = {"date": None, "keys": set(), "count": 0}
 
@@ -397,6 +406,15 @@ def check(df, sym, day_chg=None):
         c = df["close"].to_numpy(dtype=float)
         v = df["volume"].to_numpy(dtype=float)
         L = n - 1
+        sma9 = pd.Series(c).rolling(9).mean().to_numpy()                    # ADDED 17 Nov: 9-SMA of the closes
+        try:
+            import sma_rule                                                  # CHANGED 17 Nov: the shared rule (sma_rule.py) - SELL: at least 2% above the 9-SMA, or below all of 9/21/60 (with the downtrend)
+            _ok_buy, _ok_sell = sma_rule.ok_arrays(c)
+        except Exception:
+            _ok_sell = np.ones(n, dtype=bool)
+
+        def sma_ok(i):
+            return bool(_ok_sell[i])
 
         def red(i):
             rng = h[i] - l[i]
@@ -417,7 +435,7 @@ def check(df, sym, day_chg=None):
         if sj is None:
             return None
         for m_ in range(sj + 1, L):                                      # one signal per spurt: if an EARLIER red candle already met every condition, that candle gave the signal
-            if not red(m_):
+            if not red(m_) or not sma_ok(m_):
                 continue
             try:
                 import spurt_zones
@@ -430,6 +448,9 @@ def check(df, sym, day_chg=None):
             except Exception:
                 continue
             return None
+        if not sma_ok(L):                                                # ADDED 17 Nov: too close to the 9-SMA = likely bounce, no SELL signal
+            return None
+        sma_gap = round(float((c[L] / sma9[L] - 1.0) * 100.0), 2) if sma9[L] > 0 else None
         entry, sl = float(c[L]), float(h[L])
         risk = sl - entry
         if risk <= 0 or entry <= 0:
@@ -460,7 +481,7 @@ def check(df, sym, day_chg=None):
             "candles_after_spurt": int(L - sj),
             "red_vol_vs_prev": round(float(v[L] / v[L - 1]), 2) if v[L - 1] > 0 else None,
             "day_chg_pct": day_chg,
-            "res_zone": zone_txt,
+            "res_zone": zone_txt, "sma9_gap_pct": sma_gap,
             "rsi_peak": round(rsi_peak, 1), "htf_zone": htf_txt, "score": f"{score}/6",
             "sig_ohlc": _pack(o, h, l, c, L),
         }
@@ -584,6 +605,7 @@ def page_html(date=None):
                 f"SELL at that red candle's close, stop loss = its high, targets = {R1:g}x and {R2:g}x the risk. One signal per spurt. "
                 f"Checklist: points 1-4 above plus RSI above {RSI_MIN:g} since the spurt are required; the {HTF_MIN}m resistance zone is {'also required' if NEED_HTF else 'shown as a bonus'} (score 5/6 or 6/6). "
                 f"{'The price must also have touched a resistance order-block zone since the spurt ({BASE_TF}-min chart, ALL IN ONE PRO logic). ' if NEED_ZONE else ''}"
+                f"{'The signal candle must also close at least ' + format(_sma_pct(), 'g') + '% above its 9-SMA, or below all of SMA 9 / 21 / 60 (a stock near the 9-SMA usually bounces). ' if _sma_pct() > 0 else ''}"
                 "Paper/information only - the scanner places no orders.")
         sig_today = set()
         try:
@@ -598,7 +620,7 @@ def page_html(date=None):
         df = pd.read_csv(HIST_PATH)
         if df.empty:
             return head + f'<h2>Spurt SELL</h2><div class="m">{rule}</div>{trk}<p>No signal yet.</p>{_SORT_JS}</body></html>'
-        for _c in ("rsi_peak", "htf_zone", "score", "sig_ohlc"):                   # rows logged before the checklist columns existed
+        for _c in ("rsi_peak", "htf_zone", "score", "sig_ohlc", "sma9_gap_pct"):                   # rows logged before the checklist columns existed
             if _c not in df.columns:
                 df[_c] = ""
         if "res_zone" not in df.columns:                              # rows logged before the zone condition existed
@@ -614,7 +636,7 @@ def page_html(date=None):
             f"<td style='color:#0a7d33'>{r.t1:.2f}</td><td style='color:#0a7d33'>{r.t2:.2f}</td><td>{r.risk_pct:.2f}%</td>"
             f"<td>{r.spurt_candle}</td><td><b>{r.spurt_mult:g}x</b></td><td>{int(r.candles_after_spurt)}</td><td>{pct(r.day_chg_pct)}</td><td>{_h.escape(str(r.res_zone)) if r.res_zone == r.res_zone and r.res_zone else '-'}</td>"
             f"<td style='white-space:nowrap;text-align:center'>{_draw(r.sig_ohlc)}</td>"
-            f"<td>{'-' if r.rsi_peak != r.rsi_peak or r.rsi_peak == '' else r.rsi_peak}</td><td>{_h.escape(str(r.htf_zone)) if r.htf_zone == r.htf_zone and r.htf_zone else '-'}</td><td><b>{_h.escape(str(r.score)) if r.score == r.score and r.score else '-'}</b></td></tr>"
+            f"<td>{'-' if r.rsi_peak != r.rsi_peak or r.rsi_peak == '' else r.rsi_peak}</td><td>{_h.escape(str(r.htf_zone)) if r.htf_zone == r.htf_zone and r.htf_zone else '-'}</td><td>{'-' if r.sma9_gap_pct != r.sma9_gap_pct or r.sma9_gap_pct == '' else format(float(r.sma9_gap_pct), '.2f') + '%'}</td><td><b>{_h.escape(str(r.score)) if r.score == r.score and r.score else '-'}</b></td></tr>"
             for r in x.itertuples())
         opts = "".join(f'<option value="{_h.escape(v)}"{" selected" if v == d else ""}>{_h.escape(v)}</option>' for v in dates)
         return (head + f'<h2>Spurt SELL &mdash; {_h.escape(d)}</h2>'
@@ -623,7 +645,7 @@ def page_html(date=None):
                 f'<div class="m">{rule}</div>{trk}'
                 '<h3 style="margin:18px 0 4px">SELL signals (all checklist points met)</h3>'
                 '<table class="s"><tr><th>Signal candle</th><th>Symbol</th><th>SELL entry</th><th>Stop loss</th><th>Target 1</th><th>Target 2</th>'
-                '<th>Risk %</th><th>Spurt candle</th><th>Spurt multiple</th><th>Candles after spurt</th><th>Day %</th><th>Resistance zone touched</th><th>Signal<br>candle</th><th>RSI peak</th><th>30m resistance zone</th><th>Checklist</th></tr>'
+                '<th>Risk %</th><th>Spurt candle</th><th>Spurt multiple</th><th>Candles after spurt</th><th>Day %</th><th>Resistance zone touched</th><th>Signal<br>candle</th><th>RSI peak</th><th>30m resistance zone</th><th>Above 9-SMA</th><th>Checklist</th></tr>'
                 f'{rows}</table>{_SORT_JS}</body></html>')
     except Exception as e:
         return f"<p>Spurt SELL page error: {_h.escape(str(e))}</p>"

@@ -119,6 +119,11 @@ def live_setups(df: pd.DataFrame, tf: str, sym: str) -> list:
     idx = df.index
 
     rsi = _rsi(cl, RSI_LEN)
+    try:                                                                  # ADDED 17 Nov: SMA 9/21/60 distance rule (sma_rule.py), same as the indicator
+        import sma_rule
+        ok_buy, ok_sell = sma_rule.ok_arrays(cl)
+    except Exception:
+        ok_buy = ok_sell = np.ones(n, dtype=bool)
     vol_ma = pd.Series(vol).rolling(VOL_MA_LEN, min_periods=VOL_MA_LEN).mean().to_numpy()
     days = np.array([_ist_date(t) for t in idx[-(WINDOW + 1):]])       # per-bar IST date for the replay window
     first = max(1, n - WINDOW)
@@ -173,8 +178,8 @@ def live_setups(df: pd.DataFrame, tf: str, sym: str) -> list:
                 # CHANGED 8 Nov: the signal candle is the one where RSI crosses back (previous candle still at / beyond the level), not any later candle of the window
                 # RSI was in the extreme on the previous candle, came back on this one, and did NOT stay in the extreme longer than MAX_LOOKBACK candles
                 # (the candle MAX_LOOKBACK + 1 back is already out of the extreme) - otherwise it is not an RSI Flush
-                buy_sig = (rsi[i - 1] <= RSI_OS and rsi[i] > RSI_OS and prev.size == MAX_LOOKBACK + 1 and prev.max() > RSI_OS and cl[i] > o[i] and (i - last_buy >= COOLDOWN_BARS))
-                sell_sig = (rsi[i - 1] >= RSI_OB and rsi[i] < RSI_OB and prev.size == MAX_LOOKBACK + 1 and prev.min() < RSI_OB and cl[i] < o[i] and (i - last_sell >= COOLDOWN_BARS))
+                buy_sig = (rsi[i - 1] <= RSI_OS and rsi[i] > RSI_OS and prev.size == MAX_LOOKBACK + 1 and prev.max() > RSI_OS and cl[i] > o[i] and (i - last_buy >= COOLDOWN_BARS) and bool(ok_buy[i]))
+                sell_sig = (rsi[i - 1] >= RSI_OB and rsi[i] < RSI_OB and prev.size == MAX_LOOKBACK + 1 and prev.min() < RSI_OB and cl[i] < o[i] and (i - last_sell >= COOLDOWN_BARS) and bool(ok_sell[i]))
                 if buy_sig:
                     last_buy = i
                     sl = lo[i - SL_LOOKBACK + 1: i + 1].min()

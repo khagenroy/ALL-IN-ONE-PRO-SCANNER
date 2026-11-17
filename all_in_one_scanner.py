@@ -328,6 +328,11 @@ def compute_section_a(df: pd.DataFrame) -> dict:
 
     candle_too_big = BIG_CANDLE_FILTER_ON & is_first_bar_of_day & ((high - low) > (atr * BIG_CANDLE_ATR_MULT))
 
+    try:                                                                  # ADDED 17 Nov: SMA 9/21/60 distance rule (sma_rule.py), same as the indicator
+        import sma_rule
+        ok_buy, ok_sell = sma_rule.ok_arrays(close)
+    except Exception:
+        ok_buy = ok_sell = np.ones(n, dtype=bool)
     last_signal_bar = -999
     sweep_buy = np.zeros(n, dtype=bool)
     sweep_sell = np.zeros(n, dtype=bool)
@@ -336,10 +341,10 @@ def compute_section_a(df: pd.DataFrame) -> dict:
     for i in range(n):
         can_signal = (i - last_signal_bar) >= COOLDOWN_BARS
         vc = bool(vol_condition[i]) if not np.isnan(vol_ma[i]) else False
-        sweep_buy[i] = bullish_sweep[i] and vc and can_signal and not candle_too_big[i]
-        sweep_sell[i] = bearish_sweep[i] and vc and can_signal and not candle_too_big[i]
-        ob_buy[i] = ob_mitigation_buy[i] and vc and can_signal and not candle_too_big[i]
-        ob_sell[i] = ob_mitigation_sell[i] and vc and can_signal and not candle_too_big[i]
+        sweep_buy[i] = bullish_sweep[i] and vc and can_signal and not candle_too_big[i] and ok_buy[i]
+        sweep_sell[i] = bearish_sweep[i] and vc and can_signal and not candle_too_big[i] and ok_sell[i]
+        ob_buy[i] = ob_mitigation_buy[i] and vc and can_signal and not candle_too_big[i] and ok_buy[i]
+        ob_sell[i] = ob_mitigation_sell[i] and vc and can_signal and not candle_too_big[i] and ok_sell[i]
         if sweep_buy[i] or sweep_sell[i] or ob_buy[i] or ob_sell[i]:
             last_signal_bar = i
 

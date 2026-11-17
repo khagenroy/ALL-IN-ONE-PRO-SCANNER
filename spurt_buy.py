@@ -49,6 +49,11 @@ def buy_events(o, h, l, c, v, day_ok, spurt_mult=None):
     """Bar-by-bar copy of the Pine rule. day_ok[i] = candle i is from today. Returns a list of dicts (index of the signal candle, spurt index, ...)."""
     n = len(c)
     out = []
+    try:                                                                  # ADDED 17 Nov: SMA 9/21/60 distance rule (sma_rule.py), same as the indicator
+        import sma_rule
+        ok_buy, _ok_sell = sma_rule.ok_arrays(c)
+    except Exception:
+        ok_buy = np.ones(n, dtype=bool)
     sBar = None
     sLo = sHi = pb = sMult = 0.0
     llBar = None
@@ -63,7 +68,7 @@ def buy_events(o, h, l, c, v, day_ok, spurt_mult=None):
         active = sBar is not None and i > sBar and i - sBar <= WAIT
         held = fell and llBar is not None and i - llBar >= HOLD and l[i] >= pb
         vol_ok = (not NEED_VOL) or v[i] > v[i - 1]
-        buy = active and held and h[i] > h[i - 1] and vol_ok and c[i] > o[i] and c[i] > sLo
+        buy = active and held and h[i] > h[i - 1] and vol_ok and c[i] > o[i] and c[i] > sLo and bool(ok_buy[i])
         if buy:
             deep = (sHi - pb) / (sHi - sLo) * 100.0 if sHi > sLo else 0.0
             out.append(dict(i=i, spurt=sBar, mult=sMult, sl=pb, deep=max(deep, 0.0)))
