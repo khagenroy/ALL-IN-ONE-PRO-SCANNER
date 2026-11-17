@@ -2,8 +2,9 @@
 
 A signal that fires while price is still close to its 9-SMA usually just bounces off the average; the ones that fire far from it work.
 Checked on the SIGNAL candle (close vs the SMA 9 / 21 / 60 of the closes of the same candles the scanner reads):
-    SELL : allowed if the close is at least PCT % ABOVE the 9-SMA,  or the close is below ALL THREE SMAs (with the downtrend).
-    BUY  : allowed if the close is above ALL THREE SMAs (with the uptrend),  or at least PCT % BELOW the 9-SMA.
+    SELL : allowed if the close is below ALL THREE SMAs (with the downtrend),  or at least PCT % ABOVE the NEAREST of the 9/21/60 SMAs.
+    BUY  : allowed if the close is above ALL THREE SMAs (with the uptrend),  or at least PCT % BELOW the NEAREST of the 9/21/60 SMAs.
+    (CHANGED 17 Nov: only the nearest SMA counts; no separate 9-SMA test.)
 While an SMA is not yet known (first candles) the signal is allowed. Defaults need no settings. Optional:
   SMA_RULE=true|false   SMA_RULE_PCT=2   SMA_RULE_TREND=true|false (false = the with-the-trend exception is off)
 Read-only: it only filters signals the scanners already find. Never raises.
@@ -33,14 +34,14 @@ def ok_arrays(close):
         if not ON or n == 0:
             return np.ones(n, dtype=bool), np.ones(n, dtype=bool)
         s9, s21, s60 = _sma(c, 9), _sma(c, 21), _sma(c, 60)
-        known = ~np.isnan(s9)
+        known = ~np.isnan(s60)
         with np.errstate(invalid="ignore"):
+            d = np.vstack([c / s9 - 1.0, c / s21 - 1.0, c / s60 - 1.0]) * 100.0
+            near = d[np.nanargmin(np.where(np.isnan(d), np.inf, np.abs(d)), axis=0), np.arange(n)]     # signed % to the NEAREST SMA (+ = above it)
             above = (c > s9) & (c > s21) & (c > s60)
             below = (c < s9) & (c < s21) & (c < s60)
-            far_up = c >= s9 * (1 + PCT / 100.0)
-            far_dn = c <= s9 * (1 - PCT / 100.0)
-        ok_sell = ~known | far_up | (TREND_OK & below)
-        ok_buy = ~known | far_dn | (TREND_OK & above)
+        ok_sell = ~known | (near >= PCT) | (TREND_OK & below)
+        ok_buy = ~known | (near <= -PCT) | (TREND_OK & above)
         return ok_buy, ok_sell
     except Exception:
         n = len(close) if close is not None else 0
