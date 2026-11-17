@@ -45,13 +45,15 @@ CLOSE_PASS = 15 * 60 + 20      # day high / low / last price for the follow-up
 RT_ON = True                   # gap DOWN retracement watch (SELL setups)
 RT_FIB = 0.382                 # the bounce must reach this part of the gap-down leg (previous close -> day low)
 RT_TF = 15                     # candle size (minutes) of the retracement watch: 15 (Khagen trades the 15-minute chart). 5 = 5-minute candles
-RT_START = 9 * 60 + 15 + RT_TF + 0   # first check: the 09:15 candle has closed (09:30 for 15-minute candles)
+RT_TFS = (5, 15)               # the retracement watch runs on BOTH timeframes: 5-minute (first check 09:20) and 15-minute (first check 09:30)
+RT_START = 9 * 60 + 15 + 5 + 0        # first check: the first 5-minute candle has closed (09:20)
 RT_END = 14 * 60 + 30          # last check
 BASE_MAX = 80                  # at most this many gap stocks get their volume average fetched per scan (largest gaps first)
 
 PATH = os.path.join(sp.RESULTS_DIR, "gap_open.csv")
 COLS = ["date", "symbol", "side", "gap_pct", "open", "prev_close", "first_seen", "last", "spurt_x", "candle_x", "liq", "close_px", "move_pct", "filled",
-        "rt_status", "rt_bounce", "rt_time", "rt_entry", "rt_stop", "rt_risk"]
+        "rt_status", "rt_bounce", "rt_time", "rt_entry", "rt_stop", "rt_risk",
+        "rt5_status", "rt5_bounce", "rt5_time", "rt5_entry", "rt5_stop", "rt5_risk"]   # rt_* = the 15-minute watch, rt5_* = the 5-minute watch
 _st = {"date": "", "rows": {}, "last": 0.0, "candle_done": False, "close_done": False, "none_sent": False, "alerted": set(), "rt_slot": -1}
 _lock = threading.Lock()
 
@@ -89,13 +91,15 @@ def _load(today_s):
         if os.path.exists(PATH):
             for r in csv.DictReader(open(PATH, newline="", encoding="utf-8")):
                 if r.get("date") == today_s and r.get("symbol"):
-                    for k in ("gap_pct", "open", "prev_close", "last", "spurt_x", "candle_x", "close_px", "move_pct", "rt_bounce", "rt_entry", "rt_stop", "rt_risk"):
+                    for k in ("gap_pct", "open", "prev_close", "last", "spurt_x", "candle_x", "close_px", "move_pct", "rt_bounce", "rt_entry", "rt_stop", "rt_risk", "rt5_bounce", "rt5_entry", "rt5_stop", "rt5_risk"):
                         r[k] = _f(r.get(k), None) if r.get(k) not in ("", None) else None
                     r["pc"] = r.get("prev_close")
                     _st["rows"][r["symbol"]] = r
                     _st["alerted"].add(r["symbol"])
                     if r.get("rt_status") == "TRIGGER":
                         r["_rt_sent"] = True
+                    if r.get("rt5_status") == "TRIGGER":
+                        r["_rt5_sent"] = True
     except Exception as e:
         log.warning(f"gap_open reload failed: {e}")
 
@@ -285,12 +289,17 @@ def retrace_eval(o, h, l, c, pc, up=False):
     return out
 
 
-def _retrace_pass(now_ist):
-    """One check of every gap DOWN stock (not thin) on its closed 5-minute candles. Phone alert on a new SELL trigger."""
+def _pfx(tf):
+    return "rt" if tf == 15 else "rt5"
+
+
+def _retrace_pass(now_ist, tfs=(15,)):
+    """One check of every gap stock (not thin) on its closed 5-minute and / or 15-minute candles (tfs). Phone alert on a new trigger (SELL after a gap down, BUY after a gap up)."""
     today_s = now_ist.strftime("%Y-%m-%d")
     uni = dict(sp._load_universe())
     with _lock:
-        todo = [s for s, r in _st["rows"].items() if r.get("liq") != "THIN" and s in uni and r.get("rt_status") != "FILLED"]
+        todo = [s for s, r in _st["rows"].items() if r.get("liq") != "THIN" and s in uni
+                and any(r.get(_pfx(t) + "_status") not in ("FILLED", "TRIGGER") for t in tfs)]
     todo = sorted(todo, key=lambda s: -abs(_st["rows"][s]["gap_pct"]))[:BASE_MAX]
 
     def one(sym):
@@ -298,18 +307,21 @@ def _retrace_pass(now_ist):
             import live_scanner as ls
             as_of = pd.Timestamp(datetime.utcnow())
             df5 = ls.fetch_intraday_history(uni[sym], "NSE_EQ", 5, 3)
-            df = ls.drop_forming_bars(df5, 5, as_of) if RT_TF <= 5 else ls.drop_forming_bars(ls.build_merged_bars(df5, RT_TF // 5), RT_TF, as_of)
-            if df is None or not len(df):
-                return None
-            day = df.index.map(lambda t: sp._ist(t).date())
-            d = df[day == now_ist.date()]
-            if len(d) < 2:
-                return None
-            t = [(x + pd.Timedelta(minutes=330)).strftime("%H:%M") for x in d.index]
-            o_, h_, l_, c_ = (d[k].to_numpy(dtype=float) for k in ("open", "high", "low", "close"))
-            e = retrace_eval(o_, h_, l_, c_, _st["rows"][sym]["pc"], up=_st["rows"][sym]["gap_pct"] > 0)
-            e["time"] = t[e["trig_j"]] if e["trig_j"] is not None else ""
-            return e
+            out = {}
+            for tf in tfs:
+                df = ls.drop_forming_bars(df5, 5, as_of) if tf <= 5 else ls.drop_forming_bars(ls.build_merged_bars(df5, tf // 5), tf, as_of)
+                if df is None or not len(df):
+                    continue
+                day = df.index.map(lambda t: sp._ist(t).date())
+                d = df[day == now_ist.date()]
+                if len(d) < 2:
+                    continue
+                t = [(x + pd.Timedelta(minutes=330)).strftime("%H:%M") for x in d.index]
+                o_, h_, l_, c_ = (d[k].to_numpy(dtype=float) for k in ("open", "high", "low", "close"))
+                e = retrace_eval(o_, h_, l_, c_, _st["rows"][sym]["pc"], up=_st["rows"][sym]["gap_pct"] > 0)
+                e["time"] = t[e["trig_j"]] if e["trig_j"] is not None else ""
+                out[tf] = e
+            return out
         except Exception:
             return None
     if not todo:
@@ -318,37 +330,46 @@ def _retrace_pass(now_ist):
         res = list(ex.map(one, todo))
     fresh = []
     with _lock:
-        for s, e in zip(todo, res):
-            if not e:
+        for s, out in zip(todo, res):
+            if not out:
                 continue
             r = _st["rows"][s]
-            if r.get("rt_status") == "TRIGGER":
-                continue                                      # a trigger stays as it was found
-            r["rt_status"], r["rt_bounce"] = e["status"], e["bounce"]
-            if e["status"] == "TRIGGER":
-                r.update(rt_time=e["time"], rt_entry=round(e["entry"], 2), rt_stop=round(e["stop"], 2), rt_risk=round(abs(e["stop"] - e["entry"]) / e["entry"] * 100.0, 2))
-                if not r.get("_rt_sent"):
-                    r["_rt_sent"] = True
-                    fresh.append(r)
+            for tf, e in out.items():
+                p = _pfx(tf)
+                if r.get(p + "_status") == "TRIGGER":
+                    continue                                  # a trigger stays as it was found
+                r[p + "_status"], r[p + "_bounce"] = e["status"], e["bounce"]
+                if e["status"] == "TRIGGER":
+                    r[p + "_time"] = e["time"]
+                    r[p + "_entry"], r[p + "_stop"] = round(e["entry"], 2), round(e["stop"], 2)
+                    r[p + "_risk"] = round(abs(e["stop"] - e["entry"]) / e["entry"] * 100.0, 2)
+                    if not r.get("_" + p + "_sent"):
+                        r["_" + p + "_sent"] = True
+                        fresh.append((r, tf))
         _write(today_s)
     if fresh:
         _notify_rt(fresh)
-        log.info(f"gap_open: gap-down retrace SELL triggers: {[(a['symbol'], a['rt_entry']) for a in fresh]}")
+        log.info(f"gap_open: gap retrace triggers: {[(a['symbol'], tf, a[_pfx(tf) + '_entry']) for a, tf in fresh]}")
 
 
-def _notify_rt(rows):
+def _notify_rt(items):
+    """items = [(row, tf)]; every line starts with its timeframe."""
     topic = os.environ.get("NTFY_TOPIC", "").strip()
-    if not (NTFY_ALERT and sp.NTFY_ON and topic and rows):
+    if not (NTFY_ALERT and sp.NTFY_ON and topic and items):
         return
     try:
         import requests
         lines = []
-        for r in rows[:12]:
+        for r, tf in sorted(items[:12], key=lambda z: z[1]):
+            p = _pfx(tf)
             sx = f"  spurt {r['candle_x']:.0f}x" if r.get("candle_x") is not None else (f"  spurt {r['spurt_x']:.0f}x" if r.get("spurt_x") is not None else "")
-            lines.append(f"{r['symbol']}  {'BUY' if r['gap_pct'] > 0 else 'SELL'} {float(r['rt_entry']):.2f}  stop {float(r['rt_stop']):.2f} ({float(r['rt_risk']):.2f}%)  candle {r['rt_time']}  "
-                         f"gap {r['gap_pct']:+.1f}%, {'pulled back' if r['gap_pct'] > 0 else 'bounced'} {float(r['rt_bounce']):.0f}% of the leg{sx}")
+            _e, _s = float(r[p + '_entry']), float(r[p + '_stop'])
+            _d = 1.0 if r['gap_pct'] > 0 else -1.0
+            lines.append(f"[{tf} min] {r['symbol']}  {'BUY' if r['gap_pct'] > 0 else 'SELL'} {_e:.2f}  SL {_s:.2f} ({float(r[p + '_risk']):.2f}%)  T1 {_e + _d * abs(_e - _s):.2f}  T2 {_e + _d * 2 * abs(_e - _s):.2f}  candle {r[p + '_time']}  "
+                         f"gap {r['gap_pct']:+.1f}%, {'pulled back' if r['gap_pct'] > 0 else 'bounced'} {float(r[p + '_bounce']):.0f}% of the leg{sx}")
+        tfs = sorted({tf for _r, tf in items})
         requests.post(f"https://ntfy.sh/{topic}", data="\n".join(lines).encode("utf-8"), timeout=8,
-                      headers={"Title": f"Gap retrace trigger ({len(rows)}): " + ", ".join(sorted({'BUY' if r['gap_pct'] > 0 else 'SELL' for r in rows})), "Priority": "high", "Tags": "arrows_counterclockwise"})
+                      headers={"Title": f"Gap retrace trigger {'+'.join(str(t) for t in tfs)} min ({len(items)}): " + ", ".join(sorted({'BUY' if r['gap_pct'] > 0 else 'SELL' for r, _t in items})), "Priority": "high", "Tags": "arrows_counterclockwise"})
     except Exception as e:
         log.warning(f"gap_open retrace ntfy failed: {e}")
 
@@ -371,9 +392,9 @@ def loop():
             elif CANDLE_PASS <= m < CANDLE_PASS + 4 and not _st["candle_done"] and _st["rows"]:
                 _st["candle_done"] = True
                 _candle_pass(now)
-            elif RT_ON and RT_START <= m <= RT_END and now.minute % RT_TF == 0 and now.second >= 20 and _st["rt_slot"] != m // RT_TF and _st["rows"]:
-                _st["rt_slot"] = m // RT_TF
-                _retrace_pass(now)
+            elif RT_ON and RT_START <= m <= RT_END and now.minute % 5 == 0 and now.second >= 20 and _st["rt_slot"] != m // 5 and _st["rows"]:
+                _st["rt_slot"] = m // 5
+                _retrace_pass(now, (5, 15) if (m % 15 == 0 and m >= 9 * 60 + 30) else (5,))
             elif CLOSE_PASS <= m < CLOSE_PASS + 4 and not _st["close_done"] and _st["rows"]:
                 _st["close_done"] = True
                 _close_pass(now)
@@ -394,28 +415,32 @@ def html():
 
         def xcell(v):
             return "-" if v in ("", None) else (f"<b>{float(v):.0f}x</b>" if float(v) >= 10 else f"{float(v):.1f}x")
-        def rt(r):
-            st = r.get("rt_status") or "WATCHING"
+        def rt(r, p="rt"):
+            st = r.get(p + "_status") or "WATCHING"
             col = {"TRIGGER": "#c62828", "BOUNCING": "#b26a00", "WATCHING": "#555", "FILLED": "#888", "EXPIRED": "#888"}.get(st, "#555")
-            bn = f" {float(r['rt_bounce']):.0f}%" if r.get("rt_bounce") not in ("", None) and st in ("BOUNCING", "TRIGGER", "WATCHING") else ""
+            bn = f" {float(r[p + '_bounce']):.0f}%" if r.get(p + "_bounce") not in ("", None) and st in ("BOUNCING", "TRIGGER", "WATCHING") else ""
             return f'<b style="color:{col}">{st}</b>{bn}'
+
+        def tfc(r, k):
+            v = [f"{t} min: {r.get(p + '_' + k)}" for t, p in ((5, "rt5"), (15, "rt")) if r.get(p + "_" + k) not in ("", None)]
+            return "<br>".join(v) if v else "-"
         body = "".join(
             f"<tr><td>{sp._tvl(r['symbol'])}</td><td><b style=\"color:{'#0a7d33' if r['gap_pct'] > 0 else '#c62828'}\">{r['side']}</b></td><td>{pc(r['gap_pct'])}</td>"
             f"<td>{float(r['open']):.2f}</td><td>{float(r['prev_close']):.2f}</td><td>{r.get('last') if r.get('last') not in ('', None) else '-'}</td>"
             f"<td>{xcell(r.get('spurt_x'))}</td><td>{xcell(r.get('candle_x'))}</td><td>{r.get('liq') or '-'}</td><td>{r['first_seen']}</td>"
-            f"<td>{rt(r)}</td><td>{r.get('rt_time') or '-'}</td><td>{r.get('rt_entry') if r.get('rt_entry') not in ('', None) else '-'}</td><td>{r.get('rt_stop') if r.get('rt_stop') not in ('', None) else '-'}</td>"
+            f"<td>{rt(r, 'rt5')}</td><td>{rt(r, 'rt')}</td><td>{tfc(r, 'time')}</td><td>{tfc(r, 'entry')}</td><td>{tfc(r, 'stop')}</td>"
             f"<td>{r.get('close_px') if r.get('close_px') not in ('', None) else '-'}</td><td>{pc(r.get('move_pct'))}</td><td>{r.get('filled') or '-'}</td></tr>"
-            for r in rows) or '<tr><td colspan="17" style="text-align:center">No stock has opened more than %g%% away from the previous close yet today (first scan 09:16).</td></tr>' % GAP_PCT
+            for r in rows) or '<tr><td colspan="19" style="text-align:center">No stock has opened more than %g%% away from the previous close yet today (first scan 09:16).</td></tr>' % GAP_PCT
         return (f'<h2>Gap at open: gap up / gap down more than {GAP_PCT:g}% &mdash; spurt or not ({len(rows)} stocks)</h2>'
                 f'<div class="m">The first list of the day: every liquid stock whose OPEN is more than {GAP_PCT:g}% away from yesterday\'s close, read at 09:16 and every minute to 09:19 '
                 f'(phone alert before 09:20). <b>Spurt x</b> = day volume so far / average 5-minute candle volume (while the first candle forms); <b>1st candle x</b> = the real 09:15 candle, filled in at about 09:21. '
                 f'THIN = little waiting on the bid or ask side or near a circuit (not in the alert). Close / Move / Gap filled are filled at 15:20 (move from the open in the gap direction; filled = the previous close was reached again). '
-                f'<b>Retrace</b>: GAP DOWN = after the price bounces back up at least {RT_FIB * 100:.1f}% of the leg (previous close to the day low), the first RED {RT_TF}-minute candle closing below the previous candle\'s low is the SELL trigger (stop = the bounce high). '
-                f'GAP UP = the mirror: a pullback of {RT_FIB * 100:.1f}% of the leg (previous close to the day high), then the first GREEN {RT_TF}-minute candle closing above the previous candle\'s high is the BUY trigger (stop = the pullback low). '
-                f'The % beside the status is how much of the leg has been retraced; FILLED = closed back at the previous close. Checked at every {RT_TF}-minute candle close 09:30-14:30, phone alert on the trigger. '
+                f'<b>Retrace</b>: GAP DOWN = after the price bounces back up at least {RT_FIB * 100:.1f}% of the leg (previous close to the day low), the first RED 5-minute (or 15-minute) candle closing below the previous candle\'s low is the SELL trigger (stop = the bounce high). '
+                f'GAP UP = the mirror: a pullback of {RT_FIB * 100:.1f}% of the leg (previous close to the day high), then the first GREEN 5-minute (or 15-minute) candle closing above the previous candle\'s high is the BUY trigger (stop = the pullback low). '
+                f'The % beside the status is how much of the leg has been retraced; FILLED = closed back at the previous close. Watched on BOTH timeframes, each with its own column: 5-minute candles (checked every 5 minutes from 09:20) and 15-minute candles (checked every 15 minutes from 09:30), until 14:30. The phone alert starts with [5 min] or [15 min]. '
                 f'Information only. <a href="/gap_open.csv" target="_blank" rel="noopener">CSV</a></div>'
                 '<div class="w"><table class="sp"><tr><th>Symbol</th><th>Gap</th><th>Gap %</th><th>Open</th><th>Prev close</th><th>Last</th><th>Spurt x</th><th>1st candle x</th><th>Liq</th>'
-                '<th>Seen</th><th>Retrace</th><th>Trigger</th><th>Entry</th><th>Stop</th><th>Close</th><th>Move</th><th>Gap filled</th></tr>' + body + '</table></div>')
+                '<th>Seen</th><th>Retrace 5 min</th><th>Retrace 15 min</th><th>Trigger (time)</th><th>Entry</th><th>Stop</th><th>Close</th><th>Move</th><th>Gap filled</th></tr>' + body + '</table></div>')
     except Exception as e:
         log.warning(f"gap_open html failed: {e}")
         return '<div class="m">Gap at open could not be shown right now.</div>'

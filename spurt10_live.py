@@ -1865,7 +1865,7 @@ STRONG_VOLX = 1.5
 STRONG_BODY = 50.0
 STRONG_ALERT_MAX = 40
 STRONG_CSV = os.path.join(RESULTS_DIR, "strong_signals_history.csv")
-STRONG_COLS = ["date", "candle", "symbol", "dir", "price", "box_low", "box_high", "box_candles", "vol_x", "body_pct", "sma9", "sma21", "sma60", "zone", "wall", "verdict", "caution",
+STRONG_COLS = ["date", "candle", "tf", "symbol", "dir", "price", "box_low", "box_high", "box_candles", "vol_x", "body_pct", "sma9", "sma21", "sma60", "zone", "wall", "verdict", "caution",
                "stop_pct", "spurt_x", "alert", "ret_10m", "ret_30m", "ret_60m", "best_pct", "worst_pct", "result"]
 _strong = {"date": None, "keys": set(), "hits": [], "count": 0}
 
@@ -1987,7 +1987,7 @@ def _strong_update(top, now_ist, sid_of):
                 if r.get("date") == today:
                     r["_ts"] = r.get("_ts") or ""
                     _strong["hits"].append(r)
-                    _strong["keys"].add((r["symbol"], r["candle"], r["dir"]))
+                    _strong["keys"].add((r["symbol"], r["candle"], r["dir"], r.get("tf") or "5"))
         if now_ist.hour * 60 + now_ist.minute > WICK_UNTIL_MIN + 15:
             return
         syms = dict(_wick.get("syms") or {})
@@ -2008,29 +2008,38 @@ def _strong_update(top, now_ist, sid_of):
                 d5 = ls.drop_forming_bars(df5, 5, as_of)
                 if d5 is None or len(d5) < STRONG_N + 20:
                     return None
-                evs = [e for e in _box_breakouts(d5) if e["i"] >= len(d5) - 2]          # the last two closed 5-min candles (the scan runs every 10 min)
-                c = d5["close"].astype(float)
-                s9, s21, s60 = c.rolling(9).mean(), c.rolling(21).mean(), c.rolling(60).mean()
+                try:
+                    d15 = ls.drop_forming_bars(ls.build_merged_bars(df5, 3), 15, as_of)           # the 15-minute candles, built from the same 5-minute download
+                except Exception:
+                    d15 = None
                 res = []
-                for e in evs:
-                    i = e["i"]
-                    cl = float(c.iloc[i])
-                    up = e["dir"] == "UP"
-                    if np.isnan(s9.iloc[i]) or np.isnan(s21.iloc[i]) or np.isnan(s60.iloc[i]):
+                zdf = None
+                for tf, dd in ((5, d5), (15, d15)):                                 # the box rule runs on BOTH timeframes: 5 min and 15 min
+                    if dd is None or len(dd) < STRONG_N + 20:
                         continue
-                    if (up and not (cl > s9.iloc[i] and cl > s21.iloc[i] and cl > s60.iloc[i])) or ((not up) and not (cl < s9.iloc[i] and cl < s21.iloc[i] and cl < s60.iloc[i])):
-                        continue                                                    # must close beyond ALL THREE SMAs (9, 21, 60)
-                    ts = d5.index[i]
-                    if _ist(ts).strftime("%Y-%m-%d") != today:
-                        continue
-                    zone = ""
-                    try:
-                        zdf = ls.drop_forming_bars(ls.build_merged_bars(df5, ZONE_TF // 5), ZONE_TF, as_of)
-                        if zdf is not None and len(zdf) >= 30:
-                            zone = _zone_fields(_secA_zones(zdf), cl, None).get("at_zone", "")
-                    except Exception:
-                        pass
-                    res.append((e, cl, float(s9.iloc[i]), float(s21.iloc[i]), float(s60.iloc[i]), zone, ts))
+                    evs = [e for e in _box_breakouts(dd) if e["i"] >= len(dd) - 2]  # the last two closed candles of this timeframe (the scan runs every 10 min)
+                    c = dd["close"].astype(float)
+                    s9, s21, s60 = c.rolling(9).mean(), c.rolling(21).mean(), c.rolling(60).mean()
+                    for e in evs:
+                        i = e["i"]
+                        cl = float(c.iloc[i])
+                        up = e["dir"] == "UP"
+                        if np.isnan(s9.iloc[i]) or np.isnan(s21.iloc[i]) or np.isnan(s60.iloc[i]):
+                            continue
+                        if (up and not (cl > s9.iloc[i] and cl > s21.iloc[i] and cl > s60.iloc[i])) or ((not up) and not (cl < s9.iloc[i] and cl < s21.iloc[i] and cl < s60.iloc[i])):
+                            continue                                                # must close beyond ALL THREE SMAs (9, 21, 60) of this timeframe
+                        ts = dd.index[i]
+                        if _ist(ts).strftime("%Y-%m-%d") != today:
+                            continue
+                        zone = ""
+                        try:
+                            if zdf is None:
+                                zdf = ls.drop_forming_bars(ls.build_merged_bars(df5, ZONE_TF // 5), ZONE_TF, as_of)
+                            if zdf is not None and len(zdf) >= 30:
+                                zone = _zone_fields(_secA_zones(zdf), cl, None).get("at_zone", "")
+                        except Exception:
+                            pass
+                        res.append((e, cl, float(s9.iloc[i]), float(s21.iloc[i]), float(s60.iloc[i]), zone, ts, tf))
                 return sym, d5, res
             except Exception as ex:
                 log.warning(f"Spurt10 strong check failed for {sym}: {ex}")
@@ -2044,9 +2053,9 @@ def _strong_update(top, now_ist, sid_of):
                 for h in _strong["hits"]:                                           # follow-up of the earlier signals of this stock
                     if h["symbol"] == sym and h.get("_ts"):
                         _strong_follow(h, d5)
-                for e, cl, s9v, s21v, s60v, zone, ts in res:
+                for e, cl, s9v, s21v, s60v, zone, ts, tf in res:
                     cndl = _ist(ts).strftime("%H:%M")
-                    key = (sym, cndl, e["dir"])
+                    key = (sym, cndl, e["dir"], str(tf))
                     if key in _strong["keys"]:
                         continue
                     _strong["keys"].add(key)
@@ -2057,10 +2066,10 @@ def _strong_update(top, now_ist, sid_of):
                         cau.append("into " + ("resistance" if up else "support") + " zone")
                     # the order-book wall is only RECORDED in the "wall" column (it changes every second and can be spoofed), it no longer decides STRONG / CAUTION
                     stop = abs(cl - (e["lo"] if up else e["hi"])) / cl * 100.0
-                    hit = {"date": today, "candle": cndl, "symbol": sym, "dir": e["dir"], "price": f"{cl:.2f}", "box_low": f"{e['lo']:g}", "box_high": f"{e['hi']:g}",
+                    hit = {"date": today, "candle": cndl, "tf": str(tf), "symbol": sym, "dir": e["dir"], "price": f"{cl:.2f}", "box_low": f"{e['lo']:g}", "box_high": f"{e['hi']:g}",
                            "box_candles": e["n"], "vol_x": e["vol_x"], "body_pct": e["body"], "sma9": f"{s9v:.2f}", "sma21": f"{s21v:.2f}", "sma60": f"{s60v:.2f}", "zone": zone, "wall": wall,
                            "verdict": "CAUTION" if cau else "STRONG", "caution": "; ".join(cau), "stop_pct": f"{stop:.2f}", "spurt_x": f"{syms[sym]['mult']:.1f}",
-                           "alert": now_ist.strftime("%H:%M"), "ret_10m": "", "ret_30m": "", "ret_60m": "", "best_pct": "", "worst_pct": "", "result": "", "_ts": str(ts)}
+                           "alert": now_ist.strftime("%H:%M"), "ret_10m": "", "ret_30m": "", "ret_60m": "", "best_pct": "", "worst_pct": "", "result": "", "_ts": str(ts + pd.Timedelta(minutes=tf - 5))}
                     _strong_follow(hit, d5)
                     _strong["hits"].append(hit)
                     new.append(hit)
@@ -2073,11 +2082,12 @@ def _strong_update(top, now_ist, sid_of):
         if not good or not (NTFY_ON and topic) or _strong["count"] >= STRONG_ALERT_MAX:
             return
         good.sort(key=lambda h: -float(h["spurt_x"]))
-        lines = [f"{h['symbol']}  {h['dir']}  Rs {h['price']}  box {h['box_low']}-{h['box_high']}  volume {h['vol_x']}x  stop {h['stop_pct']}%  spurt {h['spurt_x']}x  candle {h['candle']}" for h in good[:12]]
+        good.sort(key=lambda h: (int(h.get("tf") or 5), -float(h["spurt_x"])))
+        lines = [f"[{h.get('tf') or 5} min] {h['symbol']}  {h['dir']}  Rs {h['price']}  box {h['box_low']}-{h['box_high']}  volume {h['vol_x']}x  stop {h['stop_pct']}%  spurt {h['spurt_x']}x  candle {h['candle']}" for h in good[:12]]
         try:
             import requests
             resp = requests.post(f"https://ntfy.sh/{topic}", data="\n".join(lines).encode("utf-8"), timeout=8,
-                                 headers={"Title": f"STRONG breakout ({len(good)}): box + volume + SMA 9/21/60", "Priority": "urgent", "Tags": "rocket,chart_with_upwards_trend"})
+                                 headers={"Title": f"STRONG breakout {'+'.join(sorted({str(h.get('tf') or 5) for h in good}, key=int))} min ({len(good)}): box + volume + SMA 9/21/60", "Priority": "urgent", "Tags": "rocket,chart_with_upwards_trend"})
             if resp.status_code >= 300:
                 log.warning(f"Spurt10 strong ntfy refused: {resp.status_code} {resp.text[:150]}")
                 return
@@ -2095,9 +2105,9 @@ def _strong_html():
         if not STRONG_ON:
             return ""
         out = (f'<h2>Strong breakout signals &mdash; consolidation box + volume + SMA 9/21/60 &middot; spurt stocks &ge; {WICK_SPURT_MULT:g}x</h2>'
-               f'<div class="m">A 5-min candle that CLOSES out of a consolidation box ({STRONG_N}+ candles inside {STRONG_ATR:g}x ATR, volume dried up inside) with volume &ge; {STRONG_VOLX:g}x average and a body &ge; {STRONG_BODY:g}%, '
+               f'<div class="m">A 5-min or 15-min candle (each timeframe is checked on its own candles; the TF column says which) that CLOSES out of a consolidation box ({STRONG_N}+ candles inside {STRONG_ATR:g}x ATR, volume dried up inside) with volume &ge; {STRONG_VOLX:g}x average and a body &ge; {STRONG_BODY:g}%, '
                'and closes beyond ALL THREE of SMA 9, SMA 21 and SMA 60. <b>STRONG</b> = not running into an opposite zone (phone alert sent). <b>CAUTION</b> = it runs into a zone (listed, no alert). The wall column is only a record (order books change every second), it does not decide anything. '
-               'Stop = other side of the box (stop % is the distance). Same box rule as the CONSOL BOX indicator; checked every 10 minutes on the last two closed 5-min candles. '
+               'Stop = other side of the box (stop % is the distance). Same box rule as the CONSOL BOX indicator; checked every 10 minutes on the last two closed candles of each timeframe. '
                'Follow-up columns = % move after the signal in its direction (+ = it worked). Information only. <a href="/strong_signals.csv">CSV (all days)</a></div>')
         rows = [h for h in _strong["hits"] if h.get("date") == _strong.get("date")]
         if not rows:
@@ -2110,10 +2120,10 @@ def _strong_html():
             vb = "background:#d4f0dc" if good else "background:#fff3cd"
             res = x.get("result", "")
             rb = "background:#d4f0dc" if res == "WORKED" else "background:#f8d9d6" if res == "FAILED" else ""
-            body += (f"<tr><td>{x['candle']}</td><td>{_tvl(x['symbol'])}</td><td><b style=\"color:{dc}\">{x['dir']}</b></td><td>{x['price']}</td><td>{x['box_low']} - {x['box_high']}</td>"
+            body += (f"<tr><td>{x['candle']}</td><td>{x.get('tf') or 5} min</td><td>{_tvl(x['symbol'])}</td><td><b style=\"color:{dc}\">{x['dir']}</b></td><td>{x['price']}</td><td>{x['box_low']} - {x['box_high']}</td>"
                      f"<td>{x['vol_x']}x</td><td>{x['stop_pct']}%</td><td style=\"{vb}\"><b>{x['verdict']}</b> {x.get('caution', '')}</td><td>{x.get('zone') or '-'}</td><td>{x.get('wall') or '-'}</td>"
                      f"<td>{x['spurt_x']}x</td><td>{x.get('ret_10m', '')}</td><td>{x.get('ret_30m', '')}</td><td>{x.get('ret_60m', '')}</td><td style=\"{rb}\">{res}</td></tr>")
-        out += ('<div class="w"><table class="sp"><tr><th>Candle</th><th>Symbol</th><th>Direction</th><th>Price</th><th>Box</th><th>Volume</th><th>Stop</th><th>Verdict</th>'
+        out += ('<div class="w"><table class="sp"><tr><th>Candle</th><th>TF</th><th>Symbol</th><th>Direction</th><th>Price</th><th>Box</th><th>Volume</th><th>Stop</th><th>Verdict</th>'
                 '<th>At zone</th><th>Wall</th><th>Spurt</th><th>10m %</th><th>30m %</th><th>60m %</th><th>Result</th></tr>' + body + '</table></div>')
         return out
     except Exception:
