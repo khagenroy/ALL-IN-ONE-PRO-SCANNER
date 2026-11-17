@@ -23,7 +23,7 @@ IST = sp.IST
 
 ON = True
 RED_MIN_MULT = 20.0           # CHANGED 11 Nov: 20x (was 10x). The red candle volume must be this many x the 50-candle average
-RSI_MAX = 30.0                # ADDED 12 Nov: the RSI(14) of the 5-minute closes, at the close of the red spurt candle, must be BELOW this (0 = switch the RSI rule off)
+RSI_MAX = 50.0                # CHANGED 17 Nov: 50 (was 30) so more red spurts are listed and alerted. ADDED 12 Nov: the RSI(14) of the 5-minute closes, at the close of the red spurt candle, must be BELOW this (0 = switch the RSI rule off)
 RSI_LEN = 14
 NTFY_ALERT = True             # phone alert, highest priority
 NTFY_PRIORITY = "urgent"      # ntfy: min / low / default / high / urgent (urgent = the highest)
