@@ -884,6 +884,31 @@ def daily_weak_csv():
     return _serve_csv("daily_weak.csv", "daily_weak_stocks.csv")
 
 
+@app.route("/daily_weak_history.csv", methods=["GET"])        # ADDED 17 Nov: every day's weak list, with what the stock did next (filled in over the next days)
+def daily_weak_history_csv():
+    return _serve_csv("daily_weak_history.csv", "daily_weak_history_with_results.csv")
+
+
+@app.route("/daily_strong", methods=["GET"])                  # ADDED 17 Nov: the mirror of /daily_weak = tomorrow's BUY watch-list
+def daily_strong_page():
+    try:
+        import daily_zone_rej
+        return daily_zone_rej.strong_page_html()
+    except Exception:
+        log.exception("/daily_strong failed")
+        return "<p>Strong stock page failed - see the logs.</p>", 500
+
+
+@app.route("/daily_strong.csv", methods=["GET"])
+def daily_strong_csv():
+    return _serve_csv("daily_strong.csv", "daily_strong_stocks.csv")
+
+
+@app.route("/daily_strong_history.csv", methods=["GET"])
+def daily_strong_history_csv():
+    return _serve_csv("daily_strong_history.csv", "daily_strong_history_with_results.csv")
+
+
 @app.route("/invest", methods=["GET"])
 def invest_page():
     try:

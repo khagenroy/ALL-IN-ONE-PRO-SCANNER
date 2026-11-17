@@ -237,6 +237,118 @@ def _weak_score(df, mkt20, zones):
             "at_resistance": any(h[-1] >= z["lo"] * (1 - NEAR_PCT / 100.0) and l[-1] <= z["hi"] for z in res)}
 
 
+# ------------------------------------------------------------------------------------------------ STRONG STOCK SCORE (ADDED 17 Nov) - the mirror of the weak score
+STRONG_PATH = os.path.join(sd.RESULTS_DIR, "daily_strong.csv")
+STRONG_COLS = ["date", "symbol", "price", "score", "flags", "rsi", "ret20_pct", "rel20_pct", "at_support", "day_chg_pct"]
+STRONG_MIN = 6               # listed from this score (0-7): 6 or 7 only, the same as the weak list
+STRONG_REL = 5.0             # 20-day return at least this many points ABOVE the market (median of all stocks)
+
+
+def _strong_score(df, mkt20, zones):
+    """Mirror of _weak_score: df cleaned daily candles (last = today). Returns a row dict or None. 7 checks, 1 point each."""
+    n = len(df)
+    if n < 60:
+        return None
+    o, h, l, c, v = (df[k].to_numpy(dtype=float) for k in ("open", "high", "low", "close", "volume"))
+    flags = []
+    sh, sl = _swings(h, "H"), _swings(l, "L")
+    if len(sh) >= 2 and len(sl) >= 2 and h[sh[-1]] > h[sh[-2]] and l[sl[-1]] > l[sl[-2]]:
+        flags.append("STRUCT")                                       # 1 higher high + higher low
+    ema = lambda a, L: pd.Series(a).ewm(span=L, adjust=False).mean().to_numpy()
+    e20, e50 = ema(c, 20), ema(c, 50)
+    if c[-1] > e20[-1] > e50[-1]:
+        flags.append("TREND")                                        # 2 close above the 20 EMA, which is above the 50 EMA
+    rsi = _rsi14(c)
+    if rsi is not None and rsi > 50:
+        flags.append("RSI")                                          # 3 daily RSI over 50
+    sup = [z for z in zones if z["type"] == "SUPPORT"]
+    rej = False
+    for i in range(n - 5, n):                                        # 4 last 5 days: green candle, lower wick >= 60%, low reached a support zone
+        rg = h[i] - l[i]
+        if rg > 0 and c[i] > o[i] and (min(o[i], c[i]) - l[i]) / rg >= 0.6 and any(l[i] <= z["hi"] * (1 + NEAR_PCT / 100.0) for z in sup):
+            rej = True
+    if rej:
+        flags.append("REJ")
+    avg = float(np.mean(v[-60:-10])) if n >= 60 else 0.0
+    heavy = 0
+    for i in range(n - 10, n):                                       # 5 at least 2 heavy green days (volume 1.5x the average) closing in the upper 30% of the range
+        rg = h[i] - l[i]
+        if avg and rg > 0 and c[i] > o[i] and v[i] >= 1.5 * avg and (h[i] - c[i]) / rg <= 0.3:
+            heavy += 1
+    if heavy >= 2:
+        flags.append("BUYVOL")
+    r20 = (c[-1] / c[-21] - 1.0) * 100.0
+    rel = r20 - mkt20
+    if rel >= STRONG_REL:
+        flags.append("REL")                                          # 6 20-day return well above the market
+    fb = False
+    for k in range(n - 10, n - 1):                                   # 7 failed breakdown: closed below the earlier 20-day low within 10 days, now back above that level
+        lvl = float(l[k - 20:k].min())
+        if c[k] < lvl and c[-1] > lvl:
+            fb = True
+    if fb:
+        flags.append("FAILBRD")
+    return {"score": len(flags), "flags": "+".join(flags), "rsi": round(rsi, 1) if rsi is not None else "", "ret20_pct": round(r20, 1),
+            "rel20_pct": round(rel, 1), "price": round(float(c[-1]), 2), "day_chg_pct": round((c[-1] / c[-2] - 1.0) * 100.0, 2),
+            "at_support": any(l[-1] <= z["hi"] * (1 + NEAR_PCT / 100.0) and h[-1] >= z["lo"] for z in sup)}
+
+
+# ------------------------------------------------------------------------------------------------ HISTORY FILES (ADDED 17 Nov)
+# daily_strong_history.csv and daily_weak_history.csv: every day's list, all days appended, and what each stock did AFTER it was listed. The result
+# columns are empty on the day and are filled in by the next daily runs (next day, then 3 and 5 trading days later), so after some weeks the file
+# shows how the lists performed. next_gap_pct = next open against the listed close; *_pct = plain price change from the listed close (+ = up, - = down).
+HIST_COLS = ["date", "symbol", "price", "score", "flags", "rsi", "ret20_pct", "rel20_pct", "at_zone", "day_chg_pct",
+             "next_date", "next_gap_pct", "next_close_pct", "next_high_pct", "next_low_pct", "d3_pct", "d5_pct"]
+
+
+def _history_update(kind, today_s, new_rows, dfs):
+    """kind = 'strong' or 'weak'. Adds today's list, then fills the follow-up columns of the earlier rows from the daily candles. Never raises."""
+    path = os.path.join(sd.RESULTS_DIR, f"daily_{kind}_history.csv")
+    rows = []
+    if os.path.exists(path):
+        try:
+            rows = pd.read_csv(path, dtype=str).fillna("").to_dict("records")
+        except Exception as e:
+            log.warning(f"daily_{kind}_history unreadable, starting again with today only: {e}")
+            rows = []
+    rows = [r for r in rows if r.get("date") != today_s]          # run twice on the same day: today's rows are replaced, not repeated
+    for w in new_rows:
+        zone = w.get("at_support") if kind == "strong" else w.get("at_resistance")
+        r = {c: "" for c in HIST_COLS}
+        r.update(date=today_s, symbol=w["symbol"], price=w["price"], score=w["score"], flags=w["flags"], rsi=w["rsi"], ret20_pct=w["ret20_pct"],
+                 rel20_pct=w["rel20_pct"], at_zone=("YES" if zone else ""), day_chg_pct=w["day_chg_pct"])
+        rows.append(r)
+    now = datetime.now(IST)
+    closed = now.hour * 60 + now.minute >= 15 * 60 + 45         # before the close the last candle is a part-day candle: do not use it as a result
+    for r in rows:
+        if r.get("d5_pct") not in ("", None):
+            continue
+        df = dfs.get(r["symbol"])
+        if df is None:
+            continue
+        try:
+            ds = [str(x) for x in df["d"]]
+            if r["date"] not in ds:
+                continue
+            i = ds.index(r["date"])
+            n = len(df) if closed else len(df) - 1
+            c0 = float(df["close"].iloc[i])
+            if c0 <= 0:
+                continue
+            if i + 1 < n and r.get("next_close_pct", "") == "":
+                r.update(next_date=ds[i + 1], next_gap_pct=round((float(df["open"].iloc[i + 1]) / c0 - 1.0) * 100.0, 2),
+                         next_close_pct=round((float(df["close"].iloc[i + 1]) / c0 - 1.0) * 100.0, 2),
+                         next_high_pct=round((float(df["high"].iloc[i + 1]) / c0 - 1.0) * 100.0, 2), next_low_pct=round((float(df["low"].iloc[i + 1]) / c0 - 1.0) * 100.0, 2))
+            if i + 3 < n and r.get("d3_pct", "") == "":
+                r["d3_pct"] = round((float(df["close"].iloc[i + 3]) / c0 - 1.0) * 100.0, 2)
+            if i + 5 < n:
+                r["d5_pct"] = round((float(df["close"].iloc[i + 5]) / c0 - 1.0) * 100.0, 2)
+        except Exception as e:
+            log.warning(f"daily_{kind}_history follow-up {r.get('symbol')} failed: {e}")
+    pd.DataFrame(rows, columns=HIST_COLS).to_csv(path + ".tmp", index=False)
+    os.replace(path + ".tmp", path)
+
+
 _stats = {"txt": ""}
 
 
@@ -247,8 +359,8 @@ def run(today, names=None, cache=None, quotes=None):
     try:
         cache = dict(cache if cache is not None else (getattr(sd, "_LAST", {}) or {}))
         n_in = len(cache)
-        rows, weak_rows = [], []
-        n_zone, best = 0, 0
+        rows, weak_rows, strong_rows = [], [], []
+        n_zone, best, best_s = 0, 0, 0
         dfs = {}
         for sym, raw in cache.items():
             if names is not None and sym not in names:
@@ -276,6 +388,16 @@ def run(today, names=None, cache=None, quotes=None):
                         weak_rows.append(w)
             except Exception as e:
                 log.warning(f"weak score {sym} failed: {e}")
+            try:                                                            # ADDED 17 Nov: the strong (buy watch-list) score, a separate try so it can never disturb the weak list
+                if wk.get("zones") is not None:
+                    sg = _strong_score(dfs[sym], mkt20, wk["zones"])
+                    if sg:
+                        best_s = max(best_s, sg["score"])
+                    if sg and sg["score"] >= STRONG_MIN:
+                        sg.update(date=today.strftime("%Y-%m-%d"), symbol=sym)
+                        strong_rows.append(sg)
+            except Exception as e:
+                log.warning(f"strong score {sym} failed: {e}")
         W = {"CLEAN": 4, "WICK": 3, "ENGULF": 3, "SWEEP": 2, "OBH": 1}        # a rejection candle counts more than a sweep, a sweep more than a plain zone hit
         wt = lambda r: sum(W.get(p, 0) for p in r["patterns"].split("+"))
         best_by = {}
@@ -304,12 +426,32 @@ def run(today, names=None, cache=None, quotes=None):
                 log.warning(f"daily_weak csv unreadable, writing today only: {e}")
         wdf.to_csv(WEAK_PATH + ".tmp", index=False)
         os.replace(WEAK_PATH + ".tmp", WEAK_PATH)
+        try:                                                                # ADDED 17 Nov: the strong list file (all days appended, like the weak list)
+            strong_rows.sort(key=lambda w: (-w["score"], not w["at_support"], -w["rel20_pct"], w["symbol"]))     # best first: most signs, then at a support zone, then the strongest against the market
+            sdf = pd.DataFrame(strong_rows, columns=STRONG_COLS)
+            if os.path.exists(STRONG_PATH):
+                try:
+                    old = pd.read_csv(STRONG_PATH)
+                    sdf = pd.concat([old[old["date"].astype(str) != today_s], sdf], ignore_index=True)
+                except Exception as e:
+                    log.warning(f"daily_strong csv unreadable, writing today only: {e}")
+            sdf.to_csv(STRONG_PATH + ".tmp", index=False)
+            os.replace(STRONG_PATH + ".tmp", STRONG_PATH)
+        except Exception as e:
+            log.warning(f"daily_strong csv not written: {e}")
+        for _kind, _lst in (("strong", strong_rows), ("weak", weak_rows)):       # ADDED 17 Nov: the history files with the follow-up columns (a separate try: never disturbs the lists)
+            try:
+                _history_update(_kind, today_s, _lst, dfs)
+            except Exception as e:
+                log.warning(f"daily_{_kind}_history not written: {e}")
         _stats["txt"] = (f"last run {datetime.now(IST).strftime('%H:%M')}: candles in {n_in}, usable {len(dfs)}, with daily zones {n_zone}, "
-                         f"pattern hits {len(rows)}, weak (score {WEAK_MIN}+) {len(weak_rows)}, highest score {best}"
+                         f"pattern hits {len(rows)}, weak (score {WEAK_MIN}+) {len(weak_rows)}, highest score {best}, strong (score {STRONG_MIN}+) {len(strong_rows)}, highest strong score {best_s}"
                          + (f"; skipped: {dict(sorted(_why.items(), key=lambda kv: -kv[1])[:4])}" if _why else "") + (f"; quotes {len(quotes)}" if quotes else "; no quotes"))
         _why.clear()
         _notify(rows)
         _notify_weak(weak_rows)
+        _notify_strong(strong_rows)
+        log.info(f"Daily strong: {len(strong_rows)} stocks with a strength score of {STRONG_MIN} or more")
         log.info(f"Daily weak: {len(weak_rows)} stocks with a weakness score of {WEAK_MIN} or more (market 20-day median {mkt20:+.1f}%)")
         log.info(f"Daily zone: {len(rows)} stocks with a pattern at a daily zone ({len(cache)} candles checked)")
         try:
@@ -349,6 +491,21 @@ def _notify_weak(weak_rows):
         log.warning(f"daily_weak ntfy failed: {e}")
 
 
+def _notify_strong(strong_rows):
+    """Evening phone alert (ADDED 17 Nov): the strongest stocks = tomorrow's BUY watch-list (stocks at a daily support zone first)."""
+    topic = os.environ.get("NTFY_TOPIC", "").strip()
+    if not (NTFY_ALERT and sp.NTFY_ON and topic and strong_rows):
+        return
+    try:
+        import requests
+        lines = [f"{w['symbol']}  {w['score']}/7  Rs {w['price']:.2f}  RSI {w['rsi']}  {w['flags']}" + ("  AT SUPPORT" if w["at_support"] else "") for w in strong_rows[:MAX_LINES]]
+        extra = f"\n+{len(strong_rows) - MAX_LINES} more on /daily_strong" if len(strong_rows) > MAX_LINES else ""
+        requests.post(f"https://ntfy.sh/{topic}", data=("\n".join(lines) + extra).encode("utf-8"), timeout=8,
+                      headers={"Title": f"Strong stocks - tomorrow's BUY watch-list ({len(strong_rows)})", "Priority": "high", "Tags": "chart_with_upwards_trend"})
+    except Exception as e:
+        log.warning(f"daily_strong ntfy failed: {e}")
+
+
 AT_RES = '<b style="color:#c62828">AT RESISTANCE</b>'
 
 
@@ -369,10 +526,37 @@ def _weak_html(with_gap=True):
                 f'<div class="m">One point for each: <b>STRUCT</b> lower high + lower low &middot; <b>TREND</b> close below the 20 EMA, which is below the 50 EMA &middot; <b>RSI</b> daily RSI under 50 &middot; '
                 f'<b>REJ</b> red candle with a long upper wick at a daily resistance zone in the last 5 days &middot; <b>SELLVOL</b> two or more heavy red days (1.5x volume) closing near the low in the last 10 days &middot; '
                 f'<b>REL</b> 20-day return at least {abs(WEAK_REL):g} points below the market (median of all liquid stocks) &middot; <b>FAILBRK</b> broke out above the 20-day high within 10 days and is back below it. '
-                f'Listed from {WEAK_MIN}/7; stocks at a resistance zone first. Information only. <a href="/daily_weak.csv" target="_blank" rel="noopener">CSV (all days)</a></div>'
+                f'Listed from {WEAK_MIN}/7; stocks at a resistance zone first. Information only. <a href="/daily_weak.csv" target="_blank" rel="noopener">CSV (all days)</a> &middot; <a href="/daily_weak_history.csv" target="_blank" rel="noopener">History CSV (with what happened next)</a></div>'
                 '<table><tr><th>Symbol</th><th>Score</th><th>Weak signs</th><th>Close</th><th>RSI</th><th>20-day</th><th>vs market</th><th>Now</th></tr>' + body + '</table>')
     except Exception as e:
         log.warning(f"daily_weak page failed: {e}")
+        return ""
+
+
+AT_SUP = '<b style="color:#0a7d33">AT SUPPORT</b>'
+
+
+def _strong_html(with_gap=True):
+    try:
+        if not os.path.exists(STRONG_PATH):
+            return ""
+        df = pd.read_csv(STRONG_PATH).fillna("")
+        if not len(df):
+            return ""
+        day = str(df["date"].iloc[-1])
+        rows = df[df["date"].astype(str) == day].to_dict("records")
+        body = "".join(
+            f"<tr><td>{sp._tvl(r['symbol'])}</td><td><b>{r['score']}/7</b></td><td>{str(r['flags']).replace('+', ' + ')}</td><td>{float(r['price']):.2f}</td>"
+            f"<td>{r['rsi']}</td><td>{r['ret20_pct']}%</td><td>{r['rel20_pct']}%</td><td>{AT_SUP if str(r['at_support']) == 'True' else '-'}</td></tr>"
+            for r in rows) or '<tr><td colspan="8" style="text-align:center">No stock reached the score.</td></tr>'
+        return (f'<h2 style="margin-top:{28 if with_gap else 6}px">Strong stocks on the daily chart &mdash; {day} ({len(rows)})</h2>'
+                f'<div class="m">One point for each: <b>STRUCT</b> higher high + higher low &middot; <b>TREND</b> close above the 20 EMA, which is above the 50 EMA &middot; <b>RSI</b> daily RSI over 50 &middot; '
+                f'<b>REJ</b> green candle with a long lower wick at a daily support zone in the last 5 days &middot; <b>BUYVOL</b> two or more heavy green days (1.5x volume) closing near the high in the last 10 days &middot; '
+                f'<b>REL</b> 20-day return at least {abs(STRONG_REL):g} points above the market (median of all liquid stocks) &middot; <b>FAILBRD</b> broke down below the 20-day low within 10 days and is back above it. '
+                f'Listed from {STRONG_MIN}/7; stocks at a support zone first. The mirror of the weak list. Information only. <a href="/daily_strong.csv" target="_blank" rel="noopener">CSV (all days)</a> &middot; <a href="/daily_strong_history.csv" target="_blank" rel="noopener">History CSV (with what happened next)</a></div>'
+                '<table><tr><th>Symbol</th><th>Score</th><th>Strong signs</th><th>Close</th><th>RSI</th><th>20-day</th><th>vs market</th><th>Now</th></tr>' + body + '</table>')
+    except Exception as e:
+        log.warning(f"daily_strong page failed: {e}")
         return ""
 
 
@@ -446,7 +630,7 @@ def _runbar():
 def _nav(cur):
     items = [("", "All patterns", "/daily_zone"), ("SWEEP", "Sweep", "/daily_zone?p=SWEEP"), ("OBH", "Order-block hit", "/daily_zone?p=OBH"),
              ("WICK", "Wick rejection", "/daily_zone?p=WICK"), ("CLEAN", "Clean rejection", "/daily_zone?p=CLEAN"), ("ENGULF", "Engulfing", "/daily_zone?p=ENGULF"),
-             ("WEAK", "Weak stocks (sell list)", "/daily_weak")]
+             ("WEAK", "Weak stocks (sell list)", "/daily_weak"), ("STRONG", "Strong stocks (buy list)", "/daily_strong")]
     return '<div style="margin:4px 0 10px">' + " ".join(
         f'<a href="{u}" style="display:inline-block;padding:5px 10px;margin:2px;border:1px solid #999;border-radius:4px;text-decoration:none;'
         f'{"background:#222;color:#fff" if k == cur else "color:#222;background:#fff"}">{t}</a>' for k, t, u in items) + "</div>"
@@ -465,6 +649,15 @@ def weak_page_html():
         return _head("Weak stocks - daily") + _nav("WEAK") + _runbar() + (_weak_html(False) or "<p>Nothing yet - the list is made once a day after 16:45 IST.</p>") + "</body></html>"
     except Exception as e:
         log.warning(f"daily_weak page failed: {e}")
+        return "<p>The page could not be built - see the logs.</p>"
+
+
+def strong_page_html():
+    """Separate page /daily_strong (ADDED 17 Nov): the strong-stock (buy watch-list) table only."""
+    try:
+        return _head("Strong stocks - daily") + _nav("STRONG") + _runbar() + (_strong_html(False) or "<p>Nothing yet - the list is made once a day after 16:45 IST.</p>") + "</body></html>"
+    except Exception as e:
+        log.warning(f"daily_strong page failed: {e}")
         return "<p>The page could not be built - see the logs.</p>"
 
 
