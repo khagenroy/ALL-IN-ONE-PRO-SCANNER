@@ -23,7 +23,7 @@ ON = True
 VS_MULT, VS_AVG, VS_WAIT, VS_NEAR, VS_RSI_MIN = 10.0, 50, 10, 0.5, 70.0
 SC_MULT, SC_AVG, ZZ, RSI_LEN, RSI_BUY, RSI_SELL = 20.0, 50, 9, 14, 60.0, 40.0
 RR1, RR2 = 1.0, 2.0
-ALERT_MINUTES = 20
+ALERT_MINUTES = 20                       # a signal found more than this many minutes after its candle CLOSED is listed without a phone alert
 
 
 def _rsi(c, n=RSI_LEN):
@@ -158,6 +158,73 @@ def _vs_sell(o, h, l, c, v, today, rsi, ist, d):
     return out
 
 
+TFS = (5, 15)                    # CHANGED 17 Nov: every signal is looked for on BOTH timeframes, 5-minute and 15-minute; each signal carries its timeframe
+SA_SWEEP_MULT, SA_OB_MULT = 3.0, 10.0      # Section A (SWEEP / OB MITIGATION) only on stocks that spurted this much today (same limits as spurt_link.py)
+SA_WICK, SA_VOL = 70.0, 1.5                # rejection candle: wick of 70% or more, volume 1.5x the previous candle and 1.5x the 50-candle average (same as spurt_link.py)
+
+
+def _mults(v, today):
+    """volume multiple of every candle (vs the average of the 50 candles before it); 0 where it cannot be computed."""
+    n = len(v)
+    m = np.zeros(n)
+    for i in range(VS_AVG, n):
+        a = v[i - VS_AVG:i].mean()
+        m[i] = v[i] / a if a > 0 else 0.0
+    return m
+
+
+def _section_a(d, today, ok_buy, ok_sell, mx):
+    """SWEEP / OB MITIGATION of the last two closed candles of this timeframe: Section A (all_in_one_scanner) + the spurt-stock rule + a REJECTION candle
+    (wick >= SA_WICK % on the right side, right colour, volume >= SA_VOL x previous candle and x the 50-candle average). Returns [(i, name, side, entry, sl)]."""
+    out = []
+    try:
+        import all_in_one_scanner as aio
+        n = len(d)
+        o, h, l, c, v = (d[k].to_numpy(dtype=float) for k in ("open", "high", "low", "close", "volume"))
+        for k in (0, 1):
+            m = n - k
+            if m < 90 or not today[m - 1]:
+                continue
+            a = aio.compute_section_a(d.iloc[:m])
+            if not a or not a.get("signal") or not a.get("levels"):
+                continue
+            nm, sd = {"SWEEP_BUY": ("SWEEP", "BUY"), "SWEEP_SELL": ("SWEEP", "SELL"), "OB_BUY": ("OB MITIGATION", "BUY"), "OB_SELL": ("OB MITIGATION", "SELL")}[a["signal"]]
+            i = m - 1
+            if mx < (SA_SWEEP_MULT if nm == "SWEEP" else SA_OB_MULT):
+                continue
+            if not (ok_buy[i] if sd == "BUY" else ok_sell[i]):
+                continue
+            rng = h[i] - l[i]
+            if rng <= 0:
+                continue
+            wick = ((min(o[i], c[i]) - l[i]) if sd == "BUY" else (h[i] - max(o[i], c[i]))) / rng * 100.0
+            if wick < SA_WICK or not ((c[i] > o[i]) if sd == "BUY" else (c[i] < o[i])):
+                continue
+            base = v[max(0, i - 50):i]
+            if not (v[i - 1] > 0 and v[i] / v[i - 1] >= SA_VOL and len(base) >= 10 and base.mean() > 0 and v[i] / base.mean() >= SA_VOL):
+                continue
+            lv = a["levels"]
+            out.append((i, nm, sd, float(lv["entry"]), float(lv["sl"])))
+    except Exception as e:
+        log.warning("signals_scan: section A failed: %s", e)
+    return out
+
+
+def _frames(df5, as_of, ls):
+    """{5: closed 5-minute candles, 15: closed 15-minute candles (merged from the same 5-minute download - no extra Dhan call)}."""
+    out = {}
+    d5 = ls.drop_forming_bars(df5, 5, as_of)
+    if d5 is not None and len(d5) >= 60:
+        out[5] = d5
+        try:
+            d15 = ls.drop_forming_bars(ls.build_merged_bars(df5, 3), 15, as_of)
+            if d15 is not None and len(d15) >= 60:
+                out[15] = d15
+        except Exception as e:
+            log.warning("signals_scan: 15-minute candles failed: %s", e)
+    return out
+
+
 def update(rows, now_ist):
     """Called by spurt10_live.run_once (same place as spurt_buy). Never raises."""
     if not ON:
@@ -167,57 +234,75 @@ def update(rows, now_ist):
         import signals_page
         import spurt_buy
         today_s = now_ist.strftime("%Y-%m-%d")
+        day_over = now_ist.hour * 60 + now_ist.minute >= 15 * 60 + 30
         fresh = []
         for r in rows:
             sym = r["symbol"]
             if r.get("_df5") is None:
                 continue
             try:
-                d = ls.drop_forming_bars(r["_df5"], 5, r.get("_as_of"))
-                if d is None or len(d) < 60:
+                frames = _frames(r["_df5"], r.get("_as_of"), ls)
+                if 5 not in frames:
                     continue
-                o, h, l, c, v = (d[k].to_numpy(dtype=float) for k in ("open", "high", "low", "close", "volume"))
-                ist = [(t + pd.Timedelta(minutes=330)) for t in d.index]
-                today = np.array([t.strftime("%Y-%m-%d") == today_s for t in ist])
-                if not today.any():
-                    continue
-                n0 = len(v)
-                idx = [i for i in range(max(VS_AVG, 0), n0) if today[i]]
-                if not any(v[i - VS_AVG:i].mean() > 0 and v[i] / v[i - VS_AVG:i].mean() >= VS_MULT for i in idx):
-                    continue                                            # no 10x spurt today: none of the rules can fire
-                rsi = _rsi(c)
-                try:                                                    # ADDED 17 Nov: SMA 9/21/60 distance rule (sma_rule.py), same as the indicator
-                    import sma_rule
-                    ok_buy, ok_sell = sma_rule.ok_arrays(c)
-                except Exception:
-                    ok_buy = ok_sell = np.ones(len(c), dtype=bool)
-                found = []                                              # (i, signal, side, entry, sl)
-                for i, entry, sl in _vs_sell(o, h, l, c, v, today, rsi, ist, d):
-                    if ok_sell[i]:
-                        found.append((i, "VS SELL", "SELL", entry, sl))
-                for e in spurt_buy.buy_events(o, h, l, c, v, today, VS_MULT):
-                    if float(e["sl"]) < float(c[e["i"]]):
-                        found.append((e["i"], "VS BUY", "BUY", float(c[e["i"]]), float(e["sl"])))
-                for i, side, sl in _spurt_d(o, h, l, c, v, today, rsi):
-                    if not (ok_buy[i] if side == "BUY" else ok_sell[i]):
+                d5 = frames[5]
+                for tf in TFS:
+                    d = frames.get(tf)
+                    if d is None:
                         continue
-                    found.append((i, "SPURT BUY" if side == "BUY" else "SPURT SELL", side, float(c[i]), sl))
-                for i, name, side, entry, sl in found:
-                    if not today[i] or abs(entry - sl) <= 0:
+                    o, h, l, c, v = (d[k].to_numpy(dtype=float) for k in ("open", "high", "low", "close", "volume"))
+                    ist = [(t + pd.Timedelta(minutes=330)) for t in d.index]
+                    today = np.array([t.strftime("%Y-%m-%d") == today_s for t in ist])
+                    if not today.any():
                         continue
-                    if (side == "BUY" and sl >= entry) or (side == "SELL" and sl <= entry):
-                        continue
-                    t1, t2, t6 = _levels(entry, sl, side)
-                    cand = ist[i].strftime("%H:%M")
-                    key = "%s|%s|%s|%s" % (today_s, sym, name, cand)
-                    if signals_page.add(sym, name, side, entry, sl, t1, t2, t6, "", key, "scan"):
-                        age = (now_ist.replace(tzinfo=None) - ist[i].to_pydatetime().replace(tzinfo=None)).total_seconds() / 60.0
-                        if age <= ALERT_MINUTES:
-                            fresh.append(dict(signal=name, side=side, symbol=sym, price=entry, sl=sl, t1=t1, t2=t2, t6=t6, candle=cand))
+                    mult = _mults(v, today)
+                    mx = float(mult[today].max()) if today.any() else 0.0
+                    if mx < min(VS_MULT, SA_SWEEP_MULT):
+                        continue                                            # no spurt today on this timeframe: none of the rules can fire
+                    rsi = _rsi(c)
+                    try:                                                    # SMA 9/21/60 distance rule (sma_rule.py), same as the indicator
+                        import sma_rule
+                        ok_buy, ok_sell = sma_rule.ok_arrays(c)
+                    except Exception:
+                        ok_buy = ok_sell = np.ones(len(c), dtype=bool)
+                    found = []                                              # (i, signal, side, entry, sl)
+                    for i, nm, sd, en, sl in _section_a(d, today, ok_buy, ok_sell, mx):
+                        found.append((i, nm, sd, en, sl))
+                    if mx >= VS_MULT:
+                        for i, entry, sl in _vs_sell(o, h, l, c, v, today, rsi, ist, d):
+                            if ok_sell[i]:
+                                found.append((i, "VS SELL", "SELL", entry, sl))
+                        for e in spurt_buy.buy_events(o, h, l, c, v, today, VS_MULT):
+                            if float(e["sl"]) < float(c[e["i"]]):
+                                found.append((e["i"], "VS BUY", "BUY", float(c[e["i"]]), float(e["sl"])))
+                        for i, side, sl in _spurt_d(o, h, l, c, v, today, rsi):
+                            if not (ok_buy[i] if side == "BUY" else ok_sell[i]):
+                                continue
+                            found.append((i, "SPURT BUY" if side == "BUY" else "SPURT SELL", side, float(c[i]), sl))
+                    for i, name, side, entry, sl in found:
+                        if not today[i] or abs(entry - sl) <= 0:
+                            continue
+                        if (side == "BUY" and sl >= entry) or (side == "SELL" and sl <= entry):
+                            continue
+                        t1, t2, t6 = _levels(entry, sl, side)
+                        cand = ist[i].strftime("%H:%M")
+                        key = "%s|%s|%s|%s|%dm" % (today_s, sym, name, cand, tf)
+                        from_ts = (ist[i] + pd.Timedelta(minutes=tf)).strftime("%Y-%m-%d %H:%M")      # first 5-minute candle AFTER the signal candle closed
+                        if signals_page.add(sym, name, side, entry, sl, t1, t2, t6, "", key, "scan", from_ts, tf):
+                            age = (now_ist.replace(tzinfo=None) - (ist[i] + pd.Timedelta(minutes=tf)).to_pydatetime().replace(tzinfo=None)).total_seconds() / 60.0
+                            if age <= ALERT_MINUTES:
+                                fresh.append(dict(signal=name, side=side, symbol=sym, price=entry, sl=sl, t1=t1, t2=t2, t6=t6, candle=cand, tf=tf))
+                try:                                                        # follow every OPEN signal of this stock: which target / the stop-loss was touched
+                    ist5 = [(t + pd.Timedelta(minutes=330)).strftime("%Y-%m-%d %H:%M") for t in d5.index]
+                    bars = [(ist5[j], float(d5["open"].iloc[j]), float(d5["high"].iloc[j]), float(d5["low"].iloc[j]), float(d5["close"].iloc[j]))
+                            for j in range(len(d5)) if ist5[j].startswith(today_s)]
+                    if bars and signals_page.has_open(sym):
+                        signals_page.update_outcomes(sym, bars, day_over)
+                except Exception as e:
+                    log.warning("signals_scan: follow-up of %s failed: %s", sym, e)
             except Exception as e:
                 log.warning("signals_scan: %s failed: %s", sym, e)
         if fresh:
             signals_page.notify(fresh)
-            log.info("signals_scan: new signals %s", [(x["symbol"], x["signal"]) for x in fresh])
+            log.info("signals_scan: new signals %s", [(x["symbol"], x["signal"], x["tf"]) for x in fresh])
     except Exception as e:
         log.warning("signals_scan step failed: %s", e)

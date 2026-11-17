@@ -34,7 +34,7 @@ NAMES = ("SWEEP", "OB MITIGATION", "VS SELL", "VS BUY", "SPURT BUY", "SPURT SELL
 COLOURS = {"SWEEP": "#ffb300", "OB MITIGATION": "#b388ff", "VS SELL": "#ff5252", "VS BUY": "#4caf50", "SPURT BUY": "#00e5ff", "SPURT SELL": "#ff4081"}
 DAYS_DIR = os.path.join(sp.RESULTS_DIR, "signals_days")
 IST = timezone(timedelta(hours=5, minutes=30))
-CSV_COLS = ["date", "time", "symbol", "signal", "side", "entry", "sl", "t1", "t2", "t6", "qty", "source", "reached", "exit", "final_r", "same_candle",
+CSV_COLS = ["date", "time", "tf", "symbol", "signal", "side", "entry", "sl", "t1", "t2", "t6", "qty", "source", "reached", "exit", "final_r", "same_candle",
             "t1_time", "t2_time", "t3_time", "t4_time", "t5_time", "t6_time", "exit_time", "last_price", "updated"]
 _lock = threading.RLock()
 _days = {}          # date -> rows (only days touched in this run are kept in memory)
@@ -137,6 +137,8 @@ def _insert(row, key=""):
                     return False
         for r in reversed(rows[-60:]):          # same signal on the same stock within 10 minutes (e.g. also sent by the bridge) is listed once
             if r.get("symbol") == row["symbol"] and r.get("signal") == row["signal"] and abs(r.get("sec", 0) - row["sec"]) < DUP_SECONDS:
+                if r.get("tf") and row.get("tf") and r.get("tf") != row.get("tf"):
+                    continue                    # the same signal on the other timeframe (5 min / 15 min) is a separate signal
                 return False
         row["key"] = key
         rows.append(row)
@@ -144,16 +146,26 @@ def _insert(row, key=""):
     return True
 
 
-def _mk(symbol, signal, side, price, sl, t1, t2, t6, qty, source, from_ts):
+def _mk(symbol, signal, side, price, sl, t1, t2, t6, qty, source, from_ts, tf=""):
     now = _now()
     return {"date": now.strftime("%Y-%m-%d"), "ts": now.strftime("%Y-%m-%d %H:%M:%S"), "sec": int(now.timestamp()), "symbol": symbol, "signal": signal,
             "side": str(side).upper(), "price": _num(price), "sl": _num(sl), "t1": _num(t1), "t2": _num(t2), "t6": _num(t6), "qty": qty, "src": source,
-            "from_ts": from_ts, "reached": None, "exit": "OPEN", "final_r": None, "same": False, "times": {}, "last": None, "upd": ""}
+            "from_ts": from_ts, "tf": tf, "reached": None, "exit": "OPEN", "final_r": None, "same": False, "times": {}, "last": None, "upd": ""}
 
 
-def add(symbol, signal, side, price, sl, t1, t2, t6=None, qty="", key="", source="scanner", from_ts=""):
-    """Called by the scanner's own scans. from_ts = 'YYYY-MM-DD HH:MM' = open time of the first 5-minute candle to follow. True when NEW."""
-    return _insert(_mk(symbol, signal, side, price, sl, t1, t2, t6, qty, source, from_ts), key)
+def add(symbol, signal, side, price, sl, t1, t2, t6=None, qty="", key="", source="scanner", from_ts="", tf=""):
+    """Called by the scanner's own scans. from_ts = 'YYYY-MM-DD HH:MM' = open time of the first 5-minute candle to follow. tf = 5 or 15 (minutes). True when NEW.
+    CHANGED 17 Nov: the 10-minute Section A rows of spurt_link.py (source 'section A') are no longer listed here - SWEEP / OB MITIGATION now come from signals_scan.py on 5 and 15 minutes."""
+    if source == "section A":
+        return False
+    return _insert(_mk(symbol, signal, side, price, sl, t1, t2, t6, qty, source, from_ts, tf), key)
+
+
+def has_open(symbol):
+    """True when today's list holds a signal of this stock that is still being followed."""
+    day = _now().strftime("%Y-%m-%d")
+    with _lock:
+        return any(r.get("symbol") == symbol and r.get("exit") == "OPEN" and r.get("from_ts") for r in _rows(day))
 
 
 def receive(d):
@@ -249,7 +261,7 @@ def close_old_days():
 # ------------------------------------------------------------------------------------------------------- CSV / page
 def _csv_row(day, r):
     t = r.get("times") or {}
-    vals = [day, (r.get("ts") or "")[11:16], r.get("symbol"), r.get("signal"), r.get("side"), r.get("price"), r.get("sl"), r.get("t1"), r.get("t2"), r.get("t6"), r.get("qty"),
+    vals = [day, (r.get("ts") or "")[11:16], r.get("tf") or "", r.get("symbol"), r.get("signal"), r.get("side"), r.get("price"), r.get("sl"), r.get("t1"), r.get("t2"), r.get("t6"), r.get("qty"),
             r.get("src"), r.get("reached"), r.get("exit"), r.get("final_r"), "yes" if r.get("same") else "", t.get("t1", ""), t.get("t2", ""), t.get("t3", ""), t.get("t4", ""),
             t.get("t5", ""), t.get("t6", ""), t.get("exit", ""), r.get("last"), r.get("upd")]
     return ",".join("" if v is None else str(v).replace(",", " ") for v in vals)
@@ -323,12 +335,12 @@ def page_html(show_all=False):
     body = []
     for d, r in reversed(rows):
         c = COLOURS.get(r["signal"], "#9fb0c0")
-        body.append("<tr><td>%s</td><td><b>%s</b></td><td style='color:%s;font-weight:700'>%s %s</td><td>%s</td><td style='color:#ff7070'>%s</td>"
+        body.append("<tr><td>%s</td><td><b>%s</b></td><td><b>%s</b></td><td style='color:%s;font-weight:700'>%s %s</td><td>%s</td><td style='color:#ff7070'>%s</td>"
                     "<td style='color:#7be08a'>%s</td><td style='color:#7be08a'>%s</td><td>%s</td><td style='color:#9fb0c0'>%s</td></tr>" % (
-                        html.escape((d[5:] + " " if show_all else "") + (r.get("ts") or "")[11:16]), html.escape(r["symbol"]), c, html.escape(r["signal"]), html.escape(r["side"]),
+                        html.escape((d[5:] + " " if show_all else "") + (r.get("ts") or "")[11:16]), html.escape(("%s min" % r["tf"]) if r.get("tf") else "-"), html.escape(r["symbol"]), c, html.escape(r["signal"]), html.escape(r["side"]),
                         _f(r.get("price")), _f(r.get("sl")), _f(r.get("t1")), _f(r.get("t2")), _result_text(r), html.escape(r.get("upd") or "")))
     if not body:
-        body = ["<tr><td colspan='9' style='color:#9fb0c0'>No signal yet today. It fills the moment the scanner finds one.</td></tr>"]
+        body = ["<tr><td colspan='10' style='color:#9fb0c0'>No signal yet today. It fills the moment the scanner finds one.</td></tr>"]
     counts = {}
     for _d, r in rows:
         counts[r["signal"]] = counts.get(r["signal"], 0) + 1
@@ -352,39 +364,44 @@ def page_html(show_all=False):
             "<p style='color:#9fb0c0'>Signals found by the scanner on every spurt stock (same rules as the indicator), followed afterwards: which target or the SL was touched "
             "(stop moves like the bridge: T1 -> entry, T2 -> T1 ...). Times are IST. Refreshes every 30 seconds. %s &nbsp;|&nbsp; <a href='/spurt10_all_in_one_pro_signals_daily' target='_blank' rel='noopener'>Daily signals</a> &nbsp;|&nbsp; <a href='/' target='_blank' rel='noopener'>Home</a></p>"
             "<p style='color:#9fb0c0'>Download CSV: <a href='/spurt10_all_in_one_pro_signals.csv' target='_blank' rel='noopener'><b>all days</b></a> &middot; %s</p>"
-            "<table><tr><th>Time</th><th>Stock</th><th>Signal</th><th>Entry</th><th>SL</th><th>T1</th><th>T2</th><th>What happened</th><th>updated</th></tr>%s</table>%s</body></html>"
+            "<table><tr><th>Time</th><th>Timeframe</th><th>Stock</th><th>Signal</th><th>Entry</th><th>SL</th><th>T1</th><th>T2</th><th>What happened</th><th>updated</th></tr>%s</table>%s</body></html>"
             ) % ("last 500" if show_all else "today", chips, other, dl, "".join(body), perf)
 
 
 def notify(items):
-    """ONE phone alert per scan cycle, headed ALL IN ONE PRO: a block per new signal (name, side, stock, entry, SL, T1, T2, T6).
-    One message instead of one per signal keeps the phone-alert service from refusing them (HTTP 429); a refused message is tried again."""
+    """Phone alerts headed ALL IN ONE PRO + the TIMEFRAME (5 MIN / 15 MIN): one message per timeframe per scan cycle, a block per new signal
+    (name, side, stock, entry, SL, T1, T2, T6). One message instead of one per signal keeps the phone-alert service from refusing them (HTTP 429); a refused message is tried again."""
     topic = os.environ.get("NTFY_TOPIC", "").strip()
     if not topic or not items:
         return
-    blocks = []
-    for it in items[:10]:
-        blocks.append("%s %s - %s\nEntry %s | SL %s\nT1 %s | T2 %s | T6 %s\nSignal candle %s IST" % (
-            it["signal"], it["side"], it["symbol"], _f(_num(it["price"])), _f(_num(it["sl"])),
-            _f(_num(it["t1"])), _f(_num(it["t2"])), _f(_num(it.get("t6"))), it.get("candle", "")))
-    if len(items) > 10:
-        blocks.append("+%d more on the all in one pro signals page" % (len(items) - 10))
-    body = "\n\n".join(blocks).encode("utf-8")
-    title = "ALL IN ONE PRO" if len(items) == 1 else "ALL IN ONE PRO (%d signals)" % len(items)
+    for tf in sorted({it.get("tf") or 0 for it in items}):
+        mine = [it for it in items if (it.get("tf") or 0) == tf]
+        tn = ("%s MIN" % tf) if tf else ""
+        blocks = []
+        for it in mine[:10]:
+            blocks.append("[%s] %s %s - %s\nEntry %s | SL %s\nT1 %s | T2 %s | T6 %s\nSignal candle %s IST" % (
+                (("%s min" % tf) if tf else "-"), it["signal"], it["side"], it["symbol"], _f(_num(it["price"])), _f(_num(it["sl"])),
+                _f(_num(it["t1"])), _f(_num(it["t2"])), _f(_num(it.get("t6"))), it.get("candle", "")))
+        if len(mine) > 10:
+            blocks.append("+%d more on the all in one pro signals page" % (len(mine) - 10))
+        body = "\n\n".join(blocks).encode("utf-8")
+        title = "ALL IN ONE PRO" + (" - " + tn if tn else "") + ("" if len(mine) == 1 else " (%d signals)" % len(mine))
+        threading.Thread(target=_send_ntfy, args=(topic, title, body), daemon=True, name="signals-ntfy").start()
 
-    def _send():
-        import time
+
+def _send_ntfy(topic, title, body):
+    import time
+    try:
+        import requests
+    except Exception:
+        return
+    for attempt in range(3):
         try:
-            import requests
+            r = requests.post("https://ntfy.sh/" + topic, data=body, timeout=10, headers={"Title": title, "Priority": "high", "Tags": "zap"})
+            if r.status_code < 300:
+                return
+            import logging
+            logging.getLogger("signals_page").warning("signals ntfy refused: %s %s", r.status_code, r.text[:100])
         except Exception:
-            return
-        for attempt in range(3):
-            try:
-                r = requests.post("https://ntfy.sh/" + topic, data=body, timeout=10, headers={"Title": title, "Priority": "high", "Tags": "zap"})
-                if r.status_code < 300:
-                    return
-            except Exception:
-                pass
-            time.sleep(8 * (attempt + 1))
-
-    threading.Thread(target=_send, daemon=True, name="signals-ntfy").start()
+            pass
+        time.sleep(8 * (attempt + 1))
