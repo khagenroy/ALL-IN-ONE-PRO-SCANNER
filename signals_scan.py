@@ -173,6 +173,28 @@ def _mults(v, today):
     return m
 
 
+def _htf30_touch(d, ist, i, side):
+    """SWEEP / OB MITIGATION need the HIGHER timeframe too (same idea as VS SELL): candle i must touch the nearest 30-minute zone of the right side
+    (SELL = the 30-minute RESISTANCE zone with the lowest bottom, BUY = the 30-minute SUPPORT zone with the highest top), with the same 0.5% tolerance.
+    Only 30-minute candles that were already complete when candle i started are used. Never raises (False = not touched)."""
+    try:
+        import spurt_zones
+        dfi = d.iloc[:i + 1].copy()
+        dfi.index = pd.DatetimeIndex(list(ist)[:i + 1])
+        d30 = dfi.resample("30min", offset="15min", label="left", closed="left").agg(
+            {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}).dropna()
+        done = d30[d30.index + pd.Timedelta(minutes=30) <= ist[i]]
+        want = "RESISTANCE" if side == "SELL" else "SUPPORT"
+        zs = [z for z in spurt_zones.live_zones(done) if z["type"] == want]
+        if not zs:
+            return False
+        z = min(zs, key=lambda q: q["lo"]) if side == "SELL" else max(zs, key=lambda q: q["hi"])
+        tol = VS_NEAR / 100.0
+        return float(d["low"].iloc[i]) <= z["hi"] * (1 + tol) and float(d["high"].iloc[i]) >= z["lo"] * (1 - tol)
+    except Exception:
+        return False
+
+
 def _section_a(d, today, ok_buy, ok_sell, mx):
     """SWEEP / OB MITIGATION of the last two closed candles of this timeframe: Section A (all_in_one_scanner) + the spurt-stock rule + a REJECTION candle
     (wick >= SA_WICK % on the right side, right colour, volume >= SA_VOL x previous candle and x the 50-candle average). Returns [(i, name, side, entry, sl)]."""
@@ -203,6 +225,8 @@ def _section_a(d, today, ok_buy, ok_sell, mx):
             base = v[max(0, i - 50):i]
             if not (v[i - 1] > 0 and v[i] / v[i - 1] >= SA_VOL and len(base) >= 10 and base.mean() > 0 and v[i] / base.mean() >= SA_VOL):
                 continue
+            if not _htf30_touch(d, [t + pd.Timedelta(minutes=330) for t in d.index[:m]], i, sd):
+                continue                                                  # the 30-minute zone of the right side was not touched
             lv = a["levels"]
             out.append((i, nm, sd, float(lv["entry"]), float(lv["sl"])))
     except Exception as e:
