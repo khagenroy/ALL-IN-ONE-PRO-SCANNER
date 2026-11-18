@@ -158,7 +158,15 @@ def add(symbol, signal, side, price, sl, t1, t2, t6=None, qty="", key="", source
     CHANGED 17 Nov: the 10-minute Section A rows of spurt_link.py (source 'section A') are no longer listed here - SWEEP / OB MITIGATION now come from signals_scan.py on 5 and 15 minutes."""
     if source == "section A":
         return False
-    return _insert(_mk(symbol, signal, side, price, sl, t1, t2, t6, qty, source, from_ts, tf), key)
+    row = _mk(symbol, signal, side, price, sl, t1, t2, t6, qty, source, from_ts, tf)
+    new = _insert(row, key)
+    if new:
+        try:                                    # RESTORED 18 Nov: a NEW scanner signal goes to the scanner auto-trade sender (scanner_trade.py: 1 share via the Dhan bridge; fresh signals only)
+            import scanner_trade
+            scanner_trade.schedule(row)
+        except Exception:
+            pass
+    return new
 
 
 def has_open(symbol):
