@@ -273,6 +273,7 @@ def update(rows, now_ist):
         log.warning("signals_scan: timer start failed: %s", e)
     with _run_lock:
         _run(rows, now_ist)
+        _follow_extra(now_ist, {r.get("symbol") for r in rows})
 
 
 def _timer_loop():
@@ -317,6 +318,42 @@ def _timer_run(now_ist):
     with ThreadPoolExecutor(max_workers=max(1, sp.WORKERS)) as ex:
         rows = [r for r in ex.map(one, syms) if r]
     _run(rows, now_ist)
+    _follow_extra(now_ist, {r["symbol"] for r in rows})
+
+
+def _follow_extra(now_ist, skip):
+    """CORRECTION 18 Nov: the result (target / stop-loss) of a signal was only followed while its stock was still on the current spurt list, so most signals stayed
+    OPEN for the whole day. Here every stock that still has an OPEN signal today, and is not on this cycle's list, gets its 5-minute candles and its signals followed.
+    Only the follow-up (results) - it finds no new signals. Never raises."""
+    try:
+        import live_scanner as ls
+        import signals_page
+        from concurrent.futures import ThreadPoolExecutor
+        uni = dict(sp._load_universe())
+        syms = [x for x in signals_page.open_symbols() if x not in skip and x in uni]
+        if not syms:
+            return
+        today_s = now_ist.strftime("%Y-%m-%d")
+        day_over = now_ist.hour * 60 + now_ist.minute >= 15 * 60 + 30
+        as_of = pd.Timestamp(datetime.utcnow())
+
+        def one(sym):
+            try:
+                df5 = ls.fetch_intraday_history(uni[sym], "NSE_EQ", 5, getattr(sp, "HISTORY_DAYS", 5))
+                d5 = ls.drop_forming_bars(df5, 5, as_of)
+                if d5 is None or len(d5) == 0:
+                    return
+                ist5 = [(t + pd.Timedelta(minutes=330)).strftime("%Y-%m-%d %H:%M") for t in d5.index]
+                bars = [(ist5[j], float(d5["open"].iloc[j]), float(d5["high"].iloc[j]), float(d5["low"].iloc[j]), float(d5["close"].iloc[j]))
+                        for j in range(len(d5)) if ist5[j].startswith(today_s)]
+                if bars:
+                    signals_page.update_outcomes(sym, bars, day_over)
+            except Exception as e:
+                log.warning("signals_scan: follow-up of %s failed: %s", sym, e)
+        with ThreadPoolExecutor(max_workers=max(1, min(4, sp.WORKERS))) as ex:
+            list(ex.map(one, syms))
+    except Exception as e:
+        log.warning("signals_scan: extra follow-up failed: %s", e)
 
 
 def _run(rows, now_ist):

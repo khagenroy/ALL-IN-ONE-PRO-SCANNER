@@ -176,6 +176,13 @@ def has_open(symbol):
         return any(r.get("symbol") == symbol and r.get("exit") == "OPEN" and r.get("from_ts") for r in _rows(day))
 
 
+def open_symbols():
+    """CORRECTION 18 Nov: today's stocks that still have a signal being followed (so signals_scan can follow them even after their spurt is over)."""
+    day = _now().strftime("%Y-%m-%d")
+    with _lock:
+        return sorted({r.get("symbol") for r in _rows(day) if r.get("exit") == "OPEN" and r.get("from_ts") and r.get("symbol")})
+
+
 def receive(d):
     """POST from the Dhan bridge. Returns (ok, message)."""
     if not isinstance(d, dict) or d.get("token") != TOKEN:
