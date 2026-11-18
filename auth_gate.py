@@ -375,6 +375,34 @@ def install(app):
                       SESSION_COOKIE_SECURE=bool(os.environ.get("RENDER")),
                       PERMANENT_SESSION_LIFETIME=60 * 60 * 24 * 30)
 
+    @app.after_request
+    def _dated_csv(resp):
+        """Every CSV / TXT download gets the download date (IST) in its file name: name_DD-MM-YYYY.csv. A name that already carries a date is left as it is."""
+        try:
+            import re
+            from urllib.parse import unquote
+            if resp.status_code != 200:
+                return resp
+            cd = resp.headers.get("Content-Disposition", "") or ""
+            m = re.search(r'filename\*?=(?:UTF-8\'\')?"?([^";]+)"?', cd, re.I)
+            name = unquote(m.group(1)).strip() if m else ""
+            if not name:
+                last = request.path.rsplit("/", 1)[-1]
+                if not last.lower().endswith((".csv", ".txt")) or request.path == "/health":
+                    return resp
+                name = last
+            base, dot, ext = name.rpartition(".")
+            if not dot or ext.lower() not in ("csv", "txt"):
+                return resp
+            if re.search(r"\d{2}-\d{2}-\d{4}|\d{4}-\d{2}-\d{2}|\d{8}", base):
+                return resp
+            today = time.strftime("%d-%m-%Y", time.gmtime(time.time() + 19800))
+            newname = f"{base}_{today}.{ext}"
+            resp.headers["Content-Disposition"] = f'attachment; filename="{newname}"'
+        except Exception:
+            pass
+        return resp
+
     @app.before_request
     def _gate():
         p = request.path
