@@ -81,16 +81,51 @@ def _f(v):
 
 
 # ------------------------------------------------------------------------------------------------------- records
+STATUS_PATH = os.path.join(RESULTS_DIR, "swing_status.json")
+_mt = {"rows": 0.0}
+
+
+def _set(**kw):
+    """Updates the scan status and writes it to the disk, so the page shows it whichever worker / thread serves the page."""
+    _st.update(kw)
+    try:
+        os.makedirs(RESULTS_DIR, exist_ok=True)
+        keep = {k: _st[k] for k in ("on", "msg", "done", "total", "last_end", "universe", "found")}
+        keep["t"] = time.time()
+        with open(STATUS_PATH + ".tmp", "w") as f:
+            json.dump(keep, f)
+        os.replace(STATUS_PATH + ".tmp", STATUS_PATH)
+    except Exception:
+        pass
+
+
+def _status():
+    """The status as saved by the worker that scans (falls back to this worker's own)."""
+    try:
+        with open(STATUS_PATH) as f:
+            d = json.load(f)
+        if time.time() - d.get("t", 0) < 3 * 3600:
+            return d
+    except Exception:
+        pass
+    return dict(_st)
+
+
 def _load():
     global _rows
-    if _rows is None:
+    try:
+        mt = os.path.getmtime(JSON_PATH)
+    except Exception:
+        mt = 0.0
+    if _rows is None or (not _st["on"] and mt > _mt["rows"] + 0.5):          # another worker wrote the file: read it again
         try:
             with open(JSON_PATH) as f:
                 _rows = json.load(f)
             if not isinstance(_rows, list):
                 _rows = []
         except Exception:
-            _rows = []
+            _rows = [] if _rows is None else _rows
+        _mt["rows"] = mt
     return _rows
 
 
@@ -102,6 +137,7 @@ def _save():
         with open(JSON_PATH + ".tmp", "w") as f:
             json.dump(rows, f)
         os.replace(JSON_PATH + ".tmp", JSON_PATH)
+        _mt["rows"] = os.path.getmtime(JSON_PATH)
     except Exception as e:
         log.warning("swing: could not save: %s", e)
 
@@ -157,9 +193,14 @@ def _universe():
         pass
     import live_scanner as ls
     import spurt10_live as sp
+    _set(msg="building the liquid list: reading the stock list")
+    t0 = time.time()
     uni = sp._load_universe()
+    log.info("swing: stock list of %d read in %.1fs", len(uni), time.time() - t0)
     ranked = []
-    for sym, sid in uni:
+    for k, (sym, sid) in enumerate(uni):
+        if k % 300 == 0:
+            _set(msg="building the liquid list: daily candles %d / %d" % (k, len(uni)))
         try:
             r = _read_turnover(sym, ls)
         except Exception:
@@ -169,6 +210,7 @@ def _universe():
     src = "daily candles"
     if len(ranked) < min(150, TOP_N):                      # no / few saved daily candles yet: today's traded value from the quote call
         ranked, src = [], "today's quotes"
+        _set(msg="building the liquid list: reading today's quotes (no saved daily candles found)")
         by_id = {str(sid): sym for sym, sid in uni}
         ids = [int(s) for s in by_id]
         for i in range(0, len(ids), 1000):
@@ -396,9 +438,9 @@ def run_scan(tfs=TFS, alerts=True, label=""):
         return False
     try:
         import live_scanner as ls
-        _st.update(on=True, msg="starting", done=0, total=0)
+        _set(on=True, msg="starting: building the liquid list", done=0, total=0)
         uni = _universe()
-        _st.update(total=len(uni), universe=len(uni))
+        _set(total=len(uni), universe=len(uni), msg="scanning 0 / %d" % len(uni))
         now_ist = _now()
         fresh = []
         as_of = pd.Timestamp(datetime.now(timezone.utc).replace(tzinfo=None))
@@ -412,21 +454,21 @@ def run_scan(tfs=TFS, alerts=True, label=""):
                     _follow(sym, tf, d, [(t + pd.Timedelta(minutes=330)).strftime("%Y-%m-%d %H:%M") for t in d.index])
                 except Exception as e:
                     log.warning("swing: %s %dm failed: %s", sym, tf, e)
-            _st.update(done=k + 1, msg="scanning %d / %d" % (k + 1, len(uni)))
+            _set(done=k + 1, msg="scanning %d / %d" % (k + 1, len(uni)))
         with _lock:
             _save()
         alert_items = [r for r in fresh if r.get("alert")]
         if alert_items:
             _notify(alert_items)
-        _st.update(found=len(fresh), last_end=_now().strftime("%Y-%m-%d %H:%M"), msg="finished %s IST (%s) - %d new signals" % (_now().strftime("%H:%M"), label or "scan", len(fresh)))
+        _set(found=len(fresh), last_end=_now().strftime("%Y-%m-%d %H:%M"), msg="finished %s IST (%s) - %d new signals" % (_now().strftime("%H:%M"), label or "scan", len(fresh)))
         log.info("swing: scan %s done: %d new signals (%d alerted)", label, len(fresh), len(alert_items))
         return True
     except Exception as e:
-        _st["msg"] = "failed: %s" % e
+        _set(msg="failed: %s" % e)
         log.warning("swing: scan failed: %s", e)
         return True
     finally:
-        _st["on"] = False
+        _set(on=False)
         _run_lock.release()
 
 
@@ -533,7 +575,8 @@ def page_html(tf=None):
     dl = " &middot; ".join("<a href='/swing_signals.csv?date=%s' target='_blank' rel='noopener'>%s</a>" % (d, d[5:]) for d in days[:30])
     tabs = " ".join("<a href='/swing_signals%s' target='_blank' rel='noopener' style='border:1px solid #8ab4f8;border-radius:6px;padding:4px 12px;%s'>%s</a>" % (
         q, "background:#8ab4f8;color:#0f1419" if sel else "", lab) for q, sel, lab in (("", tf not in (30, 60), "30m + 60m"), ("?tf=30", tf == 30, "30m only"), ("?tf=60", tf == 60, "60m only")))
-    status = html.escape(_st["msg"] or "waiting for the next 30-minute candle")
+    sd = _status()
+    status = html.escape(sd.get("msg") or "waiting for the next 30-minute candle")
     return ("<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Swing BUY signals</title>"
             "<style>body{background:#0f1419;color:#e6edf3;font-family:Arial,sans-serif;margin:18px}table{border-collapse:collapse;width:100%%}th,td{padding:7px 10px;"
             "border-bottom:1px solid #243040;text-align:left;font-size:14px}th{color:#9fb0c0}a{color:#8ab4f8}h3{margin:22px 0 4px}</style></head><body>"
@@ -548,7 +591,7 @@ def page_html(tf=None):
             "Entry = close, SL = low of the candle.</p>%s%s"
             "<h3>B. Indicator BUY signals (SWEEP, OB MITIGATION, VS BUY, SPURT BUY)</h3>"
             "<p style='color:#9fb0c0;margin:0 0 6px'>The ALL IN ONE PRO BUY rules on 30m / 60m candles, with the SMA 9/21/60 distance rule.</p>%s%s</body></html>"
-            ) % (TOP_N, FOLLOW_DAYS, tabs, status, _st["universe"] or "-", dl or "-",
+            ) % (TOP_N, FOLLOW_DAYS, tabs, status, sd.get("universe") or "-", dl or "-",
                  _table(a, "No signal yet."), _stats(a), _table(b, "No signal yet."), _stats(b))
 
 
