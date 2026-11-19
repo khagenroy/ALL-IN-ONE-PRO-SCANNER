@@ -231,6 +231,10 @@ def scan_stock(sym, d, now_ist):
         return pd.Timestamp(d.index[i]).strftime("%Y-%m-%d")
 
     def put(group, name, i, entry, sl, mult=None, extra=""):
+        if not mult and not extra and i >= 50:                       # PULLBACK BUY / GAP RETRACE have no spurt: show the volume of the signal candle against the average of the 50 candles before it
+            av = float(np.mean(v[i - 50:i]))
+            if av > 0:
+                extra = "volume %.1fx of the 50-candle average" % (v[i] / av)
         lv = sw._res_levels(d, i, entry)
         res0 = lv[0][0] if lv else None
         r = _add(group, sym, name, day(i), entry, sl, mult, extra, res0)
@@ -244,6 +248,8 @@ def scan_stock(sym, d, now_ist):
             if entry > sl > 0:                                # the numbers too (the day's close can change: built from the 15m candles first, then Dhan's own daily candle)
                 t1_, t2_, t6_ = sw._levels(entry, sl)
                 r.update(entry=round(entry, 2), sl=round(sl, 2), risk_pct=round((entry - sl) / entry * 100.0, 2), t1=round(t1_, 2), t2=round(t2_, 2), t6=round(t6_, 2))
+            if extra and not r.get("extra"):                  # rows saved before the note existed get it now
+                r["extra"] = extra
             r["room_r"], r["room"] = sw._room_text(entry, sl, res0)
             r["res"] = round(res0, 2) if res0 else None
         r["room"] = r["room"] + sw._levels_text(lv)          # which levels were found (diagnostic: kind + price of the nearest four)
