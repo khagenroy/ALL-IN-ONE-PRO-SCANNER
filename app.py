@@ -409,6 +409,21 @@ def _gap_open_loop():
         log.error(f"Gap-at-open loop could not start: {e}")
 
 
+def _swing_page_loop():
+    try:
+        import swing_page
+        swing_page.loop()
+    except Exception as e:
+        log.error(f"Swing signals loop could not start: {e}")
+
+
+try:                                                     # ADDED 19 Nov: swing BUY signals page /swing_signals (30m + 60m, top 300 liquid stocks)
+    import swing_page as _swing_page
+    _swing_page.register(app, auth_gate._admin)
+except Exception as _e:
+    log.error(f"Swing signals page could not start: {_e}")
+
+
 def _spurt10_loop():
     try:
         import spurt10_live
@@ -456,6 +471,7 @@ if ORB_AUTORUN:
 if SPURT10_AUTORUN:
     threading.Thread(target=_spurt10_loop, daemon=True, name="spurt10-autorun").start()
     threading.Thread(target=_gap_open_loop, daemon=True, name="gap-open").start()
+    threading.Thread(target=_swing_page_loop, daemon=True, name="swing-page").start()
 
 if SPURT_DAILY_AUTORUN:
     threading.Thread(target=_spurt_daily_loop, daemon=True, name="spurt-daily-autorun").start()
