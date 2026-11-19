@@ -55,6 +55,11 @@ def _send(row):
             return
         payload = {"type": TYPE[row["signal"]], "symbol": row["symbol"], "side": str(row["side"]).lower(), "price": row["price"], "sl": row["sl"],
                    "t1": row.get("t1"), "t2": row.get("t2"), "t6": row.get("t6"), "qty": 1, "fixed_lot": "true", "source": "scanner"}
+        try:                                                 # 19 Nov: the signal's timeframe in minutes (5 / 15) - the bridge's time stop waits 8 candles of it
+            if row.get("tf") not in (None, ""):
+                payload["tf"] = int(row["tf"])
+        except Exception:
+            pass
         payload = {k: v for k, v in payload.items() if v is not None}
         last = ""
         for n in range(3):
