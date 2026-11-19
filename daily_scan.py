@@ -1,7 +1,7 @@
 """
 DAILY SCAN  (page: /daily_scan   csv: /daily_scan.csv)                                                         ADDED 19 Nov 2026
 
-ONE scan after the market closes, on DAILY candles, of the 500 most liquid stocks (SWING_TOP_N) (the same list as the swing page). BUY only. It lists every BUY signal of the
+ONE scan after the market closes, on DAILY candles, of every stock except the thin ones (the same list as the swing page). BUY only. It lists every BUY signal of the
 indicators of the chart layout, for the last closed daily candle:
 
   ALL IN ONE PRO   VOLUME SPURT + SMA (first candle of the move), SWEEP BUY, OB MITIGATION BUY, VS BUY, SPURT BUY      (swing_page.detect - the same rules as the swing page)
@@ -241,6 +241,9 @@ def scan_stock(sym, d, now_ist):
                 r = next((x for x in _load() if x.get("key") == key), None)
             if r is None:
                 return
+            if entry > sl > 0:                                # the numbers too (the day's close can change: built from the 15m candles first, then Dhan's own daily candle)
+                t1_, t2_, t6_ = sw._levels(entry, sl)
+                r.update(entry=round(entry, 2), sl=round(sl, 2), risk_pct=round((entry - sl) / entry * 100.0, 2), t1=round(t1_, 2), t2=round(t2_, 2), t6=round(t6_, 2))
             r["room_r"], r["room"] = sw._room_text(entry, sl, res0)
             r["res"] = round(res0, 2) if res0 else None
         r["room"] = r["room"] + sw._levels_text(lv)          # which levels were found (diagnostic: kind + price of the nearest four)
@@ -289,7 +292,7 @@ def _fix_dates(d):
 
 def _add_today(d, sid, ls):
     """Dhan's daily history does not hold the day just closed until the next day. After the close (15:35 IST or later, Mon-Fri) the day's candle is built from the 15-minute candles of
-    today: open = first, high = highest, low = lowest, close = last, volume = sum. Only when a (nearly) full session is there (24+ of the 25 candles)."""
+    today: open = first, high = highest, low = lowest, close = last, volume = sum. The close = the volume-weighted average of the last 30 minutes (like the exchange's closing price)."""
     try:
         now = _now().replace(tzinfo=None)
         if d is None or len(d) == 0 or now.weekday() >= 5 or now.hour * 60 + now.minute < 15 * 60 + 35:
@@ -301,12 +304,21 @@ def _add_today(d, sid, ls):
         if m is None or m.empty:
             return d
         ist = pd.DatetimeIndex(m.index) + pd.Timedelta(hours=5, minutes=30)
-        m = m[ist.normalize() == today]
-        if len(m) < 24:
+        sel = ist.normalize() == today
+        m, ist = m[sel], ist[sel]
+        if len(m) < 1:                                      # no trade today (a thin stock has no candle in a quiet 15 minutes, so the NUMBER of candles says nothing)
             return d
-        m = m.sort_index()
+        order = np.argsort(ist.values)
+        m, ist = m.iloc[order], ist[order]
+        close = float(m["close"].iloc[-1])                  # the exchange's closing price is the volume-weighted average of the LAST 30 MINUTES (15:00 - 15:30), not the last trade
+        last = (ist.hour * 60 + ist.minute) >= 15 * 60
+        if last.any():
+            tp = (m["high"].to_numpy(float)[last] + m["low"].to_numpy(float)[last] + m["close"].to_numpy(float)[last]) / 3.0
+            vv = m["volume"].to_numpy(float)[last]
+            if vv.sum() > 0:
+                close = float((tp * vv).sum() / vv.sum())
         row = pd.DataFrame({"open": [float(m["open"].iloc[0])], "high": [float(m["high"].max())], "low": [float(m["low"].min())],
-                            "close": [float(m["close"].iloc[-1])], "volume": [float(m["volume"].sum())]}, index=[today])
+                            "close": [close], "volume": [float(m["volume"].sum())]}, index=[today])
         return pd.concat([d, row])
     except Exception as e:
         log.warning("daily scan: today's candle from the 15m candles failed: %s", e)
@@ -418,7 +430,7 @@ def run_now():
 
 
 def loop():
-    log.info("Daily scan started: Mon-Fri %02d:%02d IST, daily candles, top %d liquid stocks, BUY only (ALL IN ONE PRO + CONSOL BOX + GAP RETRACE).", RUN_AT[0], RUN_AT[1], sw.TOP_N)
+    log.info("Daily scan started: Mon-Fri %02d:%02d IST, daily candles, every stock except the thin ones, BUY only (ALL IN ONE PRO + CONSOL BOX + GAP RETRACE).", RUN_AT[0], RUN_AT[1])
     while True:
         try:
             now = _now()
@@ -496,12 +508,12 @@ def page_html(day=None):
             "<style>body{background:#0f1419;color:#e6edf3;font-family:Arial,sans-serif;margin:18px}table{border-collapse:collapse;width:100%%}th,td{padding:7px 10px;"
             "border-bottom:1px solid #243040;text-align:left;font-size:14px}th{color:#9fb0c0}a{color:#8ab4f8}h3{margin:22px 0 4px}</style></head><body>"
             "<h2>DAILY SCAN - BUY signals on the daily candle of %s</h2>"
-            "<p style='color:#9fb0c0'>One scan after the close (Mon-Fri %02d:%02d IST), the %d most liquid stocks. ALL IN ONE PRO signals + CONSOL BOX (STRONG BUY, PULLBACK BUY) + GAP RETRACE (gap up, pullback buy). "
+            "<p style='color:#9fb0c0'>One scan after the close (Mon-Fri %02d:%02d IST), every NSE stock except the thin ones (average traded value under Rs 1 crore a day, or price under Rs 50). ALL IN ONE PRO signals + CONSOL BOX (STRONG BUY, PULLBACK BUY) + GAP RETRACE (gap up, pullback buy). "
             "T1 / T2 / T6 = 1R / 2R / 6R. Room to resistance = free distance to the nearest resistance in R. This page places NO order. "
             "<a href='/swing_signals' target='_blank' rel='noopener'>Swing signals (30m / 60m)</a> &nbsp;|&nbsp; <a href='/' target='_blank' rel='noopener'>Home</a></p>"
             "<p>Days: %s &nbsp; <a href='/daily_scan/run' style='border:1px solid #8ab4f8;border-radius:6px;padding:4px 12px'>Scan now (no alert)</a> &nbsp; <span style='color:#9fb0c0'>%s</span></p>"
             "<p style='color:#9fb0c0'>Download CSV: <a href='/daily_scan.csv' target='_blank' rel='noopener'><b>all days</b></a> &middot; %s</p>%s</body></html>"
-            ) % (show or "-", RUN_AT[0], RUN_AT[1], sw.TOP_N, nav, html.escape(sd.get("msg") or "waiting for 15:50"), dl or "-", "".join(sections))
+            ) % (show or "-", RUN_AT[0], RUN_AT[1], nav, html.escape(sd.get("msg") or "waiting for 15:50"), dl or "-", "".join(sections))
 
 
 def register(app, admin_check=None):
