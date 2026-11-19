@@ -1,7 +1,7 @@
 """
 DAILY SCAN  (page: /daily_scan   csv: /daily_scan.csv)                                                         ADDED 19 Nov 2026
 
-ONE scan after the market closes, on DAILY candles, of the 300 most liquid stocks (the same list as the swing page). BUY only. It lists every BUY signal of the
+ONE scan after the market closes, on DAILY candles, of the 500 most liquid stocks (SWING_TOP_N) (the same list as the swing page). BUY only. It lists every BUY signal of the
 indicators of the chart layout, for the last closed daily candle:
 
   ALL IN ONE PRO   VOLUME SPURT + SMA (first candle of the move), SWEEP BUY, OB MITIGATION BUY, VS BUY, SPURT BUY      (swing_page.detect - the same rules as the swing page)

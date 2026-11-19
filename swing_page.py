@@ -1,7 +1,7 @@
 """
 SWING BUY SIGNALS page of the scanner      page: /swing_signals      CSV: /swing_signals.csv        ADDED 19 Nov 2026
 
-BUY signals only (selling is not possible in delivery), on the 30-MINUTE and 60-MINUTE candles, for the most liquid stocks only (SWING_TOP_N = 300).
+BUY signals only (selling is not possible in delivery), on the 30-MINUTE and 60-MINUTE candles, for the most liquid stocks only (SWING_TOP_N = 500).
 Two separate sections on the page:
 
   A. VOLUME SPURT + 3 SMA   a candle with volume of 10x or more of the average of the 50 candles before it, GREEN, whose close is ABOVE the 9, 21 AND 60 SMA
@@ -13,11 +13,11 @@ Two separate sections on the page:
                             the only differences: the "30-minute zone must be touched" test of SWEEP / OB is left out (on 30m / 60m candles it would test the
                             same candles), and the spurt must be within the last two sessions instead of "earlier today".
 
-HOW IT RUNS     one stock at a time (no big memory), only the liquid list: top 300 of the stock list by average traded value of the last 20 daily candles
+HOW IT RUNS     one stock at a time (no big memory), only the liquid list: top 500 of the stock list by average traded value of the last 20 daily candles
                 (read from the daily candles the scanner has already saved; the list is rebuilt once a day, results/swing_universe.json).
                 30m candles = the 15-minute candles paired up from 09:15 (same as a TradingView NSE 30m chart); 60m candles = Dhan's 60-minute candles.
                 A scan is run after every 30-minute candle has closed (09:46, 10:16 ... 15:31), the 60-minute candles are added at the hour candles (10:16 ... 15:16, 15:31).
-                Each scan makes 1 Dhan data call per stock for 30m (+1 for 60m at the hour candles) = 300-600 calls, about 1-3 minutes at the scanner's own request limit.
+                Each scan makes 1 Dhan data call per stock for 30m (+1 for 60m at the hour candles) = 500-1000 calls, about 1-3 minutes at the scanner's own request limit.
 RESULT          every signal is followed on its own timeframe with the same stop cascade as the signals page (SL = -1R, T1 -> SL to entry, T2 -> SL to T1 ... T6).
                 A swing signal is followed for 10 days. Records: results/swing_signals.json (on the Render disk).
 PHONE ALERT     one message per scan with all new signals (title SWING TRADING ALERT), at most MAX_ALERTS_PER_DAY a day, so that the phone-alert service (ntfy) is not overloaded.
@@ -39,7 +39,7 @@ log = logging.getLogger("swing_page")
 IST = timezone(timedelta(hours=5, minutes=30))
 
 ON = True
-TOP_N = int(os.environ.get("SWING_TOP_N", "300") or "300")
+TOP_N = int(os.environ.get("SWING_TOP_N", "500") or "500")
 TFS = (30, 60)
 VOL_MULT, VOL_AVG = 10.0, 50
 SMAS = (9, 21, 60)
