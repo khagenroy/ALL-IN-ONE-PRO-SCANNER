@@ -287,6 +287,32 @@ def _fix_dates(d):
     return d
 
 
+def _add_today(d, sid, ls):
+    """Dhan's daily history does not hold the day just closed until the next day. After the close (15:35 IST or later, Mon-Fri) the day's candle is built from the 15-minute candles of
+    today: open = first, high = highest, low = lowest, close = last, volume = sum. Only when a (nearly) full session is there (24+ of the 25 candles)."""
+    try:
+        now = _now().replace(tzinfo=None)
+        if d is None or len(d) == 0 or now.weekday() >= 5 or now.hour * 60 + now.minute < 15 * 60 + 35:
+            return d
+        today = pd.Timestamp(now.date())
+        if pd.Timestamp(d.index[-1]).normalize() >= today:
+            return d
+        m = ls.fetch_intraday_history(sid, "NSE_EQ", 15, 3)
+        if m is None or m.empty:
+            return d
+        ist = pd.DatetimeIndex(m.index) + pd.Timedelta(hours=5, minutes=30)
+        m = m[ist.normalize() == today]
+        if len(m) < 24:
+            return d
+        m = m.sort_index()
+        row = pd.DataFrame({"open": [float(m["open"].iloc[0])], "high": [float(m["high"].max())], "low": [float(m["low"].min())],
+                            "close": [float(m["close"].iloc[-1])], "volume": [float(m["volume"].sum())]}, index=[today])
+        return pd.concat([d, row])
+    except Exception as e:
+        log.warning("daily scan: today's candle from the 15m candles failed: %s", e)
+        return d
+
+
 def _daily(sym, sid, ls):
     """Fresh daily candles (the scanner's own daily history call, so the day just closed is in). Falls back to the saved daily file."""
     try:                                    # the end date is TOMORROW: Dhan's end date is not included, so with today's date the day just closed is left out
@@ -295,13 +321,13 @@ def _daily(sym, sid, ls):
                    "fromDate": (now - timedelta(days=900)).strftime("%Y-%m-%d"), "toDate": (now + timedelta(days=1)).strftime("%Y-%m-%d")}
         d = ls._parse_historical(ls._dhan_post("charts/historical", payload, "%s (daily scan)" % sid).json())
         if d is not None and len(d) >= MIN_BARS:
-            return _fix_dates(d)
+            return _add_today(_fix_dates(d), sid, ls)
     except Exception:
         pass
     try:
         d = ls.fetch_daily_history(sid, "NSE_EQ")
         if d is not None and len(d) >= MIN_BARS:
-            return _fix_dates(d)
+            return _add_today(_fix_dates(d), sid, ls)
     except Exception:
         pass
     p = os.path.join(ls.DAILY_CACHE_DIR, sym + ".csv")
