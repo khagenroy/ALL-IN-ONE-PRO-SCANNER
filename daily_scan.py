@@ -232,9 +232,25 @@ def scan_stock(sym, d, now_ist):
 
     def put(group, name, i, entry, sl, mult=None, extra=""):
         lv = sw._res_levels(d, i, entry)
-        r = _add(group, sym, name, day(i), entry, sl, mult, extra, lv[0][0] if lv else None)
-        if r:
-            r["room"] = r["room"] + sw._levels_text(lv)          # which levels were found (diagnostic: kind + price of the nearest four)
+        res0 = lv[0][0] if lv else None
+        r = _add(group, sym, name, day(i), entry, sl, mult, extra, res0)
+        fresh = r is not None
+        if r is None:                                         # already saved: refresh its room (the room rules were improved after it was saved)
+            key = "%s|%s|%s|%s" % (sym, group, name, day(i))
+            with _lock:
+                r = next((x for x in _load() if x.get("key") == key), None)
+            if r is None:
+                return
+            r["room_r"], r["room"] = sw._room_text(entry, sl, res0)
+            r["res"] = round(res0, 2) if res0 else None
+        r["room"] = r["room"] + sw._levels_text(lv)          # which levels were found (diagnostic: kind + price of the nearest four)
+        try:                                                   # diagnostic: the highest high of the last 20 candles in OUR data (to compare with the chart)
+            j0 = max(0, i - 19)
+            jm = j0 + int(np.argmax(h[j0:i + 1]))
+            r["room"] += "  (data: highest high of last 20 = %.2f on %s)" % (h[jm], day(jm))
+        except Exception:
+            pass
+        if fresh:
             new.append(r)
 
     try:
