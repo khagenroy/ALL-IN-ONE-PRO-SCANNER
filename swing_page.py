@@ -43,7 +43,8 @@ TOP_N = int(os.environ.get("SWING_TOP_N", "300") or "300")
 TFS = (30, 60)
 VOL_MULT, VOL_AVG = 10.0, 50
 SMAS = (9, 21, 60)
-CROSS_MIN = 1                        # the spurt candle itself must cross UP at least this many of the three SMAs (0 = any candle above all three)
+CROSS_MIN = 0                        # the spurt candle itself must cross UP at least this many of the three SMAs (the candle before it closed at / below the SMA)
+FROM_BELOW = 5                       # within this many candles before the spurt candle the price must have closed BELOW the highest of the three SMAs (the move comes from DOWN to UP; the SMAs need not all be crossed at once)
 WIN_BARS = {30: 26, 60: 14}          # "spurt earlier" window = the last two sessions of candles (13 x 30m or 7 x 60m a session)
 ALERT_MAX_AGE_MIN = {30: 45, 60: 75}
 MAX_ALERTS_PER_DAY = 14
@@ -59,7 +60,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 RESULTS_DIR = os.path.join(HERE, "results")
 JSON_PATH = os.path.join(RESULTS_DIR, "swing_signals.json")
 UNI_PATH = os.path.join(RESULTS_DIR, "swing_universe.json")
-CSV_COLS = ["date", "candle", "tf", "section", "symbol", "signal", "entry", "sl", "risk_pct", "t1", "t2", "t6", "spurt_x", "crossed", "reached", "exit", "final_r",
+CSV_COLS = ["date", "candle", "tf", "section", "symbol", "signal", "entry", "sl", "risk_pct", "t1", "t2", "t6", "resistance", "room_r", "spurt_x", "crossed", "reached", "exit", "final_r",
             "last_price", "alert", "found_at", "updated"]
 COLOURS = {"VOLUME SPURT + SMA": "#00e5ff", "SWEEP": "#ffb300", "OB MITIGATION": "#b388ff", "VS BUY": "#4caf50", "SPURT BUY": "#69f0ae"}
 
@@ -147,7 +148,38 @@ def _levels(entry, sl):
     return entry + r, entry + 2 * r, entry + 6 * r
 
 
-def _add(tf, section, sym, name, cand_start, cand_end, entry, sl, spurt_x, crossed, alert_ok):
+def _nearest_res(d, i, entry):
+    """Nearest RESISTANCE above the entry as it was at candle i: lowest of the bottoms of the live resistance (supply) zones (spurt_zones.live_zones, the same zones the
+    indicator draws) and the nearest open swing high (a 3-left / 3-right pivot high that no later candle has exceeded). None when there is none."""
+    best = None
+    try:
+        import spurt_zones
+        for z in (spurt_zones.live_zones(d.iloc[:i + 1]) or []):
+            if z.get("type") == "RESISTANCE" and isinstance(z.get("lo"), (int, float)) and z["lo"] > entry and (best is None or z["lo"] < best):
+                best = float(z["lo"])
+    except Exception as e:
+        log.warning("swing: zones failed: %s", e)
+    try:
+        h = d["high"].to_numpy(dtype=float)[:i + 1]
+        for k in range(max(3, len(h) - 200), len(h) - 3):
+            if h[k] > entry and h[k] >= h[k - 3:k].max() and h[k] >= h[k + 1:k + 4].max() and h[k + 1:].max() <= h[k] and (best is None or h[k] < best):
+                best = float(h[k])
+    except Exception:
+        pass
+    return best
+
+
+def _room_text(entry, sl, res):
+    """(R of free room, short text) from the entry up to the resistance."""
+    r = entry - sl
+    if res is None or r <= 0:
+        return None, "no resistance found above"
+    x = (res - entry) / r
+    tail = "BLOCKED before T1" if x < 1 else "T1 free, T2 blocked" if x < 2 else "T1, T2 free, T6 blocked" if x < 6 else "all targets free"
+    return round(x, 1), "%.1fR to resistance %s (%s)" % (x, ("%.2f" % res).rstrip("0").rstrip("."), tail)
+
+
+def _add(tf, section, sym, name, cand_start, cand_end, entry, sl, spurt_x, crossed, alert_ok, res=None):
     """Adds one signal (once). Returns the new row or None."""
     if not (entry > sl > 0):
         return None
@@ -162,7 +194,7 @@ def _add(tf, section, sym, name, cand_start, cand_end, entry, sl, spurt_x, cross
         row = {"key": key, "date": cand_start[:10], "candle": cand_start[11:16], "tf": tf, "section": section, "symbol": sym, "signal": name,
                "entry": round(entry, 2), "sl": round(sl, 2), "risk_pct": round((entry - sl) / entry * 100.0, 2), "t1": round(t1, 2), "t2": round(t2, 2), "t6": round(t6, 2),
                "spurt_x": round(spurt_x, 1) if spurt_x else None, "crossed": crossed, "reached": 0, "exit": "OPEN", "final_r": None, "last": None,
-               "alert": bool(alert_ok and age <= ALERT_MAX_AGE_MIN.get(tf, 60)), "found": _now().strftime("%Y-%m-%d %H:%M"), "upd": "", "cs": cand_start}
+               "alert": bool(alert_ok and age <= ALERT_MAX_AGE_MIN.get(tf, 60)), "found": _now().strftime("%Y-%m-%d %H:%M"), "upd": "", "cs": cand_start, "res": round(res, 2) if res else None, "room_r": _room_text(entry, sl, res)[0], "room": _room_text(entry, sl, res)[1]}
         rows.append(row)
         return row
 
@@ -255,22 +287,27 @@ def _sma(c, n):
 
 # ------------------------------------------------------------------------------------------------------- the signals
 def spurt_sma_signals(o, h, l, c, v, win):
-    """Section A. Returns [(i, volume multiple, 'x,y' SMAs crossed by the candle)] for candles i inside the window."""
+    """Section A. Returns [(i, volume multiple, 'x,y' SMAs crossed by the candle)] for candles i inside the window.
+    ONLY THE FIRST candle of a move: after a signal the rule is disarmed until the price closes at / below the highest of the three SMAs again."""
     n = len(c)
     s = {k: _sma(c, k) for k in SMAS}
     out = []
+    armed = True
     for i in range(max(VOL_AVG, SMAS[-1]), n):
-        if not win[i] or c[i] <= o[i]:
-            continue
-        a = v[i - VOL_AVG:i].mean()
-        if a <= 0 or v[i] / a < VOL_MULT:
-            continue
-        if any(np.isnan(s[k][i]) or c[i] <= s[k][i] for k in SMAS):
-            continue
-        crossed = [k for k in SMAS if o[i] <= s[k][i] or (not np.isnan(s[k][i - 1]) and c[i - 1] <= s[k][i - 1])]
-        if len(crossed) < CROSS_MIN:
-            continue
-        out.append((i, float(v[i] / a), ",".join(str(k) for k in crossed) or "-"))
+        top = max(s[9][i], s[21][i], s[60][i])
+        fire = False
+        if c[i] > o[i] and armed and not np.isnan(top) and all(c[i] > s[k][i] for k in SMAS):
+            a = v[i - VOL_AVG:i].mean()
+            if a > 0 and v[i] / a >= VOL_MULT:
+                crossed = [k for k in SMAS if not np.isnan(s[k][i - 1]) and c[i - 1] <= s[k][i - 1]]
+                if len(crossed) >= CROSS_MIN and any((not np.isnan(s[60][i - j])) and c[i - j] <= max(s[9][i - j], s[21][i - j], s[60][i - j]) for j in range(1, FROM_BELOW + 1)):
+                    fire = True                                          # price was below the highest SMA within the last candles = a move from below
+                    if win[i]:
+                        out.append((i, float(v[i] / a), ",".join(str(k) for k in crossed) or "-"))
+        if fire:
+            armed = False
+        elif not np.isnan(top) and c[i] <= top:
+            armed = True
     return out
 
 
@@ -310,39 +347,23 @@ def _section_a_buy(d, win, ok_buy, mx, ss):
     return out
 
 
-def scan_frame(sym, d, tf, alert_ok, now_ist):
-    """All BUY signals of one stock on one timeframe. d = closed candles. Returns the new rows."""
+def detect(d, win):
+    """All BUY signals of the candles inside win (bool array) of one candle frame d (open/high/low/close/volume).
+    Returns [(i, section, name, entry, sl, volume multiple or None, 'SMAs crossed')]. Used by the swing page and by the daily scan (daily_scan.py)."""
     import signals_scan as ss
     import spurt_buy
-    new = []
     n = len(d)
-    if n < MIN_BARS:
-        return new
     o, h, l, c, v = (d[k].to_numpy(dtype=float) for k in ("open", "high", "low", "close", "volume"))
-    ist = [t + pd.Timedelta(minutes=330) for t in d.index]
-    win = np.zeros(n, dtype=bool)
-    win[n - WIN_BARS[tf]:] = True
-    last_day = ist[-1].strftime("%Y-%m-%d")
-    if (now_ist.replace(tzinfo=None) - ist[-1].to_pydatetime().replace(tzinfo=None)).days > 5:
-        return new                                                           # stale data (halted stock / old candles)
-
-    def st(i):
-        return ist[i].strftime("%Y-%m-%d %H:%M")
-
-    def en(i):
-        return (ist[i] + pd.Timedelta(minutes=tf)).to_pydatetime().replace(tzinfo=None)
-
+    res = []
     for i, mult, crossed in spurt_sma_signals(o, h, l, c, v, win):                                  # ---- section A
-        r = _add(tf, "A", sym, "VOLUME SPURT + SMA", st(i), en(i), float(c[i]), float(l[i]), mult, crossed, alert_ok)
-        if r:
-            new.append(r)
+        res.append((i, "A", "VOLUME SPURT + SMA", float(c[i]), float(l[i]), mult, crossed))
     mult_all = np.zeros(n)
     for i in range(VOL_AVG, n):
         a = v[i - VOL_AVG:i].mean()
         mult_all[i] = v[i] / a if a > 0 else 0.0
-    mx = float(mult_all[win].max())
+    mx = float(mult_all[win].max()) if win.any() else 0.0
     if mx < min(getattr(ss, "SA_SWEEP_MULT", 3.0), VOL_MULT):
-        return new
+        return res
     try:
         import sma_rule
         ok_buy, _ok_sell = sma_rule.ok_arrays(c)
@@ -357,16 +378,39 @@ def scan_frame(sym, d, tf, alert_ok, now_ist):
                 if float(e["sl"]) < float(c[e["i"]]):
                     found.append((e["i"], "VS BUY", float(c[e["i"]]), float(e["sl"])))
         except Exception as e:
-            log.warning("swing: VS BUY failed for %s: %s", sym, e)
+            log.warning("swing: VS BUY failed: %s", e)
         try:
             rsi = ss._rsi(c)
             for i, side, sl in ss._spurt_d(o, h, l, c, v, win, rsi):
                 if side == "BUY" and ok_buy[i]:
                     found.append((i, "SPURT BUY", float(c[i]), float(sl)))
         except Exception as e:
-            log.warning("swing: SPURT BUY failed for %s: %s", sym, e)
+            log.warning("swing: SPURT BUY failed: %s", e)
     for i, nm, entry, sl in found:
-        r = _add(tf, "B", sym, nm, st(i), en(i), entry, sl, float(mult_all[i]) if mult_all[i] else None, "", alert_ok)
+        res.append((i, "B", nm, entry, sl, float(mult_all[i]) if mult_all[i] else None, ""))
+    return res
+
+
+def scan_frame(sym, d, tf, alert_ok, now_ist):
+    """All BUY signals of one stock on one timeframe. d = closed candles. Returns the new rows."""
+    new = []
+    n = len(d)
+    if n < MIN_BARS:
+        return new
+    ist = [t + pd.Timedelta(minutes=330) for t in d.index]
+    win = np.zeros(n, dtype=bool)
+    win[n - WIN_BARS[tf]:] = True
+    if (now_ist.replace(tzinfo=None) - ist[-1].to_pydatetime().replace(tzinfo=None)).days > 5:
+        return new                                                           # stale data (halted stock / old candles)
+
+    def st(i):
+        return ist[i].strftime("%Y-%m-%d %H:%M")
+
+    def en(i):
+        return (ist[i] + pd.Timedelta(minutes=tf)).to_pydatetime().replace(tzinfo=None)
+
+    for i, sec, nm, entry, sl, mult, crossed in detect(d, win):
+        r = _add(tf, sec, sym, nm, st(i), en(i), entry, sl, mult, crossed, alert_ok, _nearest_res(d, i, entry))
         if r:
             new.append(r)
     return new
@@ -406,8 +450,8 @@ def _notify(items):
     _st["alerts_n"] += 1
     blocks = []
     for r in items[:8]:
-        blocks.append("SWING TRADING ALERT\n%s - %s (%dm)\nEntry %s | SL %s (%.1f%%)\nT1 %s | T2 %s | T6 %s\nCandle %s IST%s" % (
-            r["signal"], r["symbol"], r["tf"], _f(r["entry"]), _f(r["sl"]), r["risk_pct"], _f(r["t1"]), _f(r["t2"]), _f(r["t6"]), r["candle"],
+        blocks.append("SWING TRADING ALERT\n%s - %s (%dm)\nEntry %s | SL %s (%.1f%%)\nT1 %s | T2 %s | T6 %s\nR:R 1 : 1 / 2 / 6 (T1 = 1R, T2 = 2R, T6 = 6R)\nFree room: %s\nCandle %s IST%s" % (
+            r["signal"], r["symbol"], r["tf"], _f(r["entry"]), _f(r["sl"]), r["risk_pct"], _f(r["t1"]), _f(r["t2"]), _f(r["t6"]), r.get("room") or "n/a", r["candle"],
             (" | spurt %sx" % r["spurt_x"]) if r.get("spurt_x") else ""))
     if len(items) > 8:
         blocks.append("+%d more on the swing signals page" % (len(items) - 8))
@@ -491,6 +535,11 @@ def _slots(day):
 
 
 def loop():
+    try:                                                                                      # ADDED 19 Nov: the daily scan (daily_scan.py) runs in its own thread
+        import daily_scan
+        threading.Thread(target=daily_scan.loop, daemon=True, name="daily-scan").start()
+    except Exception as e:
+        log.error("daily scan could not start: %s", e)
     log.info("Swing signals scan started: Mon-Fri after every 30-minute candle close (09:46 ... 15:31), top %d liquid stocks, 30m + 60m, BUY only.", TOP_N)
     while True:
         try:
@@ -516,7 +565,7 @@ def loop():
 # ------------------------------------------------------------------------------------------------------- CSV / page
 def _csv_row(r):
     vals = [r.get("date"), r.get("candle"), "%dm" % r.get("tf", 0), "A volume spurt + SMA" if r.get("section") == "A" else "B indicator", r.get("symbol"), r.get("signal"), r.get("entry"),
-            r.get("sl"), r.get("risk_pct"), r.get("t1"), r.get("t2"), r.get("t6"), r.get("spurt_x"), r.get("crossed"), r.get("reached"), r.get("exit"), r.get("final_r"),
+            r.get("sl"), r.get("risk_pct"), r.get("t1"), r.get("t2"), r.get("t6"), r.get("res"), r.get("room_r"), r.get("spurt_x"), r.get("crossed"), r.get("reached"), r.get("exit"), r.get("final_r"),
             r.get("last"), "yes" if r.get("alert") else "", r.get("found"), r.get("upd")]
     return ",".join("" if x is None else str(x).replace(",", " ") for x in vals)
 
@@ -545,11 +594,12 @@ def _table(rows, empty):
         c = COLOURS.get(r["signal"], "#9fb0c0")
         tv = "https://www.tradingview.com/chart/?symbol=NSE%%3A%s&interval=%d" % (html.escape(r["symbol"]), r["tf"])
         body.append("<tr><td>%s %s</td><td>%dm</td><td><b><a href='%s' target='_blank' rel='noopener'>%s</a></b></td><td style='color:%s;font-weight:700'>%s</td><td>%s</td>"
-                    "<td style='color:#ff7070'>%s <span style='color:#9fb0c0'>(%.1f%%)</span></td><td style='color:#7be08a'>%s</td><td style='color:#7be08a'>%s</td><td>%s</td><td>%s</td>"
+                    "<td style='color:#ff7070'>%s <span style='color:#9fb0c0'>(%.1f%%)</span></td><td style='color:#7be08a'>%s</td><td style='color:#7be08a'>%s</td><td style='color:%s'>%s</td><td>%s</td><td>%s</td>"
                     "<td style='color:#9fb0c0'>%s</td></tr>" % (
                         r["date"][5:], r["candle"], r["tf"], tv, html.escape(r["symbol"]), c, html.escape(r["signal"]), _f(r["entry"]), _f(r["sl"]), r["risk_pct"], _f(r["t1"]), _f(r["t2"]),
+                        "#ff7070" if (r.get("room_r") is not None and r["room_r"] < 1) else "#ffb300", html.escape(r.get("room") or "-"),
                         ("%sx" % r["spurt_x"]) if r.get("spurt_x") else "-", html.escape(r.get("crossed") or "-"), html.escape(_result(r))))
-    return ("<table><tr><th>Candle</th><th>TF</th><th>Stock</th><th>Signal</th><th>Entry</th><th>SL (risk)</th><th>T1</th><th>T2</th><th>Spurt</th><th>SMAs crossed</th><th>What happened</th></tr>"
+    return ("<table><tr><th>Candle</th><th>TF</th><th>Stock</th><th>Signal</th><th>Entry</th><th>SL (risk)</th><th>T1</th><th>T2</th><th>Room to resistance</th><th>Spurt</th><th>SMAs crossed</th><th>What happened</th></tr>"
             + "".join(body) + "</table>")
 
 
@@ -587,7 +637,7 @@ def page_html(tf=None):
             "<p>%s &nbsp; <a href='/swing_signals/run' style='border:1px solid #8ab4f8;border-radius:6px;padding:4px 12px'>Scan now (no alert)</a> &nbsp; <span style='color:#9fb0c0'>%s &middot; stocks in the list: %s</span></p>"
             "<p style='color:#9fb0c0'>Download CSV: <a href='/swing_signals.csv' target='_blank' rel='noopener'><b>all days</b></a> &middot; %s</p>"
             "<h3>A. Volume spurt (10x or more) + candle closed above the 9, 21 and 60 SMA</h3>"
-            "<p style='color:#9fb0c0;margin:0 0 6px'>Green candle, volume 10x the average of the 50 candles before it, close above all three SMAs, and the candle itself crossed up at least one of them. "
+            "<p style='color:#9fb0c0;margin:0 0 6px'>Green candle, volume 10x the average of the 50 candles before it, close above all three SMAs, and it comes from BELOW (within the last 5 candles the price closed below the highest of the 3 SMAs) - so every 10x candle of the move up qualifies. "
             "Entry = close, SL = low of the candle.</p>%s%s"
             "<h3>B. Indicator BUY signals (SWEEP, OB MITIGATION, VS BUY, SPURT BUY)</h3>"
             "<p style='color:#9fb0c0;margin:0 0 6px'>The ALL IN ONE PRO BUY rules on 30m / 60m candles, with the SMA 9/21/60 distance rule.</p>%s%s</body></html>"
@@ -628,3 +678,8 @@ def register(app, admin_check=None):
     app.add_url_rule("/swing_signals", "swingbuy_page", _page, methods=["GET"])
     app.add_url_rule("/swing_signals.csv", "swingbuy_csv", _csv, methods=["GET"])
     app.add_url_rule("/swing_signals/run", "swingbuy_run", _run, methods=["GET"])
+    try:                                                                                      # ADDED 19 Nov: /daily_scan page (daily_scan.py)
+        import daily_scan
+        daily_scan.register(app, admin_check)
+    except Exception as e:
+        log.error("daily scan page could not be added: %s", e)
