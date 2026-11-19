@@ -483,7 +483,7 @@ def _table(rows):
         body.append("<tr><td>%s</td><td><b><a href='%s' target='_blank' rel='noopener'>%s</a></b></td><td style='font-weight:700'>%s</td><td>%s</td>"
                     "<td style='color:#ff7070'>%s <span style='color:#9fb0c0'>(%.1f%%)</span></td><td style='color:#7be08a'>%s</td><td style='color:#7be08a'>%s</td>"
                     "<td style='color:%s'>%s</td><td style='color:#9fb0c0'>%s</td></tr>" % (
-                        r["date"][5:], tv, html.escape(r["symbol"]), html.escape(r["signal"]), sw._f(r["entry"]), sw._f(r["sl"]), r["risk_pct"], sw._f(r["t1"]), sw._f(r["t2"]),
+                        r["date"][5:], tv, html.escape(sw._sym_label(r["symbol"])), html.escape(r["signal"]), sw._f(r["entry"]), sw._f(r["sl"]), r["risk_pct"], sw._f(r["t1"]), sw._f(r["t2"]),
                         "#ff7070" if blocked else "#ffb300", html.escape(r.get("room") or "-"),
                         html.escape(("%sx " % r["spurt_x"] if r.get("spurt_x") else "") + (r.get("extra") or ""))))
     return ("<table><tr><th>Day</th><th>Stock</th><th>Signal</th><th>Entry</th><th>SL (risk)</th><th>T1</th><th>T2</th><th>Room to resistance</th><th>Volume / note</th></tr>"
@@ -511,9 +511,9 @@ def page_html(day=None):
             "<p style='color:#9fb0c0'>One scan after the close (Mon-Fri %02d:%02d IST), every NSE stock except the thin ones (average traded value under Rs 1 crore a day, or price under Rs 50). ALL IN ONE PRO signals + CONSOL BOX (STRONG BUY, PULLBACK BUY) + GAP RETRACE (gap up, pullback buy). "
             "T1 / T2 / T6 = 1R / 2R / 6R. Room to resistance = free distance to the nearest resistance in R. This page places NO order. "
             "<a href='/swing_signals' target='_blank' rel='noopener'>Swing signals (30m / 60m)</a> &nbsp;|&nbsp; <a href='/' target='_blank' rel='noopener'>Home</a></p>"
-            "<p>Days: %s &nbsp; <a href='/daily_scan/run' style='border:1px solid #8ab4f8;border-radius:6px;padding:4px 12px'>Scan now (no alert)</a> &nbsp; <span style='color:#9fb0c0'>%s</span></p>"
+            "<p>Days: %s &nbsp; <a href='/daily_scan/run' style='border:1px solid #8ab4f8;border-radius:6px;padding:4px 12px'>Scan now (no alert)</a> &nbsp; <span style='color:#9fb0c0'>%s</span><br><span style='color:#6b7c8d;font-size:12px'>%s</span></p>"
             "<p style='color:#9fb0c0'>Download CSV: <a href='/daily_scan.csv' target='_blank' rel='noopener'><b>all days</b></a> &middot; %s</p>%s</body></html>"
-            ) % (show or "-", RUN_AT[0], RUN_AT[1], nav, html.escape(sd.get("msg") or "waiting for 15:50"), dl or "-", "".join(sections))
+            ) % (show or "-", RUN_AT[0], RUN_AT[1], nav, html.escape(sd.get("msg") or "waiting for 15:50"), html.escape(sw.UNI_NOTE or "list not built yet"), dl or "-", "".join(sections))
 
 
 def register(app, admin_check=None):

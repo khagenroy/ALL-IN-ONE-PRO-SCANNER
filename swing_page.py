@@ -39,7 +39,8 @@ log = logging.getLogger("swing_page")
 IST = timezone(timedelta(hours=5, minutes=30))
 
 ON = True
-TOP_N = int(os.environ.get("SWING_TOP_N", "500") or "500")
+TOP_N = int(os.environ.get("SWING_TOP_N", "0") or "0")          # 0 = NO cap: every NSE stock (ETFs / funds already left out) except the thin ones - like the 5 / 15-minute scans
+MIN_TURNOVER = float(os.environ.get("SWING_MIN_TURNOVER", "10000000") or "10000000")   # THIN = average traded value of the last 20 daily candles below Rs 1 crore a day (the /depth page uses the same limit)
 TFS = (30, 60)
 VOL_MULT, VOL_AVG = 10.0, 50
 SMAS = (9, 21, 60)
@@ -228,12 +229,14 @@ def _read_turnover(sym, ls):
 
 
 def _universe():
-    """[(symbol, security_id)] of the TOP_N most liquid stocks. Rebuilt once a day."""
+    """[(symbol, security_id)] of every NSE stock except the thin ones (average traded value of the last 20 daily candles under MIN_TURNOVER, price under MIN_PRICE); TOP_N > 0 caps the list. Rebuilt once a day."""
+    global UNI_NOTE
     today = _now().strftime("%Y-%m-%d")
     try:
         with open(UNI_PATH) as f:
             d = json.load(f)
-        if d.get("date") == today and d.get("top_n") == TOP_N and d.get("list"):
+        if d.get("date") == today and d.get("top_n") == TOP_N and d.get("min_turnover") == MIN_TURNOVER and d.get("ver") == 2 and d.get("list"):
+            UNI_NOTE = d.get("note") or ""
             return [tuple(x) for x in d["list"]]
     except Exception:
         pass
@@ -244,6 +247,7 @@ def _universe():
     uni = sp._load_universe()
     log.info("swing: stock list of %d read in %.1fs", len(uni), time.time() - t0)
     ranked = []
+    cnt = {"all": len(uni), "nofile": 0, "cheap": 0, "thin": 0}
     for k, (sym, sid) in enumerate(uni):
         if k % 300 == 0:
             _set(msg="building the liquid list: daily candles %d / %d" % (k, len(uni)))
@@ -251,10 +255,16 @@ def _universe():
             r = _read_turnover(sym, ls)
         except Exception:
             r = None
-        if r and r[1] >= MIN_PRICE:
+        if not r:
+            cnt["nofile"] += 1                                   # no saved daily candles (or older than 12 days)
+        elif r[1] < MIN_PRICE:
+            cnt["cheap"] += 1
+        elif r[0] < MIN_TURNOVER:
+            cnt["thin"] += 1
+        else:                                                    # thin stocks (little traded value) and stocks under Rs 50 are left out
             ranked.append((r[0], sym, sid))
     src = "daily candles"
-    if len(ranked) < min(150, TOP_N):                      # no / few saved daily candles yet: today's traded value from the quote call
+    if len(ranked) < 150:                      # no / few saved daily candles yet: today's traded value from the quote call
         ranked, src = [], "today's quotes"
         _set(msg="building the liquid list: reading today's quotes (no saved daily candles found)")
         by_id = {str(sid): sym for sym, sid in uni}
@@ -270,14 +280,16 @@ def _universe():
                     ranked.append((px * vol, by_id[str(sid)], str(sid)))
             time.sleep(1.1)
     ranked.sort(reverse=True)
-    out = [(s, sid) for _t, s, sid in ranked[:TOP_N]]
+    out = [(s, sid) for _t, s, sid in (ranked[:TOP_N] if TOP_N > 0 else ranked)]
     try:
         os.makedirs(RESULTS_DIR, exist_ok=True)
         with open(UNI_PATH, "w") as f:
-            json.dump({"date": today, "top_n": TOP_N, "src": src, "list": out}, f)
+            json.dump({"date": today, "top_n": TOP_N, "min_turnover": MIN_TURNOVER, "ver": 2, "note": UNI_NOTE, "src": src, "list": out}, f)
     except Exception:
         pass
-    log.info("swing: liquid list of %d stocks built from %s", len(out), src)
+    UNI_NOTE = ("stock list %d - no saved daily candles %d - price under Rs %g: %d - thin (under Rs %g crore a day): %d - IN THE LIST: %d (%s)"
+                % (cnt["all"], cnt["nofile"], MIN_PRICE, cnt["cheap"], MIN_TURNOVER / 1e7, cnt["thin"], len(out), src))
+    log.info("swing: liquid list of %d stocks built from %s - %s", len(out), src, UNI_NOTE)
     return out
 
 
@@ -554,7 +566,7 @@ def loop():
         threading.Thread(target=daily_scan.loop, daemon=True, name="daily-scan").start()
     except Exception as e:
         log.error("daily scan could not start: %s", e)
-    log.info("Swing signals scan started: Mon-Fri after every 30-minute candle close (09:46 ... 15:31), top %d liquid stocks, 30m + 60m, BUY only.", TOP_N)
+    log.info("Swing signals scan started: Mon-Fri after every 30-minute candle close (09:46 ... 15:31), every stock except the thin ones, 30m + 60m, BUY only.")
     while True:
         try:
             now = _now()
@@ -600,6 +612,36 @@ def _result(r):
     return "closed at %s (%+.2f R)" % (ex, r["final_r"] if r.get("final_r") is not None else 0.0)
 
 
+UNI_NOTE = ""
+_fno = {"day": "", "set": set()}
+
+
+def _fno_symbols():
+    """Symbols of the stocks that have stock FUTURES (F&O stocks), from Dhan's instrument list (the same file the scanner already downloads). Read once a day; empty set when it cannot be read."""
+    today = _now().strftime("%Y-%m-%d")
+    if _fno["day"] == today:
+        return _fno["set"]
+    out = set()
+    try:
+        import scrip_master as sm
+        sm._ensure_fresh_cache()
+        df = pd.read_csv(sm.CACHE_FILE, dtype=str, usecols=lambda c: c in ("SEM_EXM_EXCH_ID", "SEM_INSTRUMENT_NAME", "SEM_TRADING_SYMBOL"))
+        df = df[(df["SEM_EXM_EXCH_ID"].str.upper() == "NSE") & (df["SEM_INSTRUMENT_NAME"].str.upper() == "FUTSTK")]
+        for t in df["SEM_TRADING_SYMBOL"].astype(str).str.strip().str.upper():
+            parts = t.rsplit("-", 2)                         # RELIANCE-Nov2026-FUT -> RELIANCE ; BAJAJ-AUTO-Nov2026-FUT -> BAJAJ-AUTO
+            if len(parts) == 3 and parts[2] == "FUT":
+                out.add(parts[0])
+    except Exception as e:
+        log.warning("swing: F&O stock list could not be read: %s", e)
+    _fno["day"], _fno["set"] = today, out
+    return out
+
+
+def _sym_label(sym):
+    """The symbol as shown on the pages: F&O stocks get ' (F&O)' after the symbol."""
+    return sym + (" (F&O)" if sym.upper() in _fno_symbols() else "")
+
+
 def _table(rows, empty):
     if not rows:
         return "<p style='color:#9fb0c0'>%s</p>" % empty
@@ -610,7 +652,7 @@ def _table(rows, empty):
         body.append("<tr><td>%s %s</td><td>%dm</td><td><b><a href='%s' target='_blank' rel='noopener'>%s</a></b></td><td style='color:%s;font-weight:700'>%s</td><td>%s</td>"
                     "<td style='color:#ff7070'>%s <span style='color:#9fb0c0'>(%.1f%%)</span></td><td style='color:#7be08a'>%s</td><td style='color:#7be08a'>%s</td><td style='color:%s'>%s</td><td>%s</td><td>%s</td>"
                     "<td style='color:#9fb0c0'>%s</td></tr>" % (
-                        r["date"][5:], r["candle"], r["tf"], tv, html.escape(r["symbol"]), c, html.escape(r["signal"]), _f(r["entry"]), _f(r["sl"]), r["risk_pct"], _f(r["t1"]), _f(r["t2"]),
+                        r["date"][5:], r["candle"], r["tf"], tv, html.escape(_sym_label(r["symbol"])), c, html.escape(r["signal"]), _f(r["entry"]), _f(r["sl"]), r["risk_pct"], _f(r["t1"]), _f(r["t2"]),
                         "#ff7070" if (r.get("room_r") is not None and r["room_r"] < 1) else "#ffb300", html.escape(r.get("room") or "-"),
                         ("%sx" % r["spurt_x"]) if r.get("spurt_x") else "-", html.escape(r.get("crossed") or "-"), html.escape(_result(r))))
     return ("<table><tr><th>Candle</th><th>TF</th><th>Stock</th><th>Signal</th><th>Entry</th><th>SL (risk)</th><th>T1</th><th>T2</th><th>Room to resistance</th><th>Spurt</th><th>SMAs crossed</th><th>What happened</th></tr>"
@@ -645,17 +687,17 @@ def page_html(tf=None):
             "<style>body{background:#0f1419;color:#e6edf3;font-family:Arial,sans-serif;margin:18px}table{border-collapse:collapse;width:100%%}th,td{padding:7px 10px;"
             "border-bottom:1px solid #243040;text-align:left;font-size:14px}th{color:#9fb0c0}a{color:#8ab4f8}h3{margin:22px 0 4px}</style></head><body>"
             "<h2>SWING BUY signals - 30 minute and 60 minute candles</h2>"
-            "<p style='color:#9fb0c0'>BUY only (delivery), %d most liquid stocks. A scan runs after every 30-minute candle closes (09:46 ... 15:31); the 60-minute candles are added at the hour candles. "
+            "<p style='color:#9fb0c0'>BUY only (delivery), every NSE stock except the thin ones (average traded value under Rs 1 crore a day, or price under Rs 50). A scan runs after every 30-minute candle closes (09:46 ... 15:31); the 60-minute candles are added at the hour candles. "
             "Every signal is followed for %d days with the same stop cascade as the signals page (SL -1R, T1 -> SL to entry ...). This page places NO order. "
             "<a href='/spurt10_all_in_one_pro_signals' target='_blank' rel='noopener'>5 / 15-minute signals</a> &nbsp;|&nbsp; <a href='/' target='_blank' rel='noopener'>Home</a></p>"
-            "<p>%s &nbsp; <a href='/swing_signals/run' style='border:1px solid #8ab4f8;border-radius:6px;padding:4px 12px'>Scan now (no alert)</a> &nbsp; <span style='color:#9fb0c0'>%s &middot; stocks in the list: %s</span></p>"
+            "<p>%s &nbsp; <a href='/swing_signals/run' style='border:1px solid #8ab4f8;border-radius:6px;padding:4px 12px'>Scan now (no alert)</a> &nbsp; <span style='color:#9fb0c0'>%s &middot; stocks in the list: %s</span><br><span style='color:#6b7c8d;font-size:12px'>%s</span></p>"
             "<p style='color:#9fb0c0'>Download CSV: <a href='/swing_signals.csv' target='_blank' rel='noopener'><b>all days</b></a> &middot; %s</p>"
             "<h3>A. Volume spurt (10x or more) + candle closed above the 9, 21 and 60 SMA</h3>"
             "<p style='color:#9fb0c0;margin:0 0 6px'>Green candle, volume 10x the average of the 50 candles before it, close above all three SMAs, and it comes from BELOW (within the last 5 candles the price closed below the highest of the 3 SMAs) - so every 10x candle of the move up qualifies. "
             "Entry = close, SL = low of the candle.</p>%s%s"
             "<h3>B. Indicator BUY signals (SWEEP, OB MITIGATION, VS BUY, SPURT BUY)</h3>"
             "<p style='color:#9fb0c0;margin:0 0 6px'>The ALL IN ONE PRO BUY rules on 30m / 60m candles, with the SMA 9/21/60 distance rule.</p>%s%s</body></html>"
-            ) % (TOP_N, FOLLOW_DAYS, tabs, status, sd.get("universe") or "-", dl or "-",
+            ) % (FOLLOW_DAYS, tabs, status, sd.get("universe") or "-", html.escape(UNI_NOTE or "list not built yet"), dl or "-",
                  _table(a, "No signal yet."), _stats(a), _table(b, "No signal yet."), _stats(b))
 
 
