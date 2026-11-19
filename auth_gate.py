@@ -375,34 +375,6 @@ def install(app):
                       SESSION_COOKIE_SECURE=bool(os.environ.get("RENDER")),
                       PERMANENT_SESSION_LIFETIME=60 * 60 * 24 * 30)
 
-    @app.after_request
-    def _dated_csv(resp):
-        """Every CSV / TXT download gets the download date (IST) in its file name: name_DD-MM-YYYY.csv. A name that already carries a date is left as it is."""
-        try:
-            import re
-            from urllib.parse import unquote
-            if resp.status_code != 200:
-                return resp
-            cd = resp.headers.get("Content-Disposition", "") or ""
-            m = re.search(r'filename\*?=(?:UTF-8\'\')?"?([^";]+)"?', cd, re.I)
-            name = unquote(m.group(1)).strip() if m else ""
-            if not name:
-                last = request.path.rsplit("/", 1)[-1]
-                if not last.lower().endswith((".csv", ".txt")) or request.path == "/health":
-                    return resp
-                name = last
-            base, dot, ext = name.rpartition(".")
-            if not dot or ext.lower() not in ("csv", "txt"):
-                return resp
-            if re.search(r"\d{2}-\d{2}-\d{4}|\d{4}-\d{2}-\d{2}|\d{8}", base):
-                return resp
-            today = time.strftime("%d-%m-%Y", time.gmtime(time.time() + 19800))
-            newname = f"{base}_{today}.{ext}"
-            resp.headers["Content-Disposition"] = f'attachment; filename="{newname}"'
-        except Exception:
-            pass
-        return resp
-
     @app.before_request
     def _gate():
         p = request.path
@@ -605,7 +577,7 @@ def add_menu(app):
         ("Spurt scanners", ["/spurt10", "/spurt10_history", "/zone_touch", "/spurt_daily", "/spurt_daily_follow", "/daily_rej", "/daily_zone", "/daily_weak", "/spurt_flush", "/spurt_red", "/spurt_buy", "/spurt_sweep", "/spurt_sell", "/spurt_paper", "/spurtpb", "/volspurt", "/spz"]),
         ("Spurt10 sections", ["/spurt10_main", "/spurt10_all_in_one_pro_signals", "/spurt10_all_in_one_pro_signals_daily", "/spurt10_early", "/spurt10_ob", "/spurt10_wick", "/spurt10_rejres", "/spurt10_rejsup", "/spurt10_engbull", "/spurt10_engbear", "/spurt10_room", "/spurt10_roomdown", "/spurt10_zsell", "/spurt10_upper", "/spurt10_gap", "/spurt10_orb", "/spurt10_watch", "/spurt10_news", "/spurt10_thin", "/depth"]),
         ("SMA / Trend", ["/sma200", "/sma200now", "/trendnow"]),
-        ("Investing", ["/invest"]),
+        ("Investing", ["/invest", "/swing_signals", "/swing_signals/run", "/daily_scan", "/daily_scan/run"]),
         ("Practice trading", ["/paper", "/paper/history", "/paper/leaderboard", "/paper/help"]),
         ("OI zones / ORB", ["/oizones", "/oizones_signals", "/orb"]),
         ("Best setups", ["/best", "/bestnow"]),
