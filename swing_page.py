@@ -148,25 +148,37 @@ def _levels(entry, sl):
     return entry + r, entry + 2 * r, entry + 6 * r
 
 
-def _nearest_res(d, i, entry):
-    """Nearest RESISTANCE above the entry as it was at candle i: lowest of the bottoms of the live resistance (supply) zones (spurt_zones.live_zones, the same zones the
-    indicator draws) and the nearest open swing high (a 3-left / 3-right pivot high that no later candle has exceeded). None when there is none."""
-    best = None
+def _res_levels(d, i, entry):
+    """Every RESISTANCE level above the entry as it was at candle i: [(price, kind)], kind = "zone" (spurt_zones.live_zones, the zones the indicator draws) or "swing high" (an open
+    3-left / 3-right pivot high that no later candle has exceeded). Sorted nearest first."""
+    out = []
     try:
         import spurt_zones
         for z in (spurt_zones.live_zones(d.iloc[:i + 1]) or []):
-            if z.get("type") == "RESISTANCE" and isinstance(z.get("lo"), (int, float)) and z["lo"] > entry and (best is None or z["lo"] < best):
-                best = float(z["lo"])
+            if z.get("type") == "RESISTANCE" and isinstance(z.get("lo"), (int, float)) and z["lo"] > entry:
+                out.append((float(z["lo"]), "zone"))
     except Exception as e:
         log.warning("swing: zones failed: %s", e)
     try:
         h = d["high"].to_numpy(dtype=float)[:i + 1]
         for k in range(max(3, len(h) - 200), len(h) - 3):
-            if h[k] > entry and h[k] >= h[k - 3:k].max() and h[k] >= h[k + 1:k + 4].max() and h[k + 1:].max() <= h[k] and (best is None or h[k] < best):
-                best = float(h[k])
-    except Exception:
-        pass
-    return best
+            if h[k] > entry and h[k] >= h[k - 3:k].max() and h[k] >= h[k + 1:k + 4].max() and h[k + 1:].max() <= h[k]:
+                out.append((float(h[k]), "swing high"))
+    except Exception as e:
+        log.warning("swing: swing highs failed: %s", e)
+    out.sort(key=lambda x: x[0])
+    return out
+
+
+def _levels_text(levels, n=4):
+    """The nearest few levels, for the Room column: [zone 668.8 | swing high 701.2]."""
+    return "  [" + " | ".join("%s %s" % (k, ("%.2f" % p).rstrip("0").rstrip(".")) for p, k in levels[:n]) + "]" if levels else "  [no levels found]"
+
+
+def _nearest_res(d, i, entry):
+    """Nearest RESISTANCE above the entry as it was at candle i (None when there is none)."""
+    lv = _res_levels(d, i, entry)
+    return lv[0][0] if lv else None
 
 
 def _room_text(entry, sl, res):

@@ -231,8 +231,10 @@ def scan_stock(sym, d, now_ist):
         return pd.Timestamp(d.index[i]).strftime("%Y-%m-%d")
 
     def put(group, name, i, entry, sl, mult=None, extra=""):
-        r = _add(group, sym, name, day(i), entry, sl, mult, extra, sw._nearest_res(d, i, entry))
+        lv = sw._res_levels(d, i, entry)
+        r = _add(group, sym, name, day(i), entry, sl, mult, extra, lv[0][0] if lv else None)
         if r:
+            r["room"] = r["room"] + sw._levels_text(lv)          # which levels were found (diagnostic: kind + price of the nearest four)
             new.append(r)
 
     try:
@@ -256,17 +258,30 @@ def scan_stock(sym, d, now_ist):
 
 
 # ------------------------------------------------------------------------------------------------------- data, alert, scan
+def _fix_dates(d):
+    """Dhan stamps each daily candle at IST midnight = 18:30 UTC of the PREVIOUS day; read as UTC that shows one day too early (the 18 Nov candle as 17 Nov).
+    When the candles are stamped 18:30, move them forward 5h30 so the date is the real trading day. Candles already at midnight are left as they are."""
+    try:
+        ix = pd.DatetimeIndex(d.index)
+        if len(ix) and bool(((ix.hour == 18) & (ix.minute == 30)).mean() > 0.5):
+            d = d.copy()
+            d.index = (ix + pd.Timedelta(hours=5, minutes=30)).normalize()
+    except Exception:
+        pass
+    return d
+
+
 def _daily(sym, sid, ls):
     """Fresh daily candles (the scanner's own daily history call, so the day just closed is in). Falls back to the saved daily file."""
     try:
         d = ls.fetch_daily_history(sid, "NSE_EQ")
         if d is not None and len(d) >= MIN_BARS:
-            return d
+            return _fix_dates(d)
     except Exception:
         pass
     p = os.path.join(ls.DAILY_CACHE_DIR, sym + ".csv")
     if os.path.exists(p):
-        return pd.read_csv(p, index_col=0, parse_dates=True)
+        return _fix_dates(pd.read_csv(p, index_col=0, parse_dates=True))
     return None
 
 
