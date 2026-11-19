@@ -289,6 +289,15 @@ def _fix_dates(d):
 
 def _daily(sym, sid, ls):
     """Fresh daily candles (the scanner's own daily history call, so the day just closed is in). Falls back to the saved daily file."""
+    try:                                    # the end date is TOMORROW: Dhan's end date is not included, so with today's date the day just closed is left out
+        now = _now().replace(tzinfo=None)
+        payload = {"securityId": sid, "exchangeSegment": "NSE_EQ", "instrument": "EQUITY", "expiryCode": 0, "oi": False,
+                   "fromDate": (now - timedelta(days=900)).strftime("%Y-%m-%d"), "toDate": (now + timedelta(days=1)).strftime("%Y-%m-%d")}
+        d = ls._parse_historical(ls._dhan_post("charts/historical", payload, "%s (daily scan)" % sid).json())
+        if d is not None and len(d) >= MIN_BARS:
+            return _fix_dates(d)
+    except Exception:
+        pass
     try:
         d = ls.fetch_daily_history(sid, "NSE_EQ")
         if d is not None and len(d) >= MIN_BARS:

@@ -161,8 +161,10 @@ def _res_levels(d, i, entry):
         log.warning("swing: zones failed: %s", e)
     try:
         h = d["high"].to_numpy(dtype=float)[:i + 1]
+        cl = d["close"].to_numpy(dtype=float)[:i + 1]
         for k in range(max(3, len(h) - 200), len(h) - 3):
-            if h[k] > entry and h[k] >= h[k - 3:k].max() and h[k] >= h[k + 1:k + 4].max() and h[k + 1:].max() <= h[k]:
+            # a swing high stays open until a later CLOSE is above it (same as the indicator: a wick through it does not break it)
+            if h[k] > entry and h[k] >= h[k - 3:k].max() and h[k] >= h[k + 1:k + 4].max() and cl[k + 1:].max() <= h[k]:
                 out.append((float(h[k]), "swing high"))
     except Exception as e:
         log.warning("swing: swing highs failed: %s", e)
