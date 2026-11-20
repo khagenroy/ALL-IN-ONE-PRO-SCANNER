@@ -204,6 +204,8 @@ class _RateLimiter:
             f = sys._getframe(2)
             best = 2
             while f is not None:
+                if f.f_code.co_name == "_hold5_pass":                   # ADDED 20 Nov: the 5m list pass of the swing page is ALWAYS the last in the queue
+                    return 2
                 nm = f.f_globals.get("__name__", "")
                 for key, pr in cls._PRIO_FILES:
                     if nm == key and pr < best:

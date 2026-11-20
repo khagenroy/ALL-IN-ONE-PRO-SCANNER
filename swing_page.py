@@ -370,6 +370,7 @@ def _candles_all(sid, tfs, as_of, ls):
     for tf in tfs:
         try:
             if tf == 30:
+                out["h15"] = ls.drop_forming_bars(d15, 15, as_of)                    # ADDED 20 Nov: the closed 15m candles, for the section F list (no extra download)
                 d = d15[d15.index >= d15.index.max() - pd.Timedelta(days=HIST_DAYS[30])]    # same history length as before
                 out[tf] = ls.drop_forming_bars(ls.build_merged_bars(d, 2), 30, as_of)
             elif tf == 60:
@@ -679,7 +680,7 @@ def _seq_mark(r, rs_txt):
 # ------------------------------------------------------------------------------------------------------- SECTION F: spurt stocks holding near (ADDED 20 Nov 2026)
 # A LIST (no alert, no follow-up) of stocks that now meet ALL of: a volume spurt (>= HOLD_SPURT_X times the 50 candles before, green candle) within the last HOLD_SPURT_BARS closed candles;
 # the latest close within HOLD_NEAR_PCT of the spurt candle's close OR of the SMA 21 (the nearer one); SMA 9 > 21 > 60; and the price crossed above all three SMAs within the last HOLD_CROSS_BARS candles.
-HOLD_SPURT_X, HOLD_SPURT_BARS, HOLD_NEAR_PCT, HOLD_CROSS_BARS = 5.0, 10, 1.0, 20
+HOLD_SPURT_X, HOLD_SPURT_BARS, HOLD_NEAR_PCT, HOLD_CROSS_BARS = 5.0, 10, 2.0, 20      # HOLD_NEAR_PCT = the latest close may be at most this % away (1-2%, never more) from the spurt candle's close or the SMA 21; None = no limit
 HOLD_PATH = os.path.join(RESULTS_DIR, "swing_holding.json")
 _HOLD = {"rows": [], "at": ""}
 
@@ -714,7 +715,7 @@ def holding_row(sym, d, tf, ist):
             return None
         d_sp = abs(c[i] - c[sp[0]]) / c[sp[0]] * 100
         d_sma = abs(c[i] - sm[21][i]) / sm[21][i] * 100
-        if min(d_sp, d_sma) > HOLD_NEAR_PCT:
+        if HOLD_NEAR_PCT is not None and min(d_sp, d_sma) > HOLD_NEAR_PCT:
             return None
         return {"symbol": sym, "tf": tf, "spurt_at": ist[sp[0]].strftime("%Y-%m-%d %H:%M"), "spurt_x": round(float(sp[1]), 1), "spurt_close": round(float(c[sp[0]]), 2),
                 "last": round(float(c[i]), 2), "d_sp": round(float(d_sp), 2), "d_sma": round(float(d_sma), 2), "near": "spurt candle close" if d_sp <= d_sma else "SMA 21",
@@ -724,14 +725,69 @@ def holding_row(sym, d, tf, ist):
         return None
 
 
-def _hold_save(rows):
+_hold_lock = threading.Lock()
+
+
+def _hold_save(rows, tfs=(30, 60)):
+    """Replaces the rows of the timeframes in tfs, keeps the others (30m / 60m scan and the 5m pass write the same list)."""
     global _HOLD
-    _HOLD = {"rows": rows, "at": _now().strftime("%Y-%m-%d %H:%M")}
-    try:
-        with open(HOLD_PATH, "w") as f:
-            json.dump(_HOLD, f)
-    except Exception as e:
-        log.warning("swing: holding list not saved: %s", e)
+    with _hold_lock:
+        keep = [r for r in _hold_load().get("rows", []) if r["tf"] not in tfs]
+        rows = sorted(rows + keep, key=lambda r: (min(r["d_sp"], r["d_sma"]), r["symbol"]))
+        key = "at5" if tuple(tfs) == (5,) else "at"
+        _HOLD = dict(_HOLD, rows=rows)
+        _HOLD[key] = _now().strftime("%Y-%m-%d %H:%M")
+        try:
+            with open(HOLD_PATH, "w") as f:
+                json.dump(_HOLD, f)
+        except Exception as e:
+            log.warning("swing: holding list not saved: %s", e)
+
+
+HOLD5_ON, HOLD5_EVERY_SEC, HOLD5_DAYS = True, 600, 5      # ON (21 Nov request): the separate 5m pass = one more Dhan download per stock every 10 minutes, LAST in the Dhan queue. False = off
+
+
+def _hold5_pass():
+    """The 5m part of section F: one 5-minute download per stock (HOLD5_DAYS days), LAST in the Dhan queue (live_scanner._priority reads this function name), so the alerts and the swing scan stay fast."""
+    import live_scanner as ls
+    uni = _universe()
+    as_of = pd.Timestamp(datetime.now(timezone.utc).replace(tzinfo=None))
+    rows = []
+    for sym, sid in uni:
+        try:
+            d5 = ls.fetch_intraday_history(sid, "NSE_EQ", 5, HOLD5_DAYS)
+            if d5 is None or d5.empty:
+                continue
+            d = ls.drop_forming_bars(d5, 5, as_of)
+            if len(d) < 100:
+                continue
+            ist = [t + pd.Timedelta(minutes=330) for t in d.index]
+            if (_now().replace(tzinfo=None) - ist[-1].to_pydatetime().replace(tzinfo=None)).days > 3:
+                continue
+            r = holding_row(sym, d, 5, ist)
+            if r:
+                rows.append(r)
+        except Exception as e:
+            log.warning("swing: 5m list %s failed: %s", sym, e)
+    _hold_save(rows, (5,))
+    log.info("swing: 5m list done: %d stocks", len(rows))
+
+
+def hold5_loop():
+    log.info("Swing page section F: 5m list every %d minutes (Mon-Fri 09:25-15:35), last in the Dhan queue.", HOLD5_EVERY_SEC // 60)
+    while True:
+        t0 = time.time()
+        try:
+            now = _now()
+            m = now.hour * 60 + now.minute
+            if HOLD5_ON and ON and now.weekday() < 5 and 9 * 60 + 25 <= m <= 15 * 60 + 35:
+                _hold5_pass()
+            else:
+                time.sleep(120)
+                continue
+        except Exception as e:
+            log.warning("swing: 5m list pass failed: %s", e)
+        time.sleep(max(30, HOLD5_EVERY_SEC - (time.time() - t0)))
 
 
 def _hold_load():
@@ -996,6 +1052,10 @@ def run_scan(tfs=TFS, alerts=True, label=""):
                     _hr = holding_row(sym, d, tf, [t + pd.Timedelta(minutes=330) for t in d.index])
                     if _hr:
                         hold.append(_hr)
+                    if tf == tfs[0] and _dd.get("h15") is not None and len(_dd["h15"]) >= 100:        # 15m rows of the list: same download, once per stock
+                        _hr = holding_row(sym, _dd["h15"], 15, [t + pd.Timedelta(minutes=330) for t in _dd["h15"].index])
+                        if _hr:
+                            hold.append(_hr)
                     _ist_txt = [(t + pd.Timedelta(minutes=330)).strftime("%Y-%m-%d %H:%M") for t in d.index]
                     _follow(sym, tf, d, _ist_txt)
                     try:
@@ -1007,8 +1067,7 @@ def run_scan(tfs=TFS, alerts=True, label=""):
             _set(done=k + 1, msg="scanning %d / %d (started %s IST)" % (k + 1, len(uni), _t0))
         with _lock:
             _save()
-        keep = [r for r in _hold_load().get("rows", []) if r["tf"] not in tfs]            # a 30m-only scan must not wipe the 60m rows (and the other way round)
-        _hold_save(sorted(hold + keep, key=lambda r: (min(r["d_sp"], r["d_sma"]), r["symbol"])))
+        _hold_save(hold, tuple(sorted(set(tfs) | {15})))                                                     # a 30m-only scan keeps the 60m and 5m rows (and the other way round)
         alert_items = [r for r in fresh if r.get("alert") and r.get("section") != "D"]
         warn_items = [r for r in fresh if r.get("alert") and r.get("section") == "D"]
         if alert_items:
@@ -1055,6 +1114,8 @@ def loop():
         threading.Thread(target=daily_scan.loop, daemon=True, name="daily-scan").start()
     except Exception as e:
         log.error("daily scan could not start: %s", e)
+    if HOLD5_ON:
+        threading.Thread(target=hold5_loop, daemon=True, name="swing-hold5").start()
     log.info("Swing signals scan started: Mon-Fri after every 30-minute candle close (09:46 ... 15:31), every stock except the thin ones, 30m + 60m, BUY only.")
     while True:
         try:
@@ -1434,10 +1495,10 @@ def page_html(tf=None):
             "<p style='color:#9fb0c0;margin:0 0 6px'>Stocks that gave 2 or more different BUY signals (sections A, B, C) on the same candle and timeframe, listed together. The signals are also in their own sections above; the stronger the agreement, the more rules the candle met. "
             "Each signal keeps its own SL and its own follow-up.</p>%s"
             "<h3>F. Volume-spurt stocks holding near (list, no alert)</h3>"
-            "<p style='color:#9fb0c0;margin:0 0 6px'>Stocks that NOW have: a green volume spurt (5x or more) within the last 10 closed candles; the latest close within 1%% of the spurt candle's close or of the SMA 21 (the nearer one is shown); SMA 9 above 21 above 60; and the price crossed above all three SMAs within the last 20 candles. Rebuilt at every scan (last: %s). It is a list to look at, not a signal: no entry, SL or follow-up.</p>%s</body></html>"
+            "<p style='color:#9fb0c0;margin:0 0 6px'>Stocks that NOW have: a green volume spurt (5x or more) within the last 10 closed candles (5, 15, 30 or 60 minute candles); the latest close is NOT more than 2%% away (1 to 2%%, never more) from the spurt candle's close or from the SMA 21 - both distances are shown and the nearest is first; SMA 9 above 21 above 60; and the price crossed above all three SMAs within the last 20 candles. Rebuilt at every swing scan (last: %s), from candles the scan already downloads (15m, 30m, 60m)%s. It is a list to look at, not a signal: no entry, SL or follow-up.</p>%s</body></html>"
             ) % (FOLLOW_DAYS, tabs, status, sd.get("universe") or "-", html.escape(UNI_NOTE or "list not built yet"), dl or "-",
                  _table(a, "No signal yet."), _stats(a), _table(b, "No signal yet."), _stats(b), _table(cc, "No signal yet."), _stats(cc), _table_warn(dd, "No warning yet."), _table_same(_same_candle(rows), "No candle with several signals yet."),
-                 _hold_load().get("at") or "not yet", _table_hold(hh, "No stock meets all the conditions at the last scan."))
+                 _hold_load().get("at") or "not yet", ("; 5m rows last rebuilt: %s (every 10 minutes, slowest priority)" % _hold_load()["at5"]) if (HOLD5_ON and _hold_load().get("at5")) else "", _table_hold(hh, "No stock meets all the conditions at the last scan."))
 
 
 # ------------------------------------------------------------------------------------------------------- Flask hook
