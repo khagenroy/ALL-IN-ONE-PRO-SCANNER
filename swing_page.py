@@ -351,6 +351,36 @@ def _candles(sid, tf, as_of, ls):
     return ls.drop_forming_bars(d60, 60, as_of)
 
 
+# ADDED 20 Nov 2026 (speed): ONE 15-minute download per stock gives BOTH the 30-minute candles (pairs of 15m) and the 60-minute candles (groups of 4 from 09:15,
+# the same grid Dhan uses: 09:15, 10:15 ... 15:15) - half the Dhan calls, so a scan finishes about twice as fast. False = the old way (a separate 60-minute download).
+SIXTY_FROM_15 = True
+
+
+def _candles_all(sid, tfs, as_of, ls):
+    """{tf: closed candles}. With SIXTY_FROM_15 a single 15-minute download (HIST_DAYS[60] days) feeds both timeframes. Never raises."""
+    out = {}
+    if not SIXTY_FROM_15:
+        for tf in tfs:
+            out[tf] = _candles(sid, tf, as_of, ls)
+        return out
+    d15 = ls.fetch_intraday_history(sid, "NSE_EQ", 15, max(HIST_DAYS[60], HIST_DAYS[30]) if 60 in tfs else HIST_DAYS[30])
+    if d15 is None or d15.empty:
+        return {tf: None for tf in tfs}
+    for tf in tfs:
+        try:
+            if tf == 30:
+                d = d15[d15.index >= d15.index.max() - pd.Timedelta(days=HIST_DAYS[30])]    # same history length as before
+                out[tf] = ls.drop_forming_bars(ls.build_merged_bars(d, 2), 30, as_of)
+            elif tf == 60:
+                out[tf] = ls.drop_forming_bars(ls.build_merged_bars(d15, 4), 60, as_of)
+            else:
+                out[tf] = _candles(sid, tf, as_of, ls)
+        except Exception as e:
+            log.warning("swing: %s %dm build failed: %s", sid, tf, e)
+            out[tf] = None
+    return out
+
+
 def _sma(c, n):
     return pd.Series(c).rolling(n, min_periods=n).mean().to_numpy()
 
@@ -558,6 +588,7 @@ def run_scan(tfs=TFS, alerts=True, label=""):
     try:
         import live_scanner as ls
         _set(on=True, msg="starting: building the liquid list", done=0, total=0)
+        _t0 = _now().strftime("%H:%M")
         uni = _universe()
         _set(total=len(uni), universe=len(uni), msg="scanning 0 / %d" % len(uni))
         now_ist = _now()
@@ -565,16 +596,21 @@ def run_scan(tfs=TFS, alerts=True, label=""):
         as_of = pd.Timestamp(datetime.now(timezone.utc).replace(tzinfo=None))
         _nifty_load(ls)
         for k, (sym, sid) in enumerate(uni):
+            try:
+                _dd = _candles_all(sid, tfs, as_of, ls)
+            except Exception as e:
+                log.warning("swing: %s download failed: %s", sym, e)
+                _dd = {}
             for tf in tfs:
                 try:
-                    d = _candles(sid, tf, as_of, ls)
+                    d = _dd.get(tf)
                     if d is None or len(d) < MIN_BARS:
                         continue
                     fresh += scan_frame(sym, d, tf, alerts, now_ist)
                     _follow(sym, tf, d, [(t + pd.Timedelta(minutes=330)).strftime("%Y-%m-%d %H:%M") for t in d.index])
                 except Exception as e:
                     log.warning("swing: %s %dm failed: %s", sym, tf, e)
-            _set(done=k + 1, msg="scanning %d / %d" % (k + 1, len(uni)))
+            _set(done=k + 1, msg="scanning %d / %d (started %s IST)" % (k + 1, len(uni), _t0))
         with _lock:
             _save()
         alert_items = [r for r in fresh if r.get("alert")]
