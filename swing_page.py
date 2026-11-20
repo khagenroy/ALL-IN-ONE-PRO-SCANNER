@@ -62,7 +62,7 @@ RESULTS_DIR = os.path.join(HERE, "results")
 JSON_PATH = os.path.join(RESULTS_DIR, "swing_signals.json")
 UNI_PATH = os.path.join(RESULTS_DIR, "swing_universe.json")
 CSV_COLS = ["date", "candle", "tf", "section", "symbol", "signal", "entry", "sl", "risk_pct", "t1", "t2", "t6", "resistance", "room_r", "spurt_x", "crossed", "reached", "exit", "final_r",
-            "last_price", "alert", "found_at", "updated"]
+            "last_price", "alert", "found_at", "updated", "chg_pct", "nifty_chg_pct", "chg5_pct", "nifty_chg5_pct"]
 COLOURS = {"VOLUME SPURT + SMA": "#00e5ff", "SWEEP": "#ffb300", "OB MITIGATION": "#b388ff", "VS BUY": "#4caf50", "SPURT BUY": "#69f0ae"}
 
 _lock = threading.RLock()
@@ -228,14 +228,26 @@ def _read_turnover(sym, ls):
     return float(t), float(df["close"].iloc[-1])
 
 
+TURN_PATH = os.path.join(RESULTS_DIR, "swing_turnover.json")
+
+
+def _market_closed(now):
+    return now.weekday() < 5 and now.hour * 60 + now.minute >= 15 * 60 + 35
+
+
 def _universe():
-    """[(symbol, security_id)] of every NSE stock except the thin ones (average traded value of the last 20 daily candles under MIN_TURNOVER, price under MIN_PRICE); TOP_N > 0 caps the list. Rebuilt once a day."""
+    """[(symbol, security_id)] of every NSE stock except the thin ones; TOP_N > 0 caps the list. Rebuilt once a day (and once more after the close, when the day's traded values are complete).
+    THIN = average traded value of the last 20 daily candles under MIN_TURNOVER (when the scanner has saved daily candles). Without saved daily candles the traded value of the DAY from the quote call is
+    used: after the close it is saved (swing_turnover.json) and the next days use that saved value, so a morning list is not judged on a half day of trading."""
     global UNI_NOTE
-    today = _now().strftime("%Y-%m-%d")
+    now = _now()
+    today = now.strftime("%Y-%m-%d")
+    closed = _market_closed(now)
     try:
         with open(UNI_PATH) as f:
             d = json.load(f)
-        if d.get("date") == today and d.get("top_n") == TOP_N and d.get("min_turnover") == MIN_TURNOVER and d.get("ver") == 2 and d.get("list"):
+        if (d.get("date") == today and d.get("top_n") == TOP_N and d.get("min_turnover") == MIN_TURNOVER and d.get("ver") == 3 and d.get("list")
+                and (d.get("closed") or not closed)):
             UNI_NOTE = d.get("note") or ""
             return [tuple(x) for x in d["list"]]
     except Exception:
@@ -264,11 +276,13 @@ def _universe():
         else:                                                    # thin stocks (little traded value) and stocks under Rs 50 are left out
             ranked.append((r[0], sym, sid))
     src = "daily candles"
-    if len(ranked) < 150:                      # no / few saved daily candles yet: today's traded value from the quote call
-        ranked, src = [], "today's quotes"
+    if len(ranked) < 150:                      # no / few saved daily candles: the traded value of the day from the quote call
+        ranked, src = [], "quotes"
+        cnt["cheap"] = cnt["thin"] = 0
         _set(msg="building the liquid list: reading today's quotes (no saved daily candles found)")
         by_id = {str(sid): sym for sym, sid in uni}
-        ids = [int(s) for s in by_id]
+        ids = [int(x) for x in by_id]
+        today_t = {}
         for i in range(0, len(ids), 1000):
             resp = ls._dhan_post("marketfeed/quote", {"NSE_EQ": ids[i:i + 1000]}, "swing quote batch")
             for sid, q in ((resp.json().get("data") or {}).get("NSE_EQ") or {}).items():
@@ -276,19 +290,49 @@ def _universe():
                     px, vol = float(q.get("last_price")), float(q.get("volume"))
                 except (TypeError, ValueError):
                     continue
-                if str(sid) in by_id and px >= MIN_PRICE:
-                    ranked.append((px * vol, by_id[str(sid)], str(sid)))
+                if str(sid) in by_id:
+                    today_t[by_id[str(sid)]] = (px, px * vol, str(sid))
             time.sleep(1.1)
+        saved = None
+        if closed and len(today_t) > 500:                       # the day is complete: save it for the next days
+            try:
+                os.makedirs(RESULTS_DIR, exist_ok=True)
+                with open(TURN_PATH, "w") as f:
+                    json.dump({"date": today, "t": {k: round(v[1]) for k, v in today_t.items()}}, f)
+                saved = {k: v[1] for k, v in today_t.items()}
+            except Exception:
+                pass
+        if saved is None:
+            try:
+                with open(TURN_PATH) as f:
+                    td = json.load(f)
+                saved = td.get("t") or None
+                src = "quotes + the traded value saved on " + str(td.get("date"))
+            except Exception:
+                saved = None
+        if closed and saved is not None and src == "quotes":
+            src = "quotes (full day)"
+        for sym, (px, tv, sid) in today_t.items():
+            if px < MIN_PRICE:
+                cnt["cheap"] += 1
+                continue
+            t_use = saved.get(sym, 0.0) if saved is not None else None      # None = no saved value yet (first day): nobody is called thin
+            if t_use is not None and t_use < MIN_TURNOVER:
+                cnt["thin"] += 1
+                continue
+            ranked.append((t_use if t_use is not None else tv, sym, sid))
+        if saved is None:
+            src = "quotes, no thin filter yet (the traded values are saved after 15:35)"
     ranked.sort(reverse=True)
-    out = [(s, sid) for _t, s, sid in (ranked[:TOP_N] if TOP_N > 0 else ranked)]
+    out = [(x, sid) for _t, x, sid in (ranked[:TOP_N] if TOP_N > 0 else ranked)]
+    UNI_NOTE = ("stock list %d - no saved daily candles %d - price under Rs %g: %d - thin (under Rs %g crore a day): %d - IN THE LIST: %d (%s)"
+                % (cnt["all"], cnt["nofile"], MIN_PRICE, cnt["cheap"], MIN_TURNOVER / 1e7, cnt["thin"], len(out), src))
     try:
         os.makedirs(RESULTS_DIR, exist_ok=True)
         with open(UNI_PATH, "w") as f:
-            json.dump({"date": today, "top_n": TOP_N, "min_turnover": MIN_TURNOVER, "ver": 2, "note": UNI_NOTE, "src": src, "list": out}, f)
+            json.dump({"date": today, "top_n": TOP_N, "min_turnover": MIN_TURNOVER, "ver": 3, "closed": closed, "note": UNI_NOTE, "src": src, "list": out}, f)
     except Exception:
         pass
-    UNI_NOTE = ("stock list %d - no saved daily candles %d - price under Rs %g: %d - thin (under Rs %g crore a day): %d - IN THE LIST: %d (%s)"
-                % (cnt["all"], cnt["nofile"], MIN_PRICE, cnt["cheap"], MIN_TURNOVER / 1e7, cnt["thin"], len(out), src))
     log.info("swing: liquid list of %d stocks built from %s - %s", len(out), src, UNI_NOTE)
     return out
 
@@ -438,6 +482,11 @@ def scan_frame(sym, d, tf, alert_ok, now_ist):
     for i, sec, nm, entry, sl, mult, crossed in detect(d, win):
         r = _add(tf, sec, sym, nm, st(i), en(i), entry, sl, mult, crossed, alert_ok, _nearest_res(d, i, entry))
         if r:
+            try:                                                                         # stock against NIFTY on the signal day (until the signal candle's close)
+                r["chg"], r["nchg"] = _stock_chg_at(d, ist, i), _nifty_chg_at(en(i))
+                r["chg5"], r["nchg5"] = None, None
+            except Exception:
+                pass
             new.append(r)
     return new
 
@@ -514,6 +563,7 @@ def run_scan(tfs=TFS, alerts=True, label=""):
         now_ist = _now()
         fresh = []
         as_of = pd.Timestamp(datetime.now(timezone.utc).replace(tzinfo=None))
+        _nifty_load(ls)
         for k, (sym, sid) in enumerate(uni):
             for tf in tfs:
                 try:
@@ -592,7 +642,7 @@ def loop():
 def _csv_row(r):
     vals = [r.get("date"), r.get("candle"), "%dm" % r.get("tf", 0), "A volume spurt + SMA" if r.get("section") == "A" else "B indicator", r.get("symbol"), r.get("signal"), r.get("entry"),
             r.get("sl"), r.get("risk_pct"), r.get("t1"), r.get("t2"), r.get("t6"), r.get("res"), r.get("room_r"), r.get("spurt_x"), r.get("crossed"), r.get("reached"), r.get("exit"), r.get("final_r"),
-            r.get("last"), "yes" if r.get("alert") else "", r.get("found"), r.get("upd")]
+            r.get("last"), "yes" if r.get("alert") else "", r.get("found"), r.get("upd"), r.get("chg"), r.get("nchg"), r.get("chg5"), r.get("nchg5")]
     return ",".join("" if x is None else str(x).replace(",", " ") for x in vals)
 
 
@@ -642,6 +692,68 @@ def _sym_label(sym):
     return sym + (" (F&O)" if sym.upper() in _fno_symbols() else "")
 
 
+# ------------------------------------------------------------------------------------------------------- stock against NIFTY (ADDED 19 Nov)
+_NIF = {"t": [], "c": []}        # NIFTY 15-minute candles of the last weeks: IST open time, close
+
+
+def _nifty_load(ls):
+    """NIFTY 50 15-minute candles (Dhan index id 13), once per scan. Any failure leaves the lists empty: the 'vs Nifty' column then shows '-' and nothing else is affected."""
+    _NIF["t"], _NIF["c"] = [], []
+    try:
+        now = datetime.now()
+        payload = {"securityId": "13", "exchangeSegment": "IDX_I", "instrument": "INDEX", "interval": 15,
+                   "fromDate": (now - timedelta(days=max(HIST_DAYS.values()))).strftime("%Y-%m-%d"), "toDate": now.strftime("%Y-%m-%d")}
+        df = ls._parse_intraday(ls._dhan_post("charts/intraday", payload, "NIFTY (interval=15)").json())
+        if df is not None and len(df):
+            _NIF["t"] = [(t + pd.Timedelta(minutes=330)).to_pydatetime().replace(tzinfo=None) for t in df.index]
+            _NIF["c"] = [float(x) for x in df["close"]]
+    except Exception as e:
+        log.warning("swing: NIFTY candles not available (%s): the vs-Nifty column stays empty", e)
+
+
+def _nifty_chg_at(end_dt):
+    """NIFTY's move (%) from the previous day's close to the last 15-minute candle that had closed by end_dt; None when not known."""
+    ts, cs = _NIF["t"], _NIF["c"]
+    if not ts:
+        return None
+    day = end_dt.date()
+    now_i = prev_i = None
+    for k in range(len(ts) - 1, -1, -1):
+        t = ts[k]
+        if now_i is None and t.date() == day and t + timedelta(minutes=15) <= end_dt:
+            now_i = k
+        if t.date() < day:
+            prev_i = k
+            break
+    if now_i is None or prev_i is None or cs[prev_i] <= 0:
+        return None
+    return round((cs[now_i] / cs[prev_i] - 1.0) * 100.0, 2)
+
+
+def _stock_chg_at(d, ist, i):
+    """The stock's move (%) from the previous day's close to the close of candle i."""
+    day = ist[i].date()
+    for j in range(i - 1, -1, -1):
+        if ist[j].date() < day:
+            p = float(d["close"].iloc[j])
+            return round((float(d["close"].iloc[i]) / p - 1.0) * 100.0, 2) if p > 0 else None
+    return None
+
+
+def _rs_cell(r):
+    """The 'vs Nifty' cell: the stock's move on the signal day against NIFTY's, and (daily scan) over 5 days. Green = stronger than Nifty, red = weaker."""
+    c, n = r.get("chg"), r.get("nchg")
+    if c is None or n is None:
+        return "<span style='color:#6b7c8d'>-</span>"
+    strong = c > n
+    out = "<span style='color:%s'>%+.1f%% vs Nifty %+.1f%% - %s</span>" % ("#7be08a" if strong else "#ff7070", c, n, "stronger" if strong else "weaker")
+    c5, n5 = r.get("chg5"), r.get("nchg5")
+    if c5 is not None and n5 is not None:
+        out += "<br><span style='color:#9fb0c0'>5 days %+.1f%% vs Nifty %+.1f%%</span>" % (c5, n5)
+    return out
+
+
+
 def _table(rows, empty):
     if not rows:
         return "<p style='color:#9fb0c0'>%s</p>" % empty
@@ -651,11 +763,11 @@ def _table(rows, empty):
         tv = "https://www.tradingview.com/chart/?symbol=NSE%%3A%s&interval=%d" % (html.escape(r["symbol"]), r["tf"])
         body.append("<tr><td>%s %s</td><td>%dm</td><td><b><a href='%s' target='_blank' rel='noopener'>%s</a></b></td><td style='color:%s;font-weight:700'>%s</td><td>%s</td>"
                     "<td style='color:#ff7070'>%s <span style='color:#9fb0c0'>(%.1f%%)</span></td><td style='color:#7be08a'>%s</td><td style='color:#7be08a'>%s</td><td style='color:%s'>%s</td><td>%s</td><td>%s</td>"
-                    "<td style='color:#9fb0c0'>%s</td></tr>" % (
+                    "<td>%s</td><td style='color:#9fb0c0'>%s</td></tr>" % (
                         r["date"][5:], r["candle"], r["tf"], tv, html.escape(_sym_label(r["symbol"])), c, html.escape(r["signal"]), _f(r["entry"]), _f(r["sl"]), r["risk_pct"], _f(r["t1"]), _f(r["t2"]),
                         "#ff7070" if (r.get("room_r") is not None and r["room_r"] < 1) else "#ffb300", html.escape(r.get("room") or "-"),
-                        ("%sx" % r["spurt_x"]) if r.get("spurt_x") else "-", html.escape(r.get("crossed") or "-"), html.escape(_result(r))))
-    return ("<table><tr><th>Candle</th><th>TF</th><th>Stock</th><th>Signal</th><th>Entry</th><th>SL (risk)</th><th>T1</th><th>T2</th><th>Room to resistance</th><th>Spurt</th><th>SMAs crossed</th><th>What happened</th></tr>"
+                        ("%sx" % r["spurt_x"]) if r.get("spurt_x") else "-", html.escape(r.get("crossed") or "-"), _rs_cell(r), html.escape(_result(r))))
+    return ("<table><tr><th>Candle</th><th>TF</th><th>Stock</th><th>Signal</th><th>Entry</th><th>SL (risk)</th><th>T1</th><th>T2</th><th>Room to resistance</th><th>Spurt</th><th>SMAs crossed</th><th>vs Nifty</th><th>What happened</th></tr>"
             + "".join(body) + "</table>")
 
 

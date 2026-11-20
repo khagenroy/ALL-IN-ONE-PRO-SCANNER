@@ -212,6 +212,48 @@ def strong_buy(d, win):
     return out
 
 
+# ------------------------------------------------------------------------------------------------------- NIFTY for the 'vs Nifty' column (ADDED 19 Nov)
+_NIFD = {"dates": [], "close": []}
+
+
+def _nifty_load(ls):
+    """NIFTY 50 daily candles (Dhan index id 13), once per scan; today's close is taken from the indices strip when Dhan's daily history does not hold the day just closed yet.
+    Any failure leaves the lists empty: the column then shows '-' and the scan is not affected."""
+    _NIFD["dates"], _NIFD["close"] = [], []
+    try:
+        now = _now().replace(tzinfo=None)
+        payload = {"securityId": "13", "exchangeSegment": "IDX_I", "instrument": "INDEX", "expiryCode": 0, "oi": False,
+                   "fromDate": (now - timedelta(days=60)).strftime("%Y-%m-%d"), "toDate": (now + timedelta(days=1)).strftime("%Y-%m-%d")}
+        nd = _fix_dates(ls._parse_historical(ls._dhan_post("charts/historical", payload, "NIFTY (daily scan)").json()))
+        dates = [pd.Timestamp(x).strftime("%Y-%m-%d") for x in nd.index]
+        closes = [float(x) for x in nd["close"]]
+        try:
+            with open(os.path.join(sw.RESULTS_DIR, "indices.json"), "r", encoding="utf-8") as f:
+                ix = json.load(f)
+            row = next((q for q in ix.get("rows", []) if q.get("name") == "NIFTY"), None)
+            today = now.strftime("%Y-%m-%d")
+            if row and row.get("price") and today not in dates and now.weekday() < 5 and str(ix.get("asof", "")).startswith(now.strftime("%d-%b")):
+                dates.append(today)
+                closes.append(float(row["price"]))
+        except Exception:
+            pass
+        _NIFD["dates"], _NIFD["close"] = dates, closes
+    except Exception as e:
+        log.warning("daily scan: NIFTY candles not available (%s): the vs-Nifty column stays empty", e)
+
+
+def _nifty_pct(day_txt):
+    """(NIFTY's move on that day in %, its move over the 5 trading days up to that day) or None."""
+    ds_, cs = _NIFD["dates"], _NIFD["close"]
+    if day_txt not in ds_:
+        return None
+    k = ds_.index(day_txt)
+    if k < 5 or cs[k - 1] <= 0 or cs[k - 5] <= 0:
+        return None
+    return round((cs[k] / cs[k - 1] - 1.0) * 100.0, 2), round((cs[k] / cs[k - 5] - 1.0) * 100.0, 2)
+
+
+
 def scan_stock(sym, d, now_ist):
     """New rows of one stock. d = daily candles (index = date), the last row = the last closed day."""
     new = []
@@ -257,6 +299,13 @@ def scan_stock(sym, d, now_ist):
             j0 = max(0, i - 19)
             jm = j0 + int(np.argmax(h[j0:i + 1]))
             r["room"] += "  (data: highest high of last 20 = %.2f on %s)" % (h[jm], day(jm))
+        except Exception:
+            pass
+        try:                                                   # stock against NIFTY: the signal day's move and the 5-day move (green = stronger than Nifty)
+            if i >= 5:
+                r["chg"], r["chg5"] = round((c[i] / c[i - 1] - 1.0) * 100.0, 2), round((c[i] / c[i - 5] - 1.0) * 100.0, 2)
+                nn = _nifty_pct(day(i))
+                r["nchg"], r["nchg5"] = nn if nn else (None, None)
         except Exception:
             pass
         if fresh:
@@ -394,6 +443,7 @@ def run_scan(alerts=True, label=""):
     try:
         import live_scanner as ls
         _set(on=True, msg="starting: reading the liquid list", done=0, total=0)
+        _nifty_load(ls)
         uni = sw._universe()
         _set(total=len(uni), msg="scanning 0 / %d" % len(uni))
         now = _now()
@@ -464,7 +514,7 @@ def loop():
 
 
 # ------------------------------------------------------------------------------------------------------- CSV / page
-COLS = ["date", "group", "symbol", "signal", "entry", "sl", "risk_pct", "t1", "t2", "t6", "resistance", "room_r", "volume_x", "note", "found_at"]
+COLS = ["date", "group", "symbol", "signal", "entry", "sl", "risk_pct", "t1", "t2", "t6", "resistance", "room_r", "volume_x", "note", "found_at", "chg_pct", "nifty_chg_pct", "chg5_pct", "nifty_chg5_pct"]
 
 
 def csv_text(day=None):
@@ -474,7 +524,7 @@ def csv_text(day=None):
     out = [",".join(COLS)]
     for r in rows:
         vals = [r.get("date"), r.get("group"), r.get("symbol"), r.get("signal"), r.get("entry"), r.get("sl"), r.get("risk_pct"), r.get("t1"), r.get("t2"), r.get("t6"),
-                r.get("res"), r.get("room_r"), r.get("spurt_x"), r.get("extra"), r.get("found")]
+                r.get("res"), r.get("room_r"), r.get("spurt_x"), r.get("extra"), r.get("found"), r.get("chg"), r.get("nchg"), r.get("chg5"), r.get("nchg5")]
         out.append(",".join("" if x is None else str(x).replace(",", " ") for x in vals))
     return "\n".join(out) + "\n"
 
@@ -488,11 +538,11 @@ def _table(rows):
         blocked = r.get("room_r") is not None and r["room_r"] < 1
         body.append("<tr><td>%s</td><td><b><a href='%s' target='_blank' rel='noopener'>%s</a></b></td><td style='font-weight:700'>%s</td><td>%s</td>"
                     "<td style='color:#ff7070'>%s <span style='color:#9fb0c0'>(%.1f%%)</span></td><td style='color:#7be08a'>%s</td><td style='color:#7be08a'>%s</td>"
-                    "<td style='color:%s'>%s</td><td style='color:#9fb0c0'>%s</td></tr>" % (
+                    "<td style='color:%s'>%s</td><td>%s</td><td style='color:#9fb0c0'>%s</td></tr>" % (
                         r["date"][5:], tv, html.escape(sw._sym_label(r["symbol"])), html.escape(r["signal"]), sw._f(r["entry"]), sw._f(r["sl"]), r["risk_pct"], sw._f(r["t1"]), sw._f(r["t2"]),
-                        "#ff7070" if blocked else "#ffb300", html.escape(r.get("room") or "-"),
+                        "#ff7070" if blocked else "#ffb300", html.escape(r.get("room") or "-"), sw._rs_cell(r),
                         html.escape(("%sx " % r["spurt_x"] if r.get("spurt_x") else "") + (r.get("extra") or ""))))
-    return ("<table><tr><th>Day</th><th>Stock</th><th>Signal</th><th>Entry</th><th>SL (risk)</th><th>T1</th><th>T2</th><th>Room to resistance</th><th>Volume / note</th></tr>"
+    return ("<table><tr><th>Day</th><th>Stock</th><th>Signal</th><th>Entry</th><th>SL (risk)</th><th>T1</th><th>T2</th><th>Room to resistance</th><th>vs Nifty</th><th>Volume / note</th></tr>"
             + "".join(body) + "</table>")
 
 
@@ -515,7 +565,7 @@ def page_html(day=None):
             "border-bottom:1px solid #243040;text-align:left;font-size:14px}th{color:#9fb0c0}a{color:#8ab4f8}h3{margin:22px 0 4px}</style></head><body>"
             "<h2>DAILY SCAN - BUY signals on the daily candle of %s</h2>"
             "<p style='color:#9fb0c0'>One scan after the close (Mon-Fri %02d:%02d IST), every NSE stock except the thin ones (average traded value under Rs 1 crore a day, or price under Rs 50). ALL IN ONE PRO signals + CONSOL BOX (STRONG BUY, PULLBACK BUY) + GAP RETRACE (gap up, pullback buy). "
-            "T1 / T2 / T6 = 1R / 2R / 6R. Room to resistance = free distance to the nearest resistance in R. This page places NO order. "
+            "T1 / T2 / T6 = 1R / 2R / 6R. Room to resistance = free distance to the nearest resistance in R. vs Nifty = the stock's move on the signal day and over 5 days against Nifty (green = stronger than Nifty). This page places NO order. "
             "<a href='/swing_signals' target='_blank' rel='noopener'>Swing signals (30m / 60m)</a> &nbsp;|&nbsp; <a href='/' target='_blank' rel='noopener'>Home</a></p>"
             "<p>Days: %s &nbsp; <a href='/daily_scan/run' style='border:1px solid #8ab4f8;border-radius:6px;padding:4px 12px'>Scan now (no alert)</a> &nbsp; <span style='color:#9fb0c0'>%s</span><br><span style='color:#6b7c8d;font-size:12px'>%s</span></p>"
             "<p style='color:#9fb0c0'>Download CSV: <a href='/daily_scan.csv' target='_blank' rel='noopener'><b>all days</b></a> &middot; %s</p>%s</body></html>"
