@@ -273,6 +273,7 @@ def scan_stock(sym, d, now_ist):
         return pd.Timestamp(d.index[i]).strftime("%Y-%m-%d")
 
     def put(group, name, i, entry, sl, mult=None, extra=""):
+        entry = float(h[i])                                          # 20 Nov: ENTRY = ABOVE the HIGH of the signal candle (a stop entry); SL unchanged
         if not mult and not extra and i >= 50:                       # PULLBACK BUY / GAP RETRACE have no spurt: show the volume of the signal candle against the average of the 50 candles before it
             av = float(np.mean(v[i - 50:i]))
             if av > 0:

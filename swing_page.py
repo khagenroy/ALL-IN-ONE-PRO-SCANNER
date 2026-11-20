@@ -62,7 +62,7 @@ RESULTS_DIR = os.path.join(HERE, "results")
 JSON_PATH = os.path.join(RESULTS_DIR, "swing_signals.json")
 UNI_PATH = os.path.join(RESULTS_DIR, "swing_universe.json")
 CSV_COLS = ["date", "candle", "tf", "section", "symbol", "signal", "entry", "sl", "risk_pct", "t1", "t2", "t6", "resistance", "room_r", "spurt_x", "crossed", "reached", "exit", "final_r",
-            "last_price", "alert", "found_at", "updated", "chg_pct", "nifty_chg_pct", "chg5_pct", "nifty_chg5_pct", "strong_stars", "sequence"]
+            "last_price", "alert", "found_at", "updated", "chg_pct", "nifty_chg_pct", "chg5_pct", "nifty_chg5_pct", "strong_stars", "sequence", "triggered_at"]
 COLOURS = {"VOLUME SPURT + SMA": "#00e5ff", "SWEEP": "#ffb300", "OB MITIGATION": "#b388ff", "VS BUY": "#4caf50", "SPURT BUY": "#69f0ae", "RS CROSS + SPURT": "#f48fb1", "RS CROSS DOWN + SPURT": "#ff7070"}
 
 _lock = threading.RLock()
@@ -209,7 +209,7 @@ def _add(tf, section, sym, name, cand_start, cand_end, entry, sl, spurt_x, cross
         age = (_now().replace(tzinfo=None) - cand_end).total_seconds() / 60.0
         row = {"key": key, "date": cand_start[:10], "candle": cand_start[11:16], "tf": tf, "section": section, "symbol": sym, "signal": name,
                "entry": round(entry, 2), "sl": round(sl, 2), "risk_pct": round(abs(entry - sl) / entry * 100.0, 2), "t1": None if warn else round(t1, 2), "t2": None if warn else round(t2, 2), "t6": None if warn else round(t6, 2),
-               "spurt_x": round(spurt_x, 1) if spurt_x else None, "crossed": crossed, "reached": 0, "exit": "WARNING" if warn else "OPEN", "final_r": None, "last": None,
+               "spurt_x": round(spurt_x, 1) if spurt_x else None, "crossed": crossed, "reached": 0, "exit": "WARNING" if warn else "OPEN", "final_r": None, "last": None, "trig": None,
                "alert": bool(alert_ok and age <= ALERT_MAX_AGE_MIN.get(tf, 60)), "found": _now().strftime("%Y-%m-%d %H:%M"), "upd": "", "cs": cand_start, "res": round(res, 2) if res else None, "room_r": None if warn else _room_text(entry, sl, res)[0], "room": "" if warn else _room_text(entry, sl, res)[1]}
         rows.append(row)
         return row
@@ -841,7 +841,10 @@ def scan_frame(sym, d, tf, alert_ok, now_ist):
                 found.append((i, "D", "RS CROSS DOWN + SPURT", entry, hi, mult, txt))
     except Exception as e:
         log.warning("swing: RS cross failed for %s: %s", sym, e)
+    _hi = d["high"].to_numpy(dtype=float)
     for i, sec, nm, entry, sl, mult, crossed in found:
+        if sec in ("A", "B", "C"):                                                   # 20 Nov: ENTRY = ABOVE the HIGH of the signal candle (a stop entry); the SL is unchanged
+            entry = float(_hi[i])
         r = _add(tf, sec, sym, nm, st(i), en(i), entry, sl, mult, crossed, alert_ok, _nearest_res(d, i, entry))
         if r:
             if sec in ("A", "B", "C"):
@@ -867,12 +870,16 @@ def _follow(sym, tf, d, ist_txt):
         bars = [(ist_txt[j], o[j], h[j], l[j], c[j]) for j in range(len(c)) if ist_txt[j] > r["cs"]]
         if not bars:
             continue
-        res = spg.follow("BUY", r["entry"], r["sl"], bars, False)
+        legacy = "trig" not in r                                                      # rows saved before 20 Nov: entry = close, filled at once
+        end = (_now().replace(tzinfo=None) - datetime.strptime(r["date"], "%Y-%m-%d")).days > FOLLOW_DAYS
+        res = spg.follow("BUY", r["entry"], r["sl"], bars, end and not legacy, trigger=not legacy)
         if res is None:
             continue
         with _lock:
             r.update(reached=res["reached"], exit=res["exit"], final_r=res["final_r"], last=res["last"], upd=_now().strftime("%m-%d %H:%M"))
-            if r["exit"] == "OPEN" and (_now().replace(tzinfo=None) - datetime.strptime(r["date"], "%Y-%m-%d")).days > FOLLOW_DAYS:
+            if not legacy:
+                r["trig"] = res.get("trig")
+            if r["exit"] == "OPEN" and end:
                 r["exit"] = "10D END"
 
 
@@ -900,7 +907,9 @@ def _recross(sym, tf, d, ist_txt, alert_ok):
         below = False
         cross_j = None
         for j in range(last + 1):
-            if ist_txt[j] <= r["cs"]:
+            if ist_txt[j] <= (r.get("trig") or r["cs"]):
+                continue
+            if "trig" in r and not r.get("trig"):                           # waiting for the first break: not a re-cross
                 continue
             if c[j] < r["entry"]:
                 below = True
@@ -969,7 +978,7 @@ def _notify(items):
     _st["alerts_n"] += 1
     blocks = []
     for r in items[:8]:
-        blocks.append("SWING TRADING ALERT\n%s - %s (%dm)\nEntry %s | SL %s (%.1f%%)\nT1 %s | T2 %s | T6 %s\nR:R 1 : 1 / 2 / 6 (T1 = 1R, T2 = 2R, T6 = 6R)\nFree room: %s\nCandle %s IST%s" % (
+        blocks.append("SWING TRADING ALERT\n%s - %s (%dm)\nEntry ABOVE %s (high of the signal candle) | SL %s (%.1f%%)\nT1 %s | T2 %s | T6 %s\nR:R 1 : 1 / 2 / 6 (T1 = 1R, T2 = 2R, T6 = 6R)\nFree room: %s\nCandle %s IST%s" % (
             r["signal"], r["symbol"], r["tf"], _f(r["entry"]), _f(r["sl"]), r["risk_pct"], _f(r["t1"]), _f(r["t2"]), _f(r["t6"]), r.get("room") or "n/a", r["candle"],
             (" | spurt %sx" % r["spurt_x"]) if r.get("spurt_x") else "") + (("\n%s STRONG STOCK: %s" % ("\u2605" * r["strong"], r["seq"])) if r.get("strong") and r.get("seq") else ""))
     if len(items) > 8:
@@ -1246,7 +1255,7 @@ def _early_swing_send(hits):
 def _csv_row(r):
     vals = [r.get("date"), r.get("candle"), "%dm" % r.get("tf", 0), {"A": "A volume spurt + SMA", "C": "C RS cross + spurt", "D": "D RS cross DOWN exit warning"}.get(r.get("section"), "B indicator"), r.get("symbol"), r.get("signal"), r.get("entry"),
             r.get("sl"), r.get("risk_pct"), r.get("t1"), r.get("t2"), r.get("t6"), r.get("res"), r.get("room_r"), r.get("spurt_x"), r.get("crossed"), r.get("reached"), r.get("exit"), r.get("final_r"),
-            r.get("last"), "yes" if r.get("alert") else "", r.get("found"), r.get("upd"), r.get("chg"), r.get("nchg"), r.get("chg5"), r.get("nchg5"), r.get("strong") or "", r.get("seq") or ""]
+            r.get("last"), "yes" if r.get("alert") else "", r.get("found"), r.get("upd"), r.get("chg"), r.get("nchg"), r.get("chg5"), r.get("nchg5"), r.get("strong") or "", r.get("seq") or "", r.get("trig") or ("not yet" if ("trig" in r and r.get("exit") == "OPEN") else "")]
     return ",".join("" if x is None else str(x).replace(",", " ") for x in vals)
 
 
@@ -1266,8 +1275,14 @@ def _result(r):
 
 def _result0(r):
     ex = r.get("exit")
+    if ex == "OPEN" and "trig" in r and not r.get("trig"):
+        return "waiting: the price has not yet broken above the entry %s (no trade yet)" % _f(r["entry"])
+    if ex == "NO TRIGGER":
+        return "no trade: the price fell to the SL level before it broke above the entry"
+    if ex == "NOT TRIGGERED":
+        return "no trade: the entry was never broken within the follow-up days"
     if ex == "OPEN":
-        return "open (best target %s, now %s R)" % ("T%d" % r["reached"] if r.get("reached") else "none", ("%+.2f" % r["final_r"]) if r.get("final_r") is not None else "-")
+        return "open%s (best target %s, now %s R)" % ((" - broke the entry %s" % r["trig"][5:]) if r.get("trig") else "", "T%d" % r["reached"] if r.get("reached") else "none", ("%+.2f" % r["final_r"]) if r.get("final_r") is not None else "-")
     if ex == "WARNING":
         return "exit warning - not a trade"
     if ex == "SL":
@@ -1445,7 +1460,7 @@ def _table_warn(rows, empty):
 
 
 def _stats(rows):
-    done = [r for r in rows if r.get("final_r") is not None]
+    done = [r for r in rows if r.get("final_r") is not None and ("trig" not in r or r.get("trig"))]       # untriggered signals are not trades
     if not done:
         return ""
     t1 = sum(1 for r in done if r["reached"] >= 1)

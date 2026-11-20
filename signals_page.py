@@ -198,8 +198,10 @@ def receive(d):
 
 
 # ------------------------------------------------------------------------------------------------------- outcome
-def follow(side, entry, sl, bars, day_over=False):
-    """bars = [(time text, open, high, low, close)] AFTER the signal. Returns dict(reached, exit, final_r, same, times, last)."""
+def follow(side, entry, sl, bars, day_over=False, trigger=False):
+    """bars = [(time text, open, high, low, close)] AFTER the signal. Returns dict(reached, exit, final_r, same, times, last, trig).
+    trigger=True (ADDED 20 Nov): the entry is a STOP entry at the signal candle's HIGH (BUY) / LOW (SELL): the trade starts only when a later candle reaches it. Until then exit stays OPEN with trig = None;
+    if the SL level is touched first the signal is closed as "NO TRIGGER" (no trade, 0 R); a day / follow period that ends untriggered is "NOT TRIGGERED" (decided by the caller)."""
     buy = side == "BUY"
     r = abs(entry - sl)
     if r <= 0:
@@ -207,7 +209,21 @@ def follow(side, entry, sl, bars, day_over=False):
     sg = 1 if buy else -1
     lv = [entry + sg * r * k for k in range(1, 7)]
     stop, stage, times, same = sl, 0, {}, False
-    out = {"reached": 0, "exit": "OPEN", "final_r": None, "same": False, "times": {}, "last": None}
+    out = {"reached": 0, "exit": "OPEN", "final_r": None, "same": False, "times": {}, "last": None, "trig": None}
+    if trigger:
+        k0 = None
+        for k, (t, o, h, l, c) in enumerate(bars):
+            if (h >= entry) if buy else (l <= entry):
+                k0 = k
+                break
+            if (l <= sl) if buy else (h >= sl):
+                out.update(exit="NO TRIGGER", final_r=0.0, last=c, times={"exit": t})
+                return out
+        if k0 is None:
+            out.update(final_r=0.0, last=bars[-1][4] if bars else None, exit="NOT TRIGGERED" if day_over else "OPEN")
+            return out
+        out["trig"] = bars[k0][0]
+        bars = bars[k0:]
     for t, o, h, l, c in bars:
         hit_stop = (l <= stop) if buy else (h >= stop)
         nxt = lv[stage] if stage < 6 else None
