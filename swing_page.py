@@ -1454,51 +1454,82 @@ def _stats(rows):
     return "<p style='color:#9fb0c0'>%d signals followed - T1 reached %d%%, T2 reached %d%%, average result %+.2f R</p>" % (len(done), round(t1 * 100 / len(done)), round(t2 * 100 / len(done)), avg)
 
 
-def page_html(tf=None):
+SEC_INFO = {   # ADDED 20 Nov: every section has its own page (/swing_signals/s/a ... /f); /swing_signals is the menu
+    "a": ("A. Volume spurt (10x or more) + candle closed above the 9, 21 and 60 SMA",
+          "Green candle, volume 10x the average of the 50 candles before it, close above all three SMAs, and it comes from BELOW (within the last 5 candles the price closed below the highest of the 3 SMAs) - so every 10x candle of the move up qualifies. Entry = close, SL = low of the candle."),
+    "b": ("B. Indicator BUY signals (SWEEP, OB MITIGATION, VS BUY, SPURT BUY)",
+          "The ALL IN ONE PRO BUY rules on 30m / 60m candles, with the SMA 9/21/60 distance rule."),
+    "c": ("C. RS vs NIFTY cross up + volume spurt (5x or more)",
+          "The stock / NIFTY line crossed up through its SMA 21 on this candle or the one before (the green arrow of the RS-NIFTY indicator), on a green candle that closes above the 9, 21 and 60 SMA and crosses them (not all at once: some may have been crossed earlier, but this candle completes the cross), with volume 5x the average of the 50 candles before it. Entry = close, SL = low of the candle. Check the room to resistance on the chart before you act."),
+    "d": ("D. EXIT WARNING - RS vs NIFTY cross down + volume spurt (5x or more)",
+          "The opposite of section C, for stocks you HOLD: the stock / NIFTY line crossed DOWN through its SMA 21 on this candle or the one before (the red arrow of the RS-NIFTY indicator), on a red candle that closes below the 9, 21 and 60 SMA and crosses them from above, with volume 5x the average of the 50 candles before it. This is a warning, not a trade: no entry, no targets, no follow-up. The 'SL' column is the candle HIGH, for reference."),
+    "e": ("E. Several signals on the SAME candle",
+          "Stocks that gave 2 or more different BUY signals (sections A, B, C) on the same candle and timeframe, listed together. The signals are also in their own section pages; the stronger the agreement, the more rules the candle met. Each signal keeps its own SL and its own follow-up."),
+    "f": ("F. Volume-spurt stocks holding near (list, no alert)",
+          "Stocks that NOW have: a green volume spurt (5x or more) within the last 10 closed candles (5, 15, 30 or 60 minute candles); the latest close is NOT more than 2% away (1 to 2%, never more) from the spurt candle's close or from the SMA 21 - both distances are shown and the nearest is first; SMA 9 above 21 above 60; and the price crossed above all three SMAs within the last 20 candles. Rebuilt at every swing scan, from candles the scan already downloads (15m, 30m, 60m), and the 5m rows every 10 minutes. It is a list to look at, not a signal: no entry, SL or follow-up."),
+}
+
+
+def _sec_body(sec, rows, tf):
+    """(html of the section, number of entries)."""
+    if sec in ("a", "b", "c"):
+        x = [r for r in rows if r["section"] == sec.upper()][:300]
+        return _table(x, "No signal yet.") + _stats(x), len(x)
+    if sec == "d":
+        x = [r for r in rows if r["section"] == "D"][:300]
+        return _table_warn(x, "No warning yet."), len(x)
+    if sec == "e":
+        g = _same_candle(rows)
+        return _table_same(g, "No candle with several signals yet."), len(g)
+    h = _hold_load()
+    hh = [r for r in h.get("rows", []) if tf not in (30, 60) or r["tf"] == tf]
+    stamp = "<p style='color:#9fb0c0;margin:0 0 6px'>30m / 15m / 60m rows rebuilt at the last swing scan: %s%s</p>" % (
+        html.escape(h.get("at") or "not yet"), ("; 5m rows rebuilt: %s (every 10 minutes, slowest priority)" % html.escape(h["at5"])) if (HOLD5_ON and h.get("at5")) else "")
+    return stamp + _table_hold(hh, "No stock meets all the conditions at the last scan."), len(hh)
+
+
+def page_html(tf=None, sec=None):
+    sec = sec.lower() if sec else None
+    if sec not in SEC_INFO:
+        sec = None
     with _lock:
         rows = list(_load())
     if tf in (30, 60):
         rows = [r for r in rows if r["tf"] == tf]
     rows.sort(key=lambda r: (r["date"], r["candle"]), reverse=True)
-    a = [r for r in rows if r["section"] == "A"][:300]
-    b = [r for r in rows if r["section"] == "B"][:300]
-    cc = [r for r in rows if r["section"] == "C"][:300]
-    dd = [r for r in rows if r["section"] == "D"][:300]
-    hh = [r for r in _hold_load().get("rows", []) if tf not in (30, 60) or r["tf"] == tf]
-    days = sorted({r["date"] for r in rows}, reverse=True)
-    dl = " &middot; ".join("<a href='/swing_signals.csv?date=%s' target='_blank' rel='noopener'>%s</a>" % (d, d[5:]) for d in days[:30])
-    tabs = " ".join("<a href='/swing_signals%s' target='_blank' rel='noopener' style='border:1px solid #8ab4f8;border-radius:6px;padding:4px 12px;%s'>%s</a>" % (
-        q, "background:#8ab4f8;color:#0f1419" if sel else "", lab) for q, sel, lab in (("", tf not in (30, 60), "30m + 60m"), ("?tf=30", tf == 30, "30m only"), ("?tf=60", tf == 60, "60m only")))
+    q = "?tf=%d" % tf if tf in (30, 60) else ""
     sd = _status()
     status = html.escape(sd.get("msg") or "waiting for the next 30-minute candle")
-    return ("<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Swing BUY signals</title>"
-            "<style>body{background:#0f1419;color:#e6edf3;font-family:Arial,sans-serif;margin:18px}table{border-collapse:collapse;width:100%%}th,td{padding:7px 10px;"
+    base = "swing_signals" if sec is None else "swing_signals/s/" + sec
+    tabs = " ".join("<a href='/%s%s' target='_blank' rel='noopener' style='border:1px solid #8ab4f8;border-radius:6px;padding:4px 12px;%s'>%s</a>" % (
+        base, qq, "background:#8ab4f8;color:#0f1419" if sel else "", lab) for qq, sel, lab in (("", tf not in (30, 60), "30m + 60m"), ("?tf=30", tf == 30, "30m only"), ("?tf=60", tf == 60, "60m only")))
+    nav = " ".join("<a href='/swing_signals/s/%s%s' target='_blank' rel='noopener' style='border:1px solid #243040;border-radius:6px;padding:4px 12px;%s'>%s</a>" % (
+        k, q, "background:#8ab4f8;color:#0f1419" if k == sec else "", k.upper()) for k in SEC_INFO)
+    head = ("<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Swing BUY signals</title>"
+            "<style>body{background:#0f1419;color:#e6edf3;font-family:Arial,sans-serif;margin:18px}table{border-collapse:collapse;width:100%}th,td{padding:7px 10px;"
             "border-bottom:1px solid #243040;text-align:left;font-size:14px}th{color:#9fb0c0}a{color:#8ab4f8}h3{margin:22px 0 4px}</style></head><body>"
-            "<h2>SWING BUY signals - 30 minute and 60 minute candles</h2>"
-            "<p style='color:#9fb0c0'>BUY only (delivery), every NSE stock except the thin ones (average traded value under Rs 1 crore a day, or price under Rs 50). A scan runs after every 30-minute candle closes (09:46 ... 15:31); the 60-minute candles are added at the hour candles. "
+            "<h2>SWING BUY signals - 30 minute and 60 minute candles</h2>")
+    nav_p = "<p><a href='/swing_signals%s' target='_blank' rel='noopener' style='border:1px solid #243040;border-radius:6px;padding:4px 12px'>Menu</a> %s</p>" % (q, nav)
+    if sec is not None:
+        body, cnt = _sec_body(sec, rows, tf)
+        return (head + nav_p + "<p>%s &nbsp; <span style='color:#9fb0c0'>%s</span></p><h3>%s</h3><p style='color:#9fb0c0;margin:0 0 6px'>%s</p>%s</body></html>" % (
+            tabs, status, html.escape(SEC_INFO[sec][0]), html.escape(SEC_INFO[sec][1]), body))
+    days = sorted({r["date"] for r in rows}, reverse=True)
+    dl = " &middot; ".join("<a href='/swing_signals.csv?date=%s' target='_blank' rel='noopener'>%s</a>" % (d, d[5:]) for d in days[:30])
+    today = _now().strftime("%Y-%m-%d")
+    items = []
+    for k, (title, desc) in SEC_INFO.items():
+        _b, cnt = _sec_body(k, rows, tf)
+        nt = len([r for r in rows if r["section"] == k.upper() and r["date"] == today]) if k in ("a", "b", "c", "d") else None
+        items.append("<tr><td style='white-space:nowrap'><a href='/swing_signals/s/%s%s' target='_blank' rel='noopener'><b>%s</b></a></td><td><span style='color:#9fb0c0'>%s</span></td><td style='white-space:nowrap'>%s</td></tr>" % (
+            k, q, html.escape(title), html.escape(desc[:150] + ("..." if len(desc) > 150 else "")), ("%d today, %d in all" % (nt, cnt)) if nt is not None else ("%d now" % cnt if k == "f" else "%d in all" % cnt)))
+    return head + ("<p style='color:#9fb0c0'>BUY only (delivery), every NSE stock except the thin ones (average traded value under Rs 1 crore a day, or price under Rs 50). A scan runs after every 30-minute candle closes (09:46 ... 15:31); the 60-minute candles are added at the hour candles. "
             "Every signal is followed for %d days with the same stop cascade as the signals page (SL -1R, T1 -> SL to entry ...). This page places NO order. "
             "<a href='/spurt10_all_in_one_pro_signals' target='_blank' rel='noopener'>5 / 15-minute signals</a> &nbsp;|&nbsp; <a href='/' target='_blank' rel='noopener'>Home</a></p>"
             "<p>%s &nbsp; <a href='/swing_signals/run' style='border:1px solid #8ab4f8;border-radius:6px;padding:4px 12px'>Scan now (no alert)</a> &nbsp; <span style='color:#9fb0c0'>%s &middot; stocks in the list: %s</span><br><span style='color:#6b7c8d;font-size:12px'>%s</span></p>"
             "<p style='color:#9fb0c0'>Download CSV: <a href='/swing_signals.csv' target='_blank' rel='noopener'><b>all days</b></a> &middot; %s</p>"
-            "<h3>A. Volume spurt (10x or more) + candle closed above the 9, 21 and 60 SMA</h3>"
-            "<p style='color:#9fb0c0;margin:0 0 6px'>Green candle, volume 10x the average of the 50 candles before it, close above all three SMAs, and it comes from BELOW (within the last 5 candles the price closed below the highest of the 3 SMAs) - so every 10x candle of the move up qualifies. "
-            "Entry = close, SL = low of the candle.</p>%s%s"
-            "<h3>B. Indicator BUY signals (SWEEP, OB MITIGATION, VS BUY, SPURT BUY)</h3>"
-            "<p style='color:#9fb0c0;margin:0 0 6px'>The ALL IN ONE PRO BUY rules on 30m / 60m candles, with the SMA 9/21/60 distance rule.</p>%s%s"
-            "<h3>C. RS vs NIFTY cross up + volume spurt (5x or more)</h3>"
-            "<p style='color:#9fb0c0;margin:0 0 6px'>The stock / NIFTY line crossed up through its SMA 21 on this candle or the one before (the green arrow of the RS-NIFTY indicator), on a green candle that closes above the 9, 21 and 60 SMA and crosses them (not all at once: some may have been crossed earlier, but this candle completes the cross), with volume 5x the average of the 50 candles before it. "
-            "Entry = close, SL = low of the candle. Check the room to resistance on the chart before you act.</p>%s%s"
-            "<h3>D. EXIT WARNING - RS vs NIFTY cross down + volume spurt (5x or more)</h3>"
-            "<p style='color:#9fb0c0;margin:0 0 6px'>The opposite of section C, for stocks you HOLD: the stock / NIFTY line crossed DOWN through its SMA 21 on this candle or the one before (the red arrow of the RS-NIFTY indicator), on a red candle that closes below the 9, 21 and 60 SMA and crosses them from above, with volume 5x the average of the 50 candles before it. "
-            "This is a warning, not a trade: no entry, no targets, no follow-up. The 'SL' column is the candle HIGH, for reference.</p>%s"
-            "<h3>E. Several signals on the SAME candle</h3>"
-            "<p style='color:#9fb0c0;margin:0 0 6px'>Stocks that gave 2 or more different BUY signals (sections A, B, C) on the same candle and timeframe, listed together. The signals are also in their own sections above; the stronger the agreement, the more rules the candle met. "
-            "Each signal keeps its own SL and its own follow-up.</p>%s"
-            "<h3>F. Volume-spurt stocks holding near (list, no alert)</h3>"
-            "<p style='color:#9fb0c0;margin:0 0 6px'>Stocks that NOW have: a green volume spurt (5x or more) within the last 10 closed candles (5, 15, 30 or 60 minute candles); the latest close is NOT more than 2%% away (1 to 2%%, never more) from the spurt candle's close or from the SMA 21 - both distances are shown and the nearest is first; SMA 9 above 21 above 60; and the price crossed above all three SMAs within the last 20 candles. Rebuilt at every swing scan (last: %s), from candles the scan already downloads (15m, 30m, 60m)%s. It is a list to look at, not a signal: no entry, SL or follow-up.</p>%s</body></html>"
-            ) % (FOLLOW_DAYS, tabs, status, sd.get("universe") or "-", html.escape(UNI_NOTE or "list not built yet"), dl or "-",
-                 _table(a, "No signal yet."), _stats(a), _table(b, "No signal yet."), _stats(b), _table(cc, "No signal yet."), _stats(cc), _table_warn(dd, "No warning yet."), _table_same(_same_candle(rows), "No candle with several signals yet."),
-                 _hold_load().get("at") or "not yet", ("; 5m rows last rebuilt: %s (every 10 minutes, slowest priority)" % _hold_load()["at5"]) if (HOLD5_ON and _hold_load().get("at5")) else "", _table_hold(hh, "No stock meets all the conditions at the last scan."))
+            "<h3>Sections - each one has its own page</h3><table>%s</table></body></html>"
+            ) % (FOLLOW_DAYS, tabs, status, sd.get("universe") or "-", html.escape(UNI_NOTE or "list not built yet"), dl or "-", "".join(items))
 
 
 # ------------------------------------------------------------------------------------------------------- Flask hook
@@ -1507,10 +1538,10 @@ def register(app, admin_check=None):
     import re
     from flask import request, redirect, Response
 
-    def _page():
+    def _page(sec=None):
         try:
             tf = request.args.get("tf", "")
-            return page_html(int(tf) if tf in ("30", "60") else None)
+            return page_html(int(tf) if tf in ("30", "60") else None, sec)
         except Exception:
             log.exception("/swing_signals failed")
             return "<p>Swing signals page failed - see the logs.</p>", 500
@@ -1532,6 +1563,7 @@ def register(app, admin_check=None):
             return "Could not start the scan - see the logs.", 500
 
     app.add_url_rule("/swing_signals", "swingbuy_page", _page, methods=["GET"])
+    app.add_url_rule("/swing_signals/s/<sec>", "swingbuy_sec", _page, methods=["GET"])
     app.add_url_rule("/swing_signals.csv", "swingbuy_csv", _csv, methods=["GET"])
     app.add_url_rule("/swing_signals/run", "swingbuy_run", _run, methods=["GET"])
     try:                                                                                      # ADDED 19 Nov: /daily_scan page (daily_scan.py)
