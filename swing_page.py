@@ -674,6 +674,86 @@ def loop():
             time.sleep(30)
 
 
+# ------------------------------------------------------------------------------------------------------- EARLY SWING ALERT
+# ADDED 20 Nov 2026: a heads-up BEFORE the 30m / 60m candle closes. The Spurt10 early check (spurt10_live._early_once, every 2 minutes) already finds stocks whose volume is
+# spurting inside the forming candle; for those stocks (only) this runs the SAME swing rules (detect()) on the candle AS IT IS NOW. If a rule fires on the forming candle the phone
+# gets "EARLY SWING ALERT - look at these". Information only: it is NOT saved to the swing table, places no order, and the candle can still change before it closes - the real
+# swing alert / page row comes only after the close. Cost: 1 Dhan call per flagged stock (at most EARLY_SWING_MAX_STOCKS per check), at the highest request priority.
+EARLY_SWING_ON = True
+EARLY_SWING_MAX_STOCKS = 15
+EARLY_SWING_ALERTS_PER_DAY = 40
+_early_sw = {"day": "", "n": 0, "done": set()}
+
+
+def early_swing(stocks, now_ist=None):
+    """stocks = [(symbol, security id)] flagged by the early volume spurt. Returns the list of early swing hits (also sent to the phone). Never raises."""
+    try:
+        if not EARLY_SWING_ON or not stocks:
+            return []
+        import live_scanner as ls
+        now_ist = now_ist or _now()
+        today = now_ist.strftime("%Y-%m-%d")
+        if _early_sw["day"] != today:
+            _early_sw.update(day=today, n=0, done=set())
+        if _early_sw["n"] >= EARLY_SWING_ALERTS_PER_DAY:
+            return []
+        now_utc = pd.Timestamp(datetime.now(timezone.utc).replace(tzinfo=None))
+        hits = []
+        for sym, sid in list(stocks)[:EARLY_SWING_MAX_STOCKS]:
+            try:
+                d15 = ls.fetch_intraday_history(sid, "NSE_EQ", 15, HIST_DAYS[60])
+                if d15 is None or d15.empty:
+                    continue
+                for tf, grp in ((30, 2), (60, 4)):
+                    d = ls.build_merged_bars(d15, grp)
+                    n = len(d)
+                    if n < MIN_BARS or d.index[-1] + pd.Timedelta(minutes=tf) <= now_utc:
+                        continue                                                      # the last candle is already closed: the normal scan handles it
+                    key = (sym, tf, str(d.index[-1]))
+                    if key in _early_sw["done"]:
+                        continue
+                    win = np.zeros(n, dtype=bool)
+                    win[n - 1] = True                                                 # ONLY the forming candle
+                    found = [r for r in detect(d, win) if r[0] == n - 1]
+                    if not found:
+                        continue
+                    _early_sw["done"].add(key)
+                    px = float(d["close"].iloc[-1])
+                    names = " + ".join(sorted({r[2] for r in found}))
+                    mx = max([r[5] for r in found if r[5]] or [0.0])
+                    hits.append({"symbol": sym, "tf": tf, "price": px, "sl": float(min(r[4] for r in found)), "signal": names, "mult": mx,
+                                 "candle": (d.index[-1] + pd.Timedelta(minutes=330)).strftime("%H:%M")})
+            except Exception as e:
+                log.warning("early swing: %s failed: %s", sym, e)
+        if hits:
+            _early_sw["n"] += 1
+            _early_swing_send(hits)
+            log.info("early swing alert: %s", [(h["symbol"], h["tf"]) for h in hits])
+        return hits
+    except Exception as e:
+        log.warning("early swing check failed: %s", e)
+        return []
+
+
+def _early_swing_send(hits):
+    topic = os.environ.get("NTFY_TOPIC", "").strip()
+    if not topic or not hits:
+        return
+    lines = ["%s  Rs %s  %dm  %s%s  (SL if it closes like this: %s)" % (h["symbol"], _f(h["price"]), h["tf"], h["signal"], (" %.1fx so far" % h["mult"]) if h["mult"] else "", _f(h["sl"])) for h in hits[:10]]
+    if len(hits) > 10:
+        lines.append("+%d more" % (len(hits) - 10))
+    lines.append("Candle still forming - look at these charts; the real swing alert comes after the candle closes.")
+    body = "\n".join(lines).encode("utf-8")
+    title = "EARLY SWING ALERT - look at these (%d)" % len(hits)
+    try:
+        import requests
+        resp = requests.post("https://ntfy.sh/" + topic, data=body, timeout=8, headers={"Title": title, "Priority": "default", "Tags": "eyes"})
+        if resp.status_code >= 300:
+            log.warning("early swing ntfy refused: %s", resp.status_code)
+    except Exception as e:
+        log.warning("early swing ntfy failed: %s", e)
+
+
 # ------------------------------------------------------------------------------------------------------- CSV / page
 def _csv_row(r):
     vals = [r.get("date"), r.get("candle"), "%dm" % r.get("tf", 0), "A volume spurt + SMA" if r.get("section") == "A" else "B indicator", r.get("symbol"), r.get("signal"), r.get("entry"),

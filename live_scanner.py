@@ -192,14 +192,58 @@ class _RateLimiter:
         self._ok_streak = 0
         self._last_throttle = -1e9
 
+    # ADDED 20 Nov 2026 (PRIORITY): all scanners share ONE Dhan request rate. When several want a request at the same moment the most important goes first:
+    #   0 = the Spurt10 alerts (EARLY volume spurt + Volume spurt >= Nx)   1 = the swing signals scan (swing_page / daily_scan)   2 = everything else.
+    # The priority is read from the call stack (which module is asking), so no other file needs a change. PRIORITY_ON = False -> first come, first served (the old way).
+    PRIORITY_ON = True
+    _PRIO_FILES = (("spurt10_live", 0), ("swing_page", 1), ("daily_scan", 1))
+
+    @classmethod
+    def _priority(cls):
+        try:
+            f = sys._getframe(2)
+            best = 2
+            while f is not None:
+                nm = f.f_globals.get("__name__", "")
+                for key, pr in cls._PRIO_FILES:
+                    if nm == key and pr < best:
+                        best = pr
+                f = f.f_back
+            return best
+        except Exception:
+            return 2
+
+    MAX_STAY = (0, 20.0, 8.0)   # longest a priority 1 / priority 2 request is kept back by more important ones
+    HOLD_SEC = 0.7             # a lower priority caller also stays back this long after a more important request was last seen (workers are never in the queue at every instant)
+
     def wait(self):
+        pr = self._priority() if self.PRIORITY_ON else 2
+        if not hasattr(self, "_waiting"):
+            self._waiting = [0, 0, 0]
+            self._seen = [0.0, 0.0, 0.0]
         with self._lock:
-            now = time.monotonic()
-            start = max(now, self._next)
-            self._next = start + self.interval
-        delay = start - now
-        if delay > 0:
-            time.sleep(delay)
+            self._waiting[pr] += 1
+            self._seen[pr] = time.monotonic()
+        try:
+            t_in = time.monotonic()
+            while pr > 0 and time.monotonic() - t_in < self.MAX_STAY[pr]:      # nobody is held back for ever: after MAX_STAY seconds the request goes ahead
+                with self._lock:
+                    now = time.monotonic()
+                    busy = any(self._waiting[:pr]) or any(now - t < self.HOLD_SEC for t in self._seen[:pr])
+                    if not busy:
+                        break
+                time.sleep(0.05)
+            with self._lock:
+                now = time.monotonic()
+                start = max(now, self._next)
+                self._next = start + self.interval
+            delay = start - now
+            if delay > 0:
+                time.sleep(delay)
+        finally:
+            with self._lock:
+                self._waiting[pr] -= 1
+                self._seen[pr] = time.monotonic()
 
     def throttle(self):
         """Called on every 429. Widens the interval ONCE per burst: several

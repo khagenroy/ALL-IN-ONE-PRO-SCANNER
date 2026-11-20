@@ -4221,6 +4221,13 @@ def _early_once(now_ist):
             log.info(f"Spurt10 EARLY spurt: {[h['symbol'] for h in new]}")
             _early_write(_early["date"])
             _early_send(new)
+        try:                                                           # ADDED 20 Nov: EARLY SWING ALERT - same swing rules on the 30m / 60m candle that is still forming, for the spurt stocks only
+            import swing_page
+            sid_map = dict(uni)
+            top = sorted(cand, key=lambda t: -(t[1] / t[2]))[:swing_page.EARLY_SWING_MAX_STOCKS]
+            swing_page.early_swing([(sy, sid_map[sy]) for sy, _w, _b in top if sy in sid_map and sy not in nsyms and not _thin_now(sy)], now_ist)
+        except Exception as ex:
+            log.warning(f"Spurt10 early swing check failed: {ex}")
     except Exception as e:
         log.warning(f"Spurt10 early check failed: {e}")
 
