@@ -62,7 +62,7 @@ RESULTS_DIR = os.path.join(HERE, "results")
 JSON_PATH = os.path.join(RESULTS_DIR, "swing_signals.json")
 UNI_PATH = os.path.join(RESULTS_DIR, "swing_universe.json")
 CSV_COLS = ["date", "candle", "tf", "section", "symbol", "signal", "entry", "sl", "risk_pct", "t1", "t2", "t6", "resistance", "room_r", "spurt_x", "crossed", "reached", "exit", "final_r",
-            "last_price", "alert", "found_at", "updated", "chg_pct", "nifty_chg_pct", "chg5_pct", "nifty_chg5_pct"]
+            "last_price", "alert", "found_at", "updated", "chg_pct", "nifty_chg_pct", "chg5_pct", "nifty_chg5_pct", "strong_stars", "sequence"]
 COLOURS = {"VOLUME SPURT + SMA": "#00e5ff", "SWEEP": "#ffb300", "OB MITIGATION": "#b388ff", "VS BUY": "#4caf50", "SPURT BUY": "#69f0ae", "RS CROSS + SPURT": "#f48fb1", "RS CROSS DOWN + SPURT": "#ff7070"}
 
 _lock = threading.RLock()
@@ -606,6 +606,157 @@ def rs_cross_down_signals(d, ist, tf):
     return out
 
 
+# ------------------------------------------------------------------------------------------------------- STRONG STOCK = signals in sequence (ADDED 20 Nov 2026)
+# A BUY signal is marked "STRONG STOCK" when the RS vs NIFTY line crossed UP through its SMA 21 shortly BEFORE it (within RS_SEQ_BARS candles, about 3 sessions) and is still above it on the
+# signal candle. Two stars when an earlier BUY signal of another type on the same stock (last SEQ_DAYS days) is in that sequence too. Shown on the page, in phone alerts and in the CSV.
+# It does not change any signal rule.
+RS_SEQ_BARS = {30: 39, 60: 21}
+SEQ_DAYS = 3
+
+
+def rs_first(d, ist, tf, i):
+    """IST text of the most recent RS cross UP within RS_SEQ_BARS candles up to candle i, when the RS line is above its SMA at i; else None."""
+    try:
+        if not RS_ON or not _NIF["t"] or i < RS_SMA_LEN + 2:
+            return None
+        n = len(d)
+        c = d["close"].to_numpy(dtype=float)
+        m = _nifty_by_end(tf)
+        nc = np.full(n, np.nan)
+        lo = max(0, i - RS_SEQ_BARS.get(tf, 39) - RS_SMA_LEN - 2)
+        for j in range(lo, i + 1):
+            e = (ist[j] + pd.Timedelta(minutes=tf)).to_pydatetime().replace(tzinfo=None)
+            for back in (0, 15, 30, 45):
+                x = m.get(e - timedelta(minutes=back))
+                if x:
+                    nc[j] = x
+                    break
+        ratio = c / nc
+        sma = pd.Series(ratio).rolling(RS_SMA_LEN).mean().to_numpy()
+        ok = ~np.isnan(ratio) & ~np.isnan(sma)
+        if not (ok[i] and ratio[i] > sma[i]):
+            return None
+        for k in range(i, max(1, i - RS_SEQ_BARS.get(tf, 39)) - 1, -1):
+            if ok[k] and ok[k - 1] and ratio[k] > sma[k] and not ratio[k - 1] > sma[k - 1]:
+                return ist[k].strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        pass
+    return None
+
+
+def _seq_mark(r, rs_txt):
+    """Sets r['strong'] (0, 1, 2 stars) and r['seq'] (text) for a new swing row. Never raises."""
+    try:
+        earlier = []
+        with _lock:
+            for x in _load():
+                if x is r or x["symbol"] != r["symbol"] or x.get("section") not in ("A", "B", "C") or x["cs"] >= r["cs"] or x["signal"] == r["signal"]:
+                    continue
+                if (datetime.strptime(r["date"], "%Y-%m-%d") - datetime.strptime(x["date"], "%Y-%m-%d")).days > SEQ_DAYS:
+                    continue
+                earlier.append(x)
+        earlier.sort(key=lambda x: x["cs"])
+        seen, parts = set(), []
+        for x in earlier:
+            k = (x["signal"], x["cs"])
+            if k not in seen:
+                seen.add(k)
+                parts.append("%s %s (%dm)" % (x["signal"], datetime.strptime(x["cs"], "%Y-%m-%d %H:%M").strftime("%d %b %H:%M"), x["tf"]))
+        stars, txt = 0, ""
+        if rs_txt:
+            stars = 2 if parts else 1
+            txt = "RS crossed up %s" % datetime.strptime(rs_txt, "%Y-%m-%d %H:%M").strftime("%d %b %H:%M")
+            if parts:
+                txt += ", then " + ", ".join(parts[-3:])
+            txt += ", now " + r["signal"]
+        elif parts:
+            txt = "earlier signals: " + ", ".join(parts[-3:])
+        r["strong"], r["seq"] = stars, txt
+    except Exception as e:
+        log.warning("swing: sequence mark failed: %s", e)
+
+
+# ------------------------------------------------------------------------------------------------------- SECTION F: spurt stocks holding near (ADDED 20 Nov 2026)
+# A LIST (no alert, no follow-up) of stocks that now meet ALL of: a volume spurt (>= HOLD_SPURT_X times the 50 candles before, green candle) within the last HOLD_SPURT_BARS closed candles;
+# the latest close within HOLD_NEAR_PCT of the spurt candle's close OR of the SMA 21 (the nearer one); SMA 9 > 21 > 60; and the price crossed above all three SMAs within the last HOLD_CROSS_BARS candles.
+HOLD_SPURT_X, HOLD_SPURT_BARS, HOLD_NEAR_PCT, HOLD_CROSS_BARS = 5.0, 10, 1.0, 20
+HOLD_PATH = os.path.join(RESULTS_DIR, "swing_holding.json")
+_HOLD = {"rows": [], "at": ""}
+
+
+def holding_row(sym, d, tf, ist):
+    """One list row for this stock / timeframe, or None."""
+    try:
+        n = len(d)
+        if n < max(VOL_AVG, SMAS[-1]) + HOLD_CROSS_BARS + 2:
+            return None
+        c, o, v = (d[k].to_numpy(dtype=float) for k in ("close", "open", "volume"))
+        sm = {k: _sma(c, k) for k in SMAS}
+        i = n - 1
+        if any(np.isnan(sm[k][i]) for k in SMAS) or not (sm[9][i] > sm[21][i] > sm[60][i]):
+            return None
+        sp = None
+        for j in range(i, i - HOLD_SPURT_BARS, -1):                                   # newest spurt first
+            a = v[j - VOL_AVG:j].mean()
+            if c[j] > o[j] and a > 0 and v[j] / a >= HOLD_SPURT_X:
+                sp = (j, v[j] / a)
+                break
+        if sp is None:
+            return None
+        cx = None
+        for k in range(i, i - HOLD_CROSS_BARS, -1):
+            if any(np.isnan(sm[x][k]) or np.isnan(sm[x][k - 1]) for x in SMAS):
+                continue
+            if all(c[k] > sm[x][k] for x in SMAS) and any(c[k - 1] <= sm[x][k - 1] for x in SMAS):
+                cx = k
+                break
+        if cx is None:
+            return None
+        d_sp = abs(c[i] - c[sp[0]]) / c[sp[0]] * 100
+        d_sma = abs(c[i] - sm[21][i]) / sm[21][i] * 100
+        if min(d_sp, d_sma) > HOLD_NEAR_PCT:
+            return None
+        return {"symbol": sym, "tf": tf, "spurt_at": ist[sp[0]].strftime("%Y-%m-%d %H:%M"), "spurt_x": round(float(sp[1]), 1), "spurt_close": round(float(c[sp[0]]), 2),
+                "last": round(float(c[i]), 2), "d_sp": round(float(d_sp), 2), "d_sma": round(float(d_sma), 2), "near": "spurt candle close" if d_sp <= d_sma else "SMA 21",
+                "cross_at": ist[cx].strftime("%Y-%m-%d %H:%M"), "ago": i - sp[0], "last_at": ist[i].strftime("%Y-%m-%d %H:%M")}
+    except Exception as e:
+        log.warning("swing: holding list failed for %s: %s", sym, e)
+        return None
+
+
+def _hold_save(rows):
+    global _HOLD
+    _HOLD = {"rows": rows, "at": _now().strftime("%Y-%m-%d %H:%M")}
+    try:
+        with open(HOLD_PATH, "w") as f:
+            json.dump(_HOLD, f)
+    except Exception as e:
+        log.warning("swing: holding list not saved: %s", e)
+
+
+def _hold_load():
+    global _HOLD
+    try:
+        if not _HOLD["rows"] and os.path.exists(HOLD_PATH):
+            with open(HOLD_PATH) as f:
+                _HOLD = json.load(f)
+    except Exception:
+        pass
+    return _HOLD
+
+
+def _table_hold(rows, empty):
+    if not rows:
+        return "<p style='color:#9fb0c0'>%s</p>" % empty
+    body = []
+    for r in rows:
+        tv = "https://www.tradingview.com/chart/?symbol=NSE%%3A%s&interval=%d" % (html.escape(r["symbol"]), r["tf"])
+        body.append("<tr><td><b><a href='%s' target='_blank' rel='noopener'>%s</a></b></td><td>%dm</td><td>%s</td><td>%sx</td><td>%s</td><td>%s</td><td>%s%%</td><td>%s%%</td><td style='color:#ffd54f'>%s</td><td>%s</td><td>%d</td></tr>" % (
+            tv, html.escape(_sym_label(r["symbol"])), r["tf"], html.escape(r["spurt_at"][5:]), r["spurt_x"], _f(r["spurt_close"]), _f(r["last"]), r["d_sp"], r["d_sma"],
+            html.escape(r["near"]), html.escape(r["cross_at"][5:]), r["ago"]))
+    return ("<table><tr><th>Stock</th><th>TF</th><th>Spurt candle</th><th>Spurt</th><th>Spurt close</th><th>Last close</th><th>From spurt close</th><th>From SMA 21</th><th>Nearer to</th><th>Crossed all SMAs</th><th>Candles since spurt</th></tr>%s</table>" % "".join(body))
+
+
 def scan_frame(sym, d, tf, alert_ok, now_ist):
     """All BUY signals of one stock on one timeframe. d = closed candles. Returns the new rows."""
     new = []
@@ -637,6 +788,8 @@ def scan_frame(sym, d, tf, alert_ok, now_ist):
     for i, sec, nm, entry, sl, mult, crossed in found:
         r = _add(tf, sec, sym, nm, st(i), en(i), entry, sl, mult, crossed, alert_ok, _nearest_res(d, i, entry))
         if r:
+            if sec in ("A", "B", "C"):
+                _seq_mark(r, rs_first(d, ist, tf, i))
             try:                                                                         # stock against NIFTY on the signal day (until the signal candle's close)
                 r["chg"], r["nchg"] = _stock_chg_at(d, ist, i), _nifty_chg_at(en(i))
                 r["chg5"], r["nchg5"] = None, None
@@ -762,7 +915,7 @@ def _notify(items):
     for r in items[:8]:
         blocks.append("SWING TRADING ALERT\n%s - %s (%dm)\nEntry %s | SL %s (%.1f%%)\nT1 %s | T2 %s | T6 %s\nR:R 1 : 1 / 2 / 6 (T1 = 1R, T2 = 2R, T6 = 6R)\nFree room: %s\nCandle %s IST%s" % (
             r["signal"], r["symbol"], r["tf"], _f(r["entry"]), _f(r["sl"]), r["risk_pct"], _f(r["t1"]), _f(r["t2"]), _f(r["t6"]), r.get("room") or "n/a", r["candle"],
-            (" | spurt %sx" % r["spurt_x"]) if r.get("spurt_x") else ""))
+            (" | spurt %sx" % r["spurt_x"]) if r.get("spurt_x") else "") + (("\n%s STRONG STOCK: %s" % ("\u2605" * r["strong"], r["seq"])) if r.get("strong") and r.get("seq") else ""))
     if len(items) > 8:
         blocks.append("+%d more on the swing signals page" % (len(items) - 8))
     body = "\n\n".join(blocks).encode("utf-8")
@@ -825,6 +978,7 @@ def run_scan(tfs=TFS, alerts=True, label=""):
         now_ist = _now()
         fresh = []
         recross = []
+        hold = []
         as_of = pd.Timestamp(datetime.now(timezone.utc).replace(tzinfo=None))
         _nifty_load(ls)
         for k, (sym, sid) in enumerate(uni):
@@ -839,6 +993,9 @@ def run_scan(tfs=TFS, alerts=True, label=""):
                     if d is None or len(d) < MIN_BARS:
                         continue
                     fresh += scan_frame(sym, d, tf, alerts, now_ist)
+                    _hr = holding_row(sym, d, tf, [t + pd.Timedelta(minutes=330) for t in d.index])
+                    if _hr:
+                        hold.append(_hr)
                     _ist_txt = [(t + pd.Timedelta(minutes=330)).strftime("%Y-%m-%d %H:%M") for t in d.index]
                     _follow(sym, tf, d, _ist_txt)
                     try:
@@ -850,6 +1007,8 @@ def run_scan(tfs=TFS, alerts=True, label=""):
             _set(done=k + 1, msg="scanning %d / %d (started %s IST)" % (k + 1, len(uni), _t0))
         with _lock:
             _save()
+        keep = [r for r in _hold_load().get("rows", []) if r["tf"] not in tfs]            # a 30m-only scan must not wipe the 60m rows (and the other way round)
+        _hold_save(sorted(hold + keep, key=lambda r: (min(r["d_sp"], r["d_sma"]), r["symbol"])))
         alert_items = [r for r in fresh if r.get("alert") and r.get("section") != "D"]
         warn_items = [r for r in fresh if r.get("alert") and r.get("section") == "D"]
         if alert_items:
@@ -976,6 +1135,13 @@ def early_swing(stocks, now_ist=None):
                                 if i == n - 1:
                                     _early_sw["done"].add((sym, tf, cs, "rsdn"))
                                     hits.append({"kind": "warn", "symbol": sym, "tf": tf, "price": entry, "sl": hi, "signal": "RS CROSS DOWN + SPURT", "mult": mult, "candle": cstr})
+                    if RS_ON and _NIF["t"]:                                           # ADDED 20 Nov: STRONG STOCK mark on the early buy hits of this stock
+                        _ist2 = [t + pd.Timedelta(minutes=330) for t in d.index]
+                        _rsx = rs_first(d, _ist2, tf, n - 1)
+                        if _rsx:
+                            for _h in hits:
+                                if _h["kind"] == "buy" and _h["symbol"] == sym and _h["tf"] == tf and _h["candle"] == cstr:
+                                    _h["rs"] = datetime.strptime(_rsx, "%Y-%m-%d %H:%M").strftime("%d %b %H:%M")
             except Exception as e:
                 log.warning("early swing: %s failed: %s", sym, e)
         if hits:
@@ -1000,7 +1166,8 @@ def _early_swing_send(hits):
         if not mine:
             continue
         if kind == "buy":
-            lines = ["%s  Rs %s  %dm  %s%s  (SL if it closes like this: %s)" % (h["symbol"], _f(h["price"]), h["tf"], h["signal"], (" %.1fx so far" % h["mult"]) if h["mult"] else "", _f(h["sl"])) for h in mine[:10]]
+            lines = ["%s  Rs %s  %dm  %s%s  (SL if it closes like this: %s)%s" % (h["symbol"], _f(h["price"]), h["tf"], h["signal"], (" %.1fx so far" % h["mult"]) if h["mult"] else "", _f(h["sl"]),
+                     ("\n   \u2605 STRONG STOCK: RS crossed up %s" % h["rs"]) if h.get("rs") else "") for h in mine[:10]]
         else:
             lines = ["%s  Rs %s  %dm  %s%s  (candle high %s)" % (h["symbol"], _f(h["price"]), h["tf"], h["signal"], (" %.1fx so far" % h["mult"]) if h["mult"] else "", _f(h["sl"])) for h in mine[:10]]
         if len(mine) > 10:
@@ -1018,7 +1185,7 @@ def _early_swing_send(hits):
 def _csv_row(r):
     vals = [r.get("date"), r.get("candle"), "%dm" % r.get("tf", 0), {"A": "A volume spurt + SMA", "C": "C RS cross + spurt", "D": "D RS cross DOWN exit warning"}.get(r.get("section"), "B indicator"), r.get("symbol"), r.get("signal"), r.get("entry"),
             r.get("sl"), r.get("risk_pct"), r.get("t1"), r.get("t2"), r.get("t6"), r.get("res"), r.get("room_r"), r.get("spurt_x"), r.get("crossed"), r.get("reached"), r.get("exit"), r.get("final_r"),
-            r.get("last"), "yes" if r.get("alert") else "", r.get("found"), r.get("upd"), r.get("chg"), r.get("nchg"), r.get("chg5"), r.get("nchg5")]
+            r.get("last"), "yes" if r.get("alert") else "", r.get("found"), r.get("upd"), r.get("chg"), r.get("nchg"), r.get("chg5"), r.get("nchg5"), r.get("strong") or "", r.get("seq") or ""]
     return ",".join("" if x is None else str(x).replace(",", " ") for x in vals)
 
 
@@ -1150,6 +1317,16 @@ def _rs_cell(r):
 
 
 
+def _seq_html(r):
+    """The STRONG STOCK mark under the signal name."""
+    st_, tx = r.get("strong") or 0, r.get("seq") or ""
+    if not tx:
+        return ""
+    if st_:
+        return "<br><span style='color:#ffd54f;font-size:12px;font-weight:400'>%s STRONG STOCK - %s</span>" % ("\u2605" * st_, html.escape(tx))
+    return "<br><span style='color:#9fb0c0;font-size:12px;font-weight:400'>%s</span>" % html.escape(tx)
+
+
 def _table(rows, empty):
     if not rows:
         return "<p style='color:#9fb0c0'>%s</p>" % empty
@@ -1160,7 +1337,7 @@ def _table(rows, empty):
         body.append("<tr><td>%s %s</td><td>%dm</td><td><b><a href='%s' target='_blank' rel='noopener'>%s</a></b></td><td style='color:%s;font-weight:700'>%s</td><td>%s</td>"
                     "<td style='color:#ff7070'>%s <span style='color:#9fb0c0'>(%.1f%%)</span></td><td style='color:#7be08a'>%s</td><td style='color:#7be08a'>%s</td><td style='color:%s'>%s</td><td>%s</td><td>%s</td>"
                     "<td>%s</td><td style='color:#9fb0c0'>%s</td></tr>" % (
-                        r["date"][5:], r["candle"], r["tf"], tv, html.escape(_sym_label(r["symbol"])), c, html.escape(r["signal"]), _f(r["entry"]), _f(r["sl"]), r["risk_pct"], _f(r["t1"]), _f(r["t2"]),
+                        r["date"][5:], r["candle"], r["tf"], tv, html.escape(_sym_label(r["symbol"])), c, html.escape(r["signal"]) + _seq_html(r), _f(r["entry"]), _f(r["sl"]), r["risk_pct"], _f(r["t1"]), _f(r["t2"]),
                         "#ff7070" if (r.get("room_r") is not None and r["room_r"] < 1) else "#ffb300", html.escape(r.get("room") or "-"),
                         ("%sx" % r["spurt_x"]) if r.get("spurt_x") else "-", html.escape(r.get("crossed") or "-"), _rs_cell(r), html.escape(_result(r))))
     return ("<table><tr><th>Candle</th><th>TF</th><th>Stock</th><th>Signal</th><th>Entry</th><th>SL (risk)</th><th>T1</th><th>T2</th><th>Room to resistance</th><th>Spurt</th><th>SMAs crossed</th><th>vs Nifty</th><th>What happened</th></tr>"
@@ -1185,7 +1362,7 @@ def _table_same(groups, empty):
     for v in groups[:200]:
         r0 = v[0]
         tv = "https://www.tradingview.com/chart/?symbol=NSE%%3A%s&interval=%d" % (html.escape(r0["symbol"]), r0["tf"])
-        names = "<br>".join("<span style='color:%s;font-weight:700'>%s</span>" % (COLOURS.get(x["signal"], "#9fb0c0"), html.escape(x["signal"])) for x in v)
+        names = "<br>".join("<span style='color:%s;font-weight:700'>%s</span>%s" % (COLOURS.get(x["signal"], "#9fb0c0"), html.escape(x["signal"]), _seq_html(x)) for x in v)
         sls = "<br>".join("<span style='color:#ff7070'>%s</span> <span style='color:#9fb0c0'>(%.1f%%)</span>" % (_f(x["sl"]), x["risk_pct"]) for x in v)
         res = "<br>".join(html.escape(_result(x)) for x in v)
         body.append("<tr><td>%s %s</td><td>%dm</td><td><b><a href='%s' target='_blank' rel='noopener'>%s</a></b></td><td><b>%d</b></td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td style='color:#9fb0c0'>%s</td></tr>" % (
@@ -1226,6 +1403,7 @@ def page_html(tf=None):
     b = [r for r in rows if r["section"] == "B"][:300]
     cc = [r for r in rows if r["section"] == "C"][:300]
     dd = [r for r in rows if r["section"] == "D"][:300]
+    hh = [r for r in _hold_load().get("rows", []) if tf not in (30, 60) or r["tf"] == tf]
     days = sorted({r["date"] for r in rows}, reverse=True)
     dl = " &middot; ".join("<a href='/swing_signals.csv?date=%s' target='_blank' rel='noopener'>%s</a>" % (d, d[5:]) for d in days[:30])
     tabs = " ".join("<a href='/swing_signals%s' target='_blank' rel='noopener' style='border:1px solid #8ab4f8;border-radius:6px;padding:4px 12px;%s'>%s</a>" % (
@@ -1254,9 +1432,12 @@ def page_html(tf=None):
             "This is a warning, not a trade: no entry, no targets, no follow-up. The 'SL' column is the candle HIGH, for reference.</p>%s"
             "<h3>E. Several signals on the SAME candle</h3>"
             "<p style='color:#9fb0c0;margin:0 0 6px'>Stocks that gave 2 or more different BUY signals (sections A, B, C) on the same candle and timeframe, listed together. The signals are also in their own sections above; the stronger the agreement, the more rules the candle met. "
-            "Each signal keeps its own SL and its own follow-up.</p>%s</body></html>"
+            "Each signal keeps its own SL and its own follow-up.</p>%s"
+            "<h3>F. Volume-spurt stocks holding near (list, no alert)</h3>"
+            "<p style='color:#9fb0c0;margin:0 0 6px'>Stocks that NOW have: a green volume spurt (5x or more) within the last 10 closed candles; the latest close within 1%% of the spurt candle's close or of the SMA 21 (the nearer one is shown); SMA 9 above 21 above 60; and the price crossed above all three SMAs within the last 20 candles. Rebuilt at every scan (last: %s). It is a list to look at, not a signal: no entry, SL or follow-up.</p>%s</body></html>"
             ) % (FOLLOW_DAYS, tabs, status, sd.get("universe") or "-", html.escape(UNI_NOTE or "list not built yet"), dl or "-",
-                 _table(a, "No signal yet."), _stats(a), _table(b, "No signal yet."), _stats(b), _table(cc, "No signal yet."), _stats(cc), _table_warn(dd, "No warning yet."), _table_same(_same_candle(rows), "No candle with several signals yet."))
+                 _table(a, "No signal yet."), _stats(a), _table(b, "No signal yet."), _stats(b), _table(cc, "No signal yet."), _stats(cc), _table_warn(dd, "No warning yet."), _table_same(_same_candle(rows), "No candle with several signals yet."),
+                 _hold_load().get("at") or "not yet", _table_hold(hh, "No stock meets all the conditions at the last scan."))
 
 
 # ------------------------------------------------------------------------------------------------------- Flask hook
