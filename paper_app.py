@@ -67,6 +67,16 @@ def install(app):
         bars, err = pe.candles_json(request.args.get("symbol", ""), request.args.get("tf", "5"))
         return jsonify({"ok": bars is not None, "bars": bars or [], "msg": err})
 
+    def api_signals():
+        import paper_sigs as ps
+        d, err = ps.signals_json(request.args.get("symbol", ""), request.args.get("tf", "15"))
+        return jsonify({"ok": d is not None, "signals": (d or {}).get("signals", []), "note": (d or {}).get("note", ""), "msg": err})
+
+    def api_nifty():
+        import paper_sigs as ps
+        b, err = ps.nifty_json(request.args.get("tf", "15"))
+        return jsonify({"ok": b is not None, "bars": b or [], "msg": err})
+
     def _js(name):
         def view():
             with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), name), "rb") as f:
@@ -125,6 +135,8 @@ def install(app):
     add("/paper/api/quote", api_quote)
     add("/paper/api/chartinfo", api_chartinfo)
     add("/paper/api/candles", api_candles)
+    add("/paper/api/signals", api_signals)
+    add("/paper/api/nifty", api_nifty)
     add("/paper/api/lw.js", _js("paper_lw.js"), name="paper_lw_js")
     add("/paper/api/chart.js", _js("paper_chart.js"), name="paper_chart_js")
     for r, f in (("/paper/api/order", api_order), ("/paper/api/modify", api_modify), ("/paper/api/modify_order", api_modify_order), ("/paper/api/close", api_close), ("/paper/api/closeall", api_closeall),

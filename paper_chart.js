@@ -3,7 +3,7 @@
   var LW = window.LightweightCharts, el = document.getElementById('pchart');
   if (!LW || !el) { if (el) el.innerHTML = '<p style="padding:14px;color:#9aa8bf">The chart library could not load.</p>'; return; }
   var OFF = 19800;                                  // show IST on the time axis
-  var IND = { vol: 1, vwap: 1, ema20: 1, zones: 1, spurt: 1, ema9: 0, ema50: 0, sma200: 0, bb: 0, st: 0, rsi: 0, macd: 0, lines: 1 };
+  var IND = { vol: 1, vwap: 1, ema20: 1, zones: 1, spurt: 1, ema9: 0, ema50: 0, sma200: 0, bb: 0, st: 0, rsi: 0, macd: 0, lines: 1, aio: 0, sw: 0, cbox: 0, gap: 0, rsn: 0 };
   try { var sv = JSON.parse(localStorage.getItem('pchart_ind') || 'null'); if (sv) for (var k in sv) IND[k] = sv[k]; } catch (e) {}
   /* ---------- indicator settings (like TradingView): every indicator has its own settings, saved on this device ---------- */
   var DEF = {
@@ -19,6 +19,11 @@
     macd:   { fast: 12, slow: 26, sig: 9, mcol: '#42a5f5', scol: '#ffb74d' },
     spurt:  { mult: 5,  len: 50, color: '#ffd54f' },
     zones:  { zz: 9, nob: 2, atr: 14, sup: '#26a69a', res: '#ef5350', op: 20, lab: 1 },
+    aio:    { color: '#00e5ff', lvl: 1 },
+    sw:     { color: '#00e676', lvl: 1 },
+    cbox:   { color: '#ffd54f', lvl: 1 },
+    gap:    { color: '#ff9800', lvl: 1 },
+    rsn:    { len: 21, up: '#1a9e5c', dn: '#d64545', arr: 1 },
     lines:  {}
   };
   /* rows of the Indicators menu: key, name, settings fields [field, label, type, min, max, step] */
@@ -36,6 +41,11 @@
     ['spurt', 'Volume spurt marks', [['mult', 'Min. spurt (x average)', 'num', 1, 100, 0.5], ['len', 'Average of last N candles', 'num', 5, 200, 1], ['color', 'Colour', 'color']]],
     ['zones', 'Support / resistance zones', [['zz', 'Swing length', 'num', 3, 50, 1], ['nob', 'Zones per side', 'num', 1, 5, 1], ['atr', 'Zone height (ATR length)', 'num', 2, 100, 1],
       ['sup', 'Support colour', 'color'], ['res', 'Resistance colour', 'color'], ['op', 'Fill opacity %', 'num', 5, 80, 1], ['lab', 'Show labels', 'bool']]],
+    ['aio', 'ALL IN ONE PRO (VS BUY, SPURT BUY)', [['color', 'Mark colour', 'color'], ['lvl', 'Draw entry / SL / T1 / T2 of the latest signal', 'bool']]],
+    ['sw', 'ALL IN ONE PRO SWING (Volume spurt + SMA)', [['color', 'Mark colour', 'color'], ['lvl', 'Draw entry / SL / T1 / T2 of the latest signal', 'bool']]],
+    ['cbox', 'CONSOL BOX (strong buy, pullback buy)', [['color', 'Mark colour', 'color'], ['lvl', 'Draw entry / SL / T1 / T2 of the latest signal', 'bool']]],
+    ['gap', 'GAP RETRACE (daily chart)', [['color', 'Mark colour', 'color'], ['lvl', 'Draw entry / SL / T1 / T2 of the latest signal', 'bool']]],
+    ['rsn', 'RS vs NIFTY', [['len', 'SMA length of the line', 'num', 2, 200, 1], ['up', 'Stronger colour', 'color'], ['dn', 'Weaker colour', 'color'], ['arr', 'Arrows on SMA cross', 'bool']]],
     ['lines', 'Entry / SL / target lines', []]
   ];
   var CFG = JSON.parse(JSON.stringify(DEF));
@@ -56,6 +66,7 @@
   }
 
   var TF = '5', sym = '', bars = [], extra = [], plines = [], info = null, S = { levels: {} };
+  var sigs = [], sigKey = '', sigAt = 0, sigBusy = false, sigNote = '', nif = [], nifKey = '', nifAt = 0, nifBusy = false;
   var chart = LW.createChart(el, {
     layout: { background: { color: '#0f1520' }, textColor: '#c8d1e0', panes: { separatorColor: '#2a344a' } },
     grid: { vertLines: { color: '#182033' }, horzLines: { color: '#182033' } },
@@ -133,8 +144,32 @@
   function ser(arr, key) { var o = []; for (var i = 0; i < bars.length; i++) if (arr[i] != null) o.push({ time: T(i), value: arr[i] }); return o; }
   function pl(price, color, title, style) { plines.push(candle.createPriceLine({ price: price, color: color, lineWidth: 1, lineStyle: style == null ? 2 : style, axisLabelVisible: true, title: title })); }
 
+  /* signals of ALL IN ONE PRO / SWING / CONSOL BOX / GAP RETRACE and the Nifty candles come from the server (the same detectors as the scanner pages) */
+  function ensureExtras() {
+    var key = sym + '|' + TF, now = Date.now();
+    if ((IND.aio || IND.sw || IND.cbox || IND.gap) && sym && !sigBusy && (sigKey !== key || now - sigAt > 60000)) {
+      sigBusy = true; var s0 = sym, t0 = TF;
+      fetch('/paper/api/signals?symbol=' + encodeURIComponent(s0) + '&tf=' + t0).then(function (r) { return r.json(); }).then(function (j) {
+        sigBusy = false; sigAt = Date.now(); sigKey = s0 + '|' + t0;
+        if (s0 !== sym || t0 !== TF) { sigKey = ''; ensureExtras(); return; }
+        var changed = JSON.stringify(sigs) !== JSON.stringify(j.signals || []); sigs = j.ok ? (j.signals || []) : []; sigNote = j.ok ? (j.note || '') : (j.msg || '');
+        var cm0 = document.getElementById('pcmsg'); if (cm0 && sigNote && !/Loading/.test(cm0.textContent) && (IND.gap || !j.ok)) cm0.textContent = sigNote;
+        if (changed || sigNote) draw(true);
+      }).catch(function () { sigBusy = false; sigAt = Date.now(); sigKey = key; });
+    }
+    if (IND.rsn && sym && !nifBusy && (nifKey !== TF || now - nifAt > 60000)) {
+      nifBusy = true; var t1 = TF;
+      fetch('/paper/api/nifty?tf=' + t1).then(function (r) { return r.json(); }).then(function (j) {
+        nifBusy = false; nifAt = Date.now(); nifKey = t1;
+        if (t1 !== TF) { nifKey = ''; ensureExtras(); return; }
+        nif = j.ok ? (j.bars || []) : []; if (bars.length) draw(true);
+      }).catch(function () { nifBusy = false; nifAt = Date.now(); nifKey = t1; });
+    }
+  }
+  var SIGTXT = { 'VS BUY': 'VS BUY', 'SPURT BUY': 'SPURT BUY', 'VOLUME SPURT + SMA': 'SPURT+SMA', 'STRONG BUY': 'BOX BUY', 'PULLBACK BUY': 'PB BUY', 'GAP UP PULLBACK BUY': 'GAP BUY' };
+  function HT_TXT() { return htf() ? 'last candle' : 'since yesterday\'s close'; }
   function draw(keepRange) {
-    clearExtra();
+    clearExtra(); ensureExtras();
     chart.applyOptions({ timeScale: { timeVisible: !htf() } });              // dates only on D / W / M
     var cd = bars.map(function (b, i) { return { time: T(i), open: b.o, high: b.h, low: b.l, close: b.c }; });
     candle.setData(cd);
@@ -165,10 +200,58 @@
       hs.setData(bars.map(function (b, i) { return mc[i] != null && sg[i] != null ? { time: T(i), value: mc[i] - sg[i], color: mc[i] - sg[i] >= 0 ? 'rgba(38,166,154,.6)' : 'rgba(239,83,80,.6)' } : { time: T(i) }; })); extra.push(hs);
       line(ser(mc.map(function (v, i) { return sg[i] != null ? v : null; })), CFG.macd.mcol, pane, 1, 'MACD'); line(ser(sg), CFG.macd.scol, pane, 1, 'Signal');
       try { chart.panes()[pane].setHeight(110); } catch (e) {} pane++; }
+    // RS vs NIFTY: stock close / Nifty close, its SMA, green above / red below, arrows where the line crosses its SMA
+    if (IND.rsn && nif.length && bars.length) {
+      var nm = {}; nif.forEach(function (x) { nm[x.t] = x.c; });
+      var rat = [], ti = [], lastn = null, ii;
+      for (ii = 0; ii < bars.length; ii++) { var nv = nm[bars[ii].t]; if (nv == null) nv = lastn; else lastn = nv; if (nv) { rat.push(bars[ii].c / nv); ti.push(ii); } }
+      var rl = +CFG.rsn.len;
+      if (rat.length > rl + 2) {
+        var rs = sma(rat, rl), rd = [], sd = [], mk2 = [], k;
+        for (k = 0; k < rat.length; k++) {
+          if (rs[k] == null) continue; var up2 = rat[k] > rs[k];
+          rd.push({ time: T(ti[k]), value: rat[k], color: up2 ? CFG.rsn.up : CFG.rsn.dn }); sd.push({ time: T(ti[k]), value: rs[k] });
+          if (+CFG.rsn.arr && k > 0 && rs[k - 1] != null) { var pu = rat[k - 1] > rs[k - 1];
+            if (up2 && !pu) mk2.push({ time: T(ti[k]), position: 'belowBar', color: CFG.rsn.up, shape: 'arrowUp', text: '' });
+            if (!up2 && pu) mk2.push({ time: T(ti[k]), position: 'aboveBar', color: CFG.rsn.dn, shape: 'arrowDown', text: '' }); }
+        }
+        var rls = chart.addSeries(LW.LineSeries, { color: CFG.rsn.up, lineWidth: 2, priceLineVisible: false, lastValueVisible: true, crosshairMarkerVisible: false, title: 'RS vs NIFTY', priceFormat: { type: 'price', precision: 4, minMove: 0.0001 } }, pane);
+        rls.setData(rd); extra.push(rls);
+        var rss = chart.addSeries(LW.LineSeries, { color: '#9e9e9e', lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, priceFormat: { type: 'price', precision: 4, minMove: 0.0001 } }, pane);
+        rss.setData(sd); extra.push(rss);
+        try { LW.createSeriesMarkers(rls, mk2); } catch (e) {}
+        try { chart.panes()[pane].setHeight(110); } catch (e) {}
+        pane++;
+        // today's move of the stock against Nifty
+        try {
+          var lb = bars[bars.length - 1], d0 = day(lb.t), pb = null, q;
+          for (q = bars.length - 1; q >= 0; q--) if (day(bars[q].t) < d0) { pb = bars[q]; break; }
+          var ln = nif[nif.length - 1], dn0 = day(ln.t), pn = null;
+          for (q = nif.length - 1; q >= 0; q--) if (day(nif[q].t) < dn0) { pn = nif[q]; break; }
+          var cm = document.getElementById('pcmsg');
+          if (pb && pn && cm && !/Loading/.test(cm.textContent)) { var sc2 = (lb.c / pb.c - 1) * 100, ic = (ln.c / pn.c - 1) * 100, st2 = rat[rat.length - 1] > rs[rs.length - 1];
+            cm.innerHTML = 'RS vs NIFTY: stock <b>' + (sc2 >= 0 ? '+' : '') + sc2.toFixed(2) + '%</b>, Nifty <b>' + (ic >= 0 ? '+' : '') + ic.toFixed(2) + '%</b> today (' + (HT_TXT()) + ') - line ' + (st2 ? '<b style="color:' + CFG.rsn.up + '">above its SMA: STRONGER</b>' : '<b style="color:' + CFG.rsn.dn + '">below its SMA: WEAKER</b>'); }
+        } catch (e) {}
+      }
+    }
     // spurt markers (volume of the candle / average of the 50 candles before it)
     var mk = [];
     var spN = +CFG.spurt.len, spX = +CFG.spurt.mult;
     if (IND.spurt) for (i = spN; i < bars.length; i++) { var s = 0; for (j = i - spN; j < i; j++) s += bars[j].v; var base2 = s / spN; if (base2 > 0 && bars[i].v / base2 >= spX) mk.push({ time: T(i), position: bars[i].c >= bars[i].o ? 'belowBar' : 'aboveBar', color: CFG.spurt.color, shape: 'circle', text: (bars[i].v / base2).toFixed(0) + 'x' }); }
+    // signals of ALL IN ONE PRO / SWING / CONSOL BOX / GAP RETRACE (BUY side): arrow under the candle + the latest signal's levels
+    if (sigs.length && bars.length) {
+      var bt = {}; bars.forEach(function (b, ix) { bt[b.t] = ix; });
+      ['aio', 'sw', 'cbox', 'gap'].forEach(function (g) {
+        if (!IND[g]) return; var last = null;
+        sigs.forEach(function (sg) {
+          if (sg.group !== g || bt[sg.t] == null) return; last = sg;
+          mk.push({ time: T(bt[sg.t]), position: 'belowBar', color: CFG[g].color, shape: 'arrowUp', text: (SIGTXT[sg.name] || sg.name) + (sg.mult ? ' ' + sg.mult + 'x' : '') });
+        });
+        if (last && +CFG[g].lvl) { var lt = (SIGTXT[last.name] || last.name);
+          pl(last.entry, CFG[g].color, lt + ' ENTRY', 0); pl(last.sl, '#ff5252', lt + ' SL', 0); pl(last.t1, '#69f0ae', lt + ' T1', 0); pl(last.t2, '#00e676', lt + ' T2', 0); }
+      });
+      mk.sort(function (a, b) { return a.time - b.time; });
+    }
     markers.setMarkers(mk);
     // zones from the scanner rules
     if (IND.zones && info && info.zones && info.zones.length) { zprim = new ZonePrim(info.zones.map(function (z) { return { type: z.type, lo: z.lo, hi: z.hi, tt: snap(z.t0) }; })); candle.attachPrimitive(zprim); }
@@ -182,7 +265,7 @@
   /* FIX: while the new stock / timeframe was downloading, the old candles stayed on screen under the new name
      (e.g. RELIANCE monthly candles titled ITC M). Now the chart is emptied at once and says it is loading. */
   function blank() {
-    bars = []; clearExtra();
+    bars = []; clearExtra(); sigs = []; sigKey = ''; nif = []; nifKey = '';
     try { candle.setData([]); markers.setMarkers([]); } catch (e) {}
     leg.innerHTML = '<b>' + sym + '</b> ' + tfLabel() + ' &nbsp;<span style="color:#ffd54f">loading candles...</span>';
   }
