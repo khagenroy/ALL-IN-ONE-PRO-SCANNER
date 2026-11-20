@@ -63,7 +63,7 @@ JSON_PATH = os.path.join(RESULTS_DIR, "swing_signals.json")
 UNI_PATH = os.path.join(RESULTS_DIR, "swing_universe.json")
 CSV_COLS = ["date", "candle", "tf", "section", "symbol", "signal", "entry", "sl", "risk_pct", "t1", "t2", "t6", "resistance", "room_r", "spurt_x", "crossed", "reached", "exit", "final_r",
             "last_price", "alert", "found_at", "updated", "chg_pct", "nifty_chg_pct", "chg5_pct", "nifty_chg5_pct"]
-COLOURS = {"VOLUME SPURT + SMA": "#00e5ff", "SWEEP": "#ffb300", "OB MITIGATION": "#b388ff", "VS BUY": "#4caf50", "SPURT BUY": "#69f0ae"}
+COLOURS = {"VOLUME SPURT + SMA": "#00e5ff", "SWEEP": "#ffb300", "OB MITIGATION": "#b388ff", "VS BUY": "#4caf50", "SPURT BUY": "#69f0ae", "RS CROSS + SPURT": "#f48fb1", "RS CROSS DOWN + SPURT": "#ff7070"}
 
 _lock = threading.RLock()
 _rows = None
@@ -196,7 +196,8 @@ def _room_text(entry, sl, res):
 
 def _add(tf, section, sym, name, cand_start, cand_end, entry, sl, spurt_x, crossed, alert_ok, res=None):
     """Adds one signal (once). Returns the new row or None."""
-    if not (entry > sl > 0):
+    warn = section == "D"                                         # D = EXIT WARNING (RS cross down): not a trade, "sl" holds the candle HIGH for reference, no targets, no follow-up
+    if not (warn and sl > entry > 0) and not (not warn and entry > sl > 0):
         return None
     key = "%s|%d|%s|%s" % (sym, tf, name, cand_start)
     with _lock:
@@ -204,12 +205,12 @@ def _add(tf, section, sym, name, cand_start, cand_end, entry, sl, spurt_x, cross
         for r in rows:
             if r.get("key") == key:
                 return None
-        t1, t2, t6 = _levels(entry, sl)
+        t1, t2, t6 = (None, None, None) if warn else _levels(entry, sl)
         age = (_now().replace(tzinfo=None) - cand_end).total_seconds() / 60.0
         row = {"key": key, "date": cand_start[:10], "candle": cand_start[11:16], "tf": tf, "section": section, "symbol": sym, "signal": name,
-               "entry": round(entry, 2), "sl": round(sl, 2), "risk_pct": round((entry - sl) / entry * 100.0, 2), "t1": round(t1, 2), "t2": round(t2, 2), "t6": round(t6, 2),
-               "spurt_x": round(spurt_x, 1) if spurt_x else None, "crossed": crossed, "reached": 0, "exit": "OPEN", "final_r": None, "last": None,
-               "alert": bool(alert_ok and age <= ALERT_MAX_AGE_MIN.get(tf, 60)), "found": _now().strftime("%Y-%m-%d %H:%M"), "upd": "", "cs": cand_start, "res": round(res, 2) if res else None, "room_r": _room_text(entry, sl, res)[0], "room": _room_text(entry, sl, res)[1]}
+               "entry": round(entry, 2), "sl": round(sl, 2), "risk_pct": round(abs(entry - sl) / entry * 100.0, 2), "t1": None if warn else round(t1, 2), "t2": None if warn else round(t2, 2), "t6": None if warn else round(t6, 2),
+               "spurt_x": round(spurt_x, 1) if spurt_x else None, "crossed": crossed, "reached": 0, "exit": "WARNING" if warn else "OPEN", "final_r": None, "last": None,
+               "alert": bool(alert_ok and age <= ALERT_MAX_AGE_MIN.get(tf, 60)), "found": _now().strftime("%Y-%m-%d %H:%M"), "upd": "", "cs": cand_start, "res": round(res, 2) if res else None, "room_r": None if warn else _room_text(entry, sl, res)[0], "room": "" if warn else _room_text(entry, sl, res)[1]}
         rows.append(row)
         return row
 
@@ -491,6 +492,120 @@ def detect(d, win):
     return res
 
 
+# ------------------------------------------------------------------------------------------------------- SECTION C: RS vs NIFTY cross up + volume spurt (ADDED 20 Nov 2026)
+# Same RS vs NIFTY as the TradingView indicator: ratio = stock close / NIFTY close, its SMA 21; "cross up" = the ratio moves from below to above its SMA.
+# Signal: the ratio crossed up on this candle or the one before, this candle is green, closes ABOVE all three price SMAs (9, 21, 60) and is the candle that crosses them (the SMAs need not all be crossed on this candle,
+# but at least one is, and the previous candle was not yet above all three), and its volume is RS_SPURT_MULT x (5x) the average of the 50 candles before it.
+# Entry = close, SL = low of the candle (same as section A). Uses the NIFTY 15-minute candles loaded once per scan (_nifty_load); no NIFTY data = no section C signal, nothing else changes.
+RS_ON = True
+RS_SPURT_MULT = 5.0
+RS_SMA_LEN = 21
+RS_CROSS_WITHIN = 2           # the cross may be on the signal candle or the candle before it
+
+
+def _nifty_by_end(tf):
+    """{candle end (IST) -> NIFTY close of the 15-minute candle that ends there}, built once per scan."""
+    m = _NIF.get("map")
+    if m is None or _NIF.get("map_n") != len(_NIF["t"]):
+        m = {t + timedelta(minutes=15): c for t, c in zip(_NIF["t"], _NIF["c"])}
+        _NIF["map"], _NIF["map_n"] = m, len(_NIF["t"])
+    return m
+
+
+def rs_cross_signals(d, ist, tf):
+    """[(i, entry, sl, volume multiple, text)] for the candles of d (newest candles only, see WIN_BARS)."""
+    out = []
+    if not RS_ON or not _NIF["t"]:
+        return out
+    n = len(d)
+    c = d["close"].to_numpy(dtype=float)
+    o = d["open"].to_numpy(dtype=float)
+    l = d["low"].to_numpy(dtype=float)
+    v = d["volume"].to_numpy(dtype=float)
+    m = _nifty_by_end(tf)
+    nc = np.full(n, np.nan)
+    for i in range(n):
+        e = (ist[i] + pd.Timedelta(minutes=tf)).to_pydatetime().replace(tzinfo=None)
+        for back in (0, 15, 30, 45):                                   # the last 30m / 60m candle of a day is shorter (market closes 15:30): use the last NIFTY candle that ended before it
+            x = m.get(e - timedelta(minutes=back))
+            if x:
+                nc[i] = x
+                break
+    sm = {k: _sma(c, k) for k in SMAS}                                  # price SMAs 9 / 21 / 60: the candle must close above ALL of them, and it must be the candle that completes the cross
+    ratio = c / nc
+    sma = pd.Series(ratio).rolling(RS_SMA_LEN).mean().to_numpy()
+    above = ratio > sma
+    ok = ~np.isnan(ratio) & ~np.isnan(sma)
+    for i in range(max(RS_SMA_LEN + 1, VOL_AVG), n):
+        if not (ok[i] and above[i] and c[i] > o[i] and l[i] > 0 and c[i] > l[i]):
+            continue
+        if any(np.isnan(sm[k][i]) or np.isnan(sm[k][i - 1]) for k in SMAS):
+            continue
+        if not all(c[i] > sm[k][i] for k in SMAS):
+            continue                                                     # not above all three SMAs
+        cr = [k for k in SMAS if c[i - 1] <= sm[k][i - 1]]               # SMAs this candle crossed from below (the others were crossed earlier: not necessary all at once)
+        if not cr:
+            continue                                                     # price was already above all three before this candle: this candle did not cross
+        a = v[i - VOL_AVG:i].mean()
+        if a <= 0 or v[i] / a < RS_SPURT_MULT:
+            continue
+        crossed = False
+        for k in range(i, i - RS_CROSS_WITHIN, -1):
+            if k >= 1 and ok[k] and ok[k - 1] and above[k] and not above[k - 1]:
+                crossed = True
+        if crossed:
+            out.append((i, float(c[i]), float(l[i]), float(v[i] / a), "RS up SMA21; candle crossed SMA " + ",".join(str(k) for k in cr)))
+    return out
+
+
+def rs_cross_down_signals(d, ist, tf):
+    """The opposite of rs_cross_signals: [(i, close, candle high, volume multiple, text)]. The RS line crossed DOWN through its SMA 21 on this candle or the one before, the candle is red,
+    closes BELOW all three SMAs (9, 21, 60), crosses at least one of them from above (the candle before was not yet below all three) and has RS_SPURT_MULT x volume.
+    An EXIT WARNING for a stock you hold (section D) - not a trade."""
+    out = []
+    if not RS_ON or not _NIF["t"]:
+        return out
+    n = len(d)
+    c = d["close"].to_numpy(dtype=float)
+    o = d["open"].to_numpy(dtype=float)
+    h = d["high"].to_numpy(dtype=float)
+    v = d["volume"].to_numpy(dtype=float)
+    m = _nifty_by_end(tf)
+    nc = np.full(n, np.nan)
+    for i in range(n):
+        e = (ist[i] + pd.Timedelta(minutes=tf)).to_pydatetime().replace(tzinfo=None)
+        for back in (0, 15, 30, 45):
+            x = m.get(e - timedelta(minutes=back))
+            if x:
+                nc[i] = x
+                break
+    sm = {k: _sma(c, k) for k in SMAS}
+    ratio = c / nc
+    sma = pd.Series(ratio).rolling(RS_SMA_LEN).mean().to_numpy()
+    below = ratio < sma
+    ok = ~np.isnan(ratio) & ~np.isnan(sma)
+    for i in range(max(RS_SMA_LEN + 1, VOL_AVG), n):
+        if not (ok[i] and below[i] and c[i] < o[i] and h[i] > c[i] > 0):
+            continue
+        if any(np.isnan(sm[k][i]) or np.isnan(sm[k][i - 1]) for k in SMAS):
+            continue
+        if not all(c[i] < sm[k][i] for k in SMAS):
+            continue
+        cr = [k for k in SMAS if c[i - 1] >= sm[k][i - 1]]
+        if not cr:
+            continue
+        a = v[i - VOL_AVG:i].mean()
+        if a <= 0 or v[i] / a < RS_SPURT_MULT:
+            continue
+        crossed = False
+        for k in range(i, i - RS_CROSS_WITHIN, -1):
+            if k >= 1 and ok[k] and ok[k - 1] and below[k] and not below[k - 1]:
+                crossed = True
+        if crossed:
+            out.append((i, float(c[i]), float(h[i]), float(v[i] / a), "RS down SMA21; candle crossed down SMA " + ",".join(str(k) for k in cr)))
+    return out
+
+
 def scan_frame(sym, d, tf, alert_ok, now_ist):
     """All BUY signals of one stock on one timeframe. d = closed candles. Returns the new rows."""
     new = []
@@ -509,7 +624,17 @@ def scan_frame(sym, d, tf, alert_ok, now_ist):
     def en(i):
         return (ist[i] + pd.Timedelta(minutes=tf)).to_pydatetime().replace(tzinfo=None)
 
-    for i, sec, nm, entry, sl, mult, crossed in detect(d, win):
+    found = list(detect(d, win))
+    try:
+        for i, entry, sl, mult, txt in rs_cross_signals(d, ist, tf):
+            if win[i]:
+                found.append((i, "C", "RS CROSS + SPURT", entry, sl, mult, txt))
+        for i, entry, hi, mult, txt in rs_cross_down_signals(d, ist, tf):
+            if win[i]:
+                found.append((i, "D", "RS CROSS DOWN + SPURT", entry, hi, mult, txt))
+    except Exception as e:
+        log.warning("swing: RS cross failed for %s: %s", sym, e)
+    for i, sec, nm, entry, sl, mult, crossed in found:
         r = _add(tf, sec, sym, nm, st(i), en(i), entry, sl, mult, crossed, alert_ok, _nearest_res(d, i, entry))
         if r:
             try:                                                                         # stock against NIFTY on the signal day (until the signal candle's close)
@@ -540,6 +665,86 @@ def _follow(sym, tf, d, ist_txt):
             r.update(reached=res["reached"], exit=res["exit"], final_r=res["final_r"], last=res["last"], upd=_now().strftime("%m-%d %H:%M"))
             if r["exit"] == "OPEN" and (_now().replace(tzinfo=None) - datetime.strptime(r["date"], "%Y-%m-%d")).days > FOLLOW_DAYS:
                 r["exit"] = "10D END"
+
+
+# ------------------------------------------------------------------------------------------------------- RE-CROSS ALERT (ADDED 20 Nov 2026)
+# Every BUY signal of the last FOLLOW_DAYS days - still open, stopped out (failed) or already closed - is watched. When the price closes BELOW its entry and later closes ABOVE the entry again,
+# the newest closed candle gives a phone alert "SWING RE-CROSS ALERT" with the signal's date, time and type, its status and how far it had gone. One alert per crossing candle per signal
+# (the candle is stored in the row as "rc"). Warnings (section D) are not watched. Needs nothing new from Dhan: it uses the candles the scan already downloaded.
+RECROSS_ON = True
+MAX_RECROSS_ALERTS_PER_DAY = 14
+
+
+def _recross(sym, tf, d, ist_txt, alert_ok):
+    """Signals of this stock / timeframe whose entry was crossed UP again by the newest closed candle. Returns the rows (marked)."""
+    out = []
+    if not RECROSS_ON or d is None or len(d) < 3:
+        return out
+    with _lock:
+        mine = [r for r in _load() if r["symbol"] == sym and r["tf"] == tf and r.get("section") != "D"
+                and (_now().replace(tzinfo=None) - datetime.strptime(r["date"], "%Y-%m-%d")).days <= FOLLOW_DAYS]
+    if not mine:
+        return out
+    c = d["close"].to_numpy(dtype=float)
+    last = len(c) - 1
+    for r in mine:
+        below = False
+        cross_j = None
+        for j in range(last + 1):
+            if ist_txt[j] <= r["cs"]:
+                continue
+            if c[j] < r["entry"]:
+                below = True
+            elif below and c[j] > r["entry"]:
+                cross_j, below = j, False
+        if cross_j == last and r.get("rc") != ist_txt[last]:
+            with _lock:
+                r["rc"] = ist_txt[last]
+            try:                                                         # only a FRESH crossing alerts (not the first scan after a restart / over a weekend)
+                end = datetime.strptime(ist_txt[last], "%Y-%m-%d %H:%M") + timedelta(minutes=tf)
+                fresh_ok = (_now().replace(tzinfo=None) - end).total_seconds() / 60.0 <= ALERT_MAX_AGE_MIN.get(tf, 60)
+            except Exception:
+                fresh_ok = False
+            if alert_ok and fresh_ok:
+                out.append((r, float(c[last]), ist_txt[last]))
+    return out
+
+
+def _notify_recross(items):
+    topic = os.environ.get("NTFY_TOPIC", "").strip()
+    if not topic or not items:
+        return
+    today = _now().strftime("%Y-%m-%d")
+    if _st.get("rc_day") != today:
+        _st.update(rc_day=today, rc_n=0)
+    if _st.get("rc_n", 0) >= MAX_RECROSS_ALERTS_PER_DAY:
+        return
+    _st["rc_n"] = _st.get("rc_n", 0) + 1
+    blocks = []
+    for r, px, cand in items[:8]:
+        ex = r.get("exit")
+        status = "OPEN" if ex == "OPEN" else ("FAILED - stop-loss was hit" if ex == "SL" else "closed (%s)" % ex)
+        best = ("best target so far T%d" % r["reached"]) if r.get("reached") else "no target reached"
+        blocks.append("%s (%dm) closed %s - back ABOVE its entry %s\nSignal: %s | given %s %s IST\nStatus: %s | %s | SL %s | T1 %s" % (
+            r["symbol"], r["tf"], _f(px), _f(r["entry"]), r["signal"], r["date"], r["candle"], status, best, _f(r["sl"]), _f(r["t1"])))
+    if len(items) > 8:
+        blocks.append("+%d more" % (len(items) - 8))
+    blocks.append("The price crossed up through the entry of an earlier signal again. Look at the chart before you act.")
+    body = "\n\n".join(blocks).encode("utf-8")
+    title = "SWING RE-CROSS ALERT - price above an earlier signal's entry (%d)" % len(items)
+
+    def _send():
+        try:
+            import requests
+            for attempt in range(3):
+                resp = requests.post("https://ntfy.sh/" + topic, data=body, timeout=10, headers={"Title": title, "Priority": "high", "Tags": "repeat"})
+                if resp.status_code < 300:
+                    return
+                time.sleep(8 * (attempt + 1))
+        except Exception:
+            pass
+
+    threading.Thread(target=_send, daemon=True, name="swing-ntfy-rc").start()
 
 
 # ------------------------------------------------------------------------------------------------------- phone alert
@@ -580,6 +785,32 @@ def _notify(items):
     threading.Thread(target=_send, daemon=True, name="swing-ntfy").start()
 
 
+def _notify_warn(items):
+    """EXIT WARNING phone alert (section D): a stock whose RS line crossed down with a red 5x volume candle below all three SMAs. For stocks you HOLD - not a sell order."""
+    topic = os.environ.get("NTFY_TOPIC", "").strip()
+    if not topic or not items:
+        return
+    lines = ["%s (%dm)  close %s | candle high %s | volume %sx | candle %s IST\n%s" % (r["symbol"], r["tf"], _f(r["entry"]), _f(r["sl"]), r.get("spurt_x") or "-", r["candle"], r.get("crossed") or "") for r in items[:8]]
+    if len(items) > 8:
+        lines.append("+%d more on the swing signals page (section D)" % (len(items) - 8))
+    lines.append("If you hold one of these, look at its chart now. This is a warning, not a sell order.")
+    body = "\n\n".join(lines).encode("utf-8")
+    title = "SWING EXIT WARNING - RS crossed down (%d)" % len(items)
+
+    def _send():
+        try:
+            import requests
+            for attempt in range(3):
+                resp = requests.post("https://ntfy.sh/" + topic, data=body, timeout=10, headers={"Title": title, "Priority": "high", "Tags": "warning"})
+                if resp.status_code < 300:
+                    return
+                time.sleep(8 * (attempt + 1))
+        except Exception:
+            pass
+
+    threading.Thread(target=_send, daemon=True, name="swing-ntfy-warn").start()
+
+
 # ------------------------------------------------------------------------------------------------------- one scan
 def run_scan(tfs=TFS, alerts=True, label=""):
     """Scans the liquid list on the given timeframes. One stock at a time. Returns False if a scan is already running."""
@@ -593,6 +824,7 @@ def run_scan(tfs=TFS, alerts=True, label=""):
         _set(total=len(uni), universe=len(uni), msg="scanning 0 / %d" % len(uni))
         now_ist = _now()
         fresh = []
+        recross = []
         as_of = pd.Timestamp(datetime.now(timezone.utc).replace(tzinfo=None))
         _nifty_load(ls)
         for k, (sym, sid) in enumerate(uni):
@@ -607,15 +839,27 @@ def run_scan(tfs=TFS, alerts=True, label=""):
                     if d is None or len(d) < MIN_BARS:
                         continue
                     fresh += scan_frame(sym, d, tf, alerts, now_ist)
-                    _follow(sym, tf, d, [(t + pd.Timedelta(minutes=330)).strftime("%Y-%m-%d %H:%M") for t in d.index])
+                    _ist_txt = [(t + pd.Timedelta(minutes=330)).strftime("%Y-%m-%d %H:%M") for t in d.index]
+                    _follow(sym, tf, d, _ist_txt)
+                    try:
+                        recross += _recross(sym, tf, d, _ist_txt, alerts)
+                    except Exception as e:
+                        log.warning("swing: re-cross check failed for %s: %s", sym, e)
                 except Exception as e:
                     log.warning("swing: %s %dm failed: %s", sym, tf, e)
             _set(done=k + 1, msg="scanning %d / %d (started %s IST)" % (k + 1, len(uni), _t0))
         with _lock:
             _save()
-        alert_items = [r for r in fresh if r.get("alert")]
+        alert_items = [r for r in fresh if r.get("alert") and r.get("section") != "D"]
+        warn_items = [r for r in fresh if r.get("alert") and r.get("section") == "D"]
         if alert_items:
             _notify(alert_items)
+        if warn_items:
+            _notify_warn(warn_items)
+        if recross:
+            with _lock:
+                _save()
+            _notify_recross(recross)
         _set(found=len(fresh), last_end=_now().strftime("%Y-%m-%d %H:%M"), msg="finished %s IST (%s) - %d new signals" % (_now().strftime("%H:%M"), label or "scan", len(fresh)))
         log.info("swing: scan %s done: %d new signals (%d alerted)", label, len(fresh), len(alert_items))
         return True
@@ -709,20 +953,29 @@ def early_swing(stocks, now_ist=None):
                     n = len(d)
                     if n < MIN_BARS or d.index[-1] + pd.Timedelta(minutes=tf) <= now_utc:
                         continue                                                      # the last candle is already closed: the normal scan handles it
-                    key = (sym, tf, str(d.index[-1]))
-                    if key in _early_sw["done"]:
-                        continue
+                    cs = str(d.index[-1])
+                    cstr = (d.index[-1] + pd.Timedelta(minutes=330)).strftime("%H:%M")
+                    px = float(d["close"].iloc[-1])
                     win = np.zeros(n, dtype=bool)
                     win[n - 1] = True                                                 # ONLY the forming candle
-                    found = [r for r in detect(d, win) if r[0] == n - 1]
-                    if not found:
-                        continue
-                    _early_sw["done"].add(key)
-                    px = float(d["close"].iloc[-1])
-                    names = " + ".join(sorted({r[2] for r in found}))
-                    mx = max([r[5] for r in found if r[5]] or [0.0])
-                    hits.append({"symbol": sym, "tf": tf, "price": px, "sl": float(min(r[4] for r in found)), "signal": names, "mult": mx,
-                                 "candle": (d.index[-1] + pd.Timedelta(minutes=330)).strftime("%H:%M")})
+                    if (sym, tf, cs, "buy") not in _early_sw["done"]:
+                        found = [r for r in detect(d, win) if r[0] == n - 1]
+                        if found:
+                            _early_sw["done"].add((sym, tf, cs, "buy"))
+                            hits.append({"kind": "buy", "symbol": sym, "tf": tf, "price": px, "sl": float(min(r[4] for r in found)), "signal": " + ".join(sorted({r[2] for r in found})),
+                                         "mult": max([r[5] for r in found if r[5]] or [0.0]), "candle": cstr})
+                    if RS_ON and (_NIF["t"] or _nifty_ensure(ls)):                    # ADDED 20 Nov: the RS vs NIFTY cross (sections C and D) on the forming candle
+                        ist = [t + pd.Timedelta(minutes=330) for t in d.index]
+                        if (sym, tf, cs, "rsup") not in _early_sw["done"]:
+                            for i, entry, sl, mult, txt in rs_cross_signals(d, ist, tf):
+                                if i == n - 1:
+                                    _early_sw["done"].add((sym, tf, cs, "rsup"))
+                                    hits.append({"kind": "buy", "symbol": sym, "tf": tf, "price": entry, "sl": sl, "signal": "RS CROSS + SPURT", "mult": mult, "candle": cstr})
+                        if (sym, tf, cs, "rsdn") not in _early_sw["done"]:
+                            for i, entry, hi, mult, txt in rs_cross_down_signals(d, ist, tf):
+                                if i == n - 1:
+                                    _early_sw["done"].add((sym, tf, cs, "rsdn"))
+                                    hits.append({"kind": "warn", "symbol": sym, "tf": tf, "price": entry, "sl": hi, "signal": "RS CROSS DOWN + SPURT", "mult": mult, "candle": cstr})
             except Exception as e:
                 log.warning("early swing: %s failed: %s", sym, e)
         if hits:
@@ -739,24 +992,31 @@ def _early_swing_send(hits):
     topic = os.environ.get("NTFY_TOPIC", "").strip()
     if not topic or not hits:
         return
-    lines = ["%s  Rs %s  %dm  %s%s  (SL if it closes like this: %s)" % (h["symbol"], _f(h["price"]), h["tf"], h["signal"], (" %.1fx so far" % h["mult"]) if h["mult"] else "", _f(h["sl"])) for h in hits[:10]]
-    if len(hits) > 10:
-        lines.append("+%d more" % (len(hits) - 10))
-    lines.append("Candle still forming - look at these charts; the real swing alert comes after the candle closes.")
-    body = "\n".join(lines).encode("utf-8")
-    title = "EARLY SWING ALERT - look at these (%d)" % len(hits)
-    try:
-        import requests
-        resp = requests.post("https://ntfy.sh/" + topic, data=body, timeout=8, headers={"Title": title, "Priority": "default", "Tags": "eyes"})
-        if resp.status_code >= 300:
-            log.warning("early swing ntfy refused: %s", resp.status_code)
-    except Exception as e:
-        log.warning("early swing ntfy failed: %s", e)
+    import requests
+    for kind, title, tail, tag in (
+            ("buy", "EARLY SWING ALERT - look at these (%d)", "Candle still forming - look at these charts; the real swing alert comes after the candle closes.", "eyes"),
+            ("warn", "EARLY EXIT WARNING - RS crossing down (%d) - look if you hold", "Candle still forming - if you hold one of these, look at its chart now. A warning, not a sell order; the page row (section D) comes after the close.", "warning")):
+        mine = [h for h in hits if h.get("kind", "buy") == kind]
+        if not mine:
+            continue
+        if kind == "buy":
+            lines = ["%s  Rs %s  %dm  %s%s  (SL if it closes like this: %s)" % (h["symbol"], _f(h["price"]), h["tf"], h["signal"], (" %.1fx so far" % h["mult"]) if h["mult"] else "", _f(h["sl"])) for h in mine[:10]]
+        else:
+            lines = ["%s  Rs %s  %dm  %s%s  (candle high %s)" % (h["symbol"], _f(h["price"]), h["tf"], h["signal"], (" %.1fx so far" % h["mult"]) if h["mult"] else "", _f(h["sl"])) for h in mine[:10]]
+        if len(mine) > 10:
+            lines.append("+%d more" % (len(mine) - 10))
+        lines.append(tail)
+        try:
+            resp = requests.post("https://ntfy.sh/" + topic, data="\n".join(lines).encode("utf-8"), timeout=8, headers={"Title": title % len(mine), "Priority": "default", "Tags": tag})
+            if resp.status_code >= 300:
+                log.warning("early swing ntfy refused: %s", resp.status_code)
+        except Exception as e:
+            log.warning("early swing ntfy failed: %s", e)
 
 
 # ------------------------------------------------------------------------------------------------------- CSV / page
 def _csv_row(r):
-    vals = [r.get("date"), r.get("candle"), "%dm" % r.get("tf", 0), "A volume spurt + SMA" if r.get("section") == "A" else "B indicator", r.get("symbol"), r.get("signal"), r.get("entry"),
+    vals = [r.get("date"), r.get("candle"), "%dm" % r.get("tf", 0), {"A": "A volume spurt + SMA", "C": "C RS cross + spurt", "D": "D RS cross DOWN exit warning"}.get(r.get("section"), "B indicator"), r.get("symbol"), r.get("signal"), r.get("entry"),
             r.get("sl"), r.get("risk_pct"), r.get("t1"), r.get("t2"), r.get("t6"), r.get("res"), r.get("room_r"), r.get("spurt_x"), r.get("crossed"), r.get("reached"), r.get("exit"), r.get("final_r"),
             r.get("last"), "yes" if r.get("alert") else "", r.get("found"), r.get("upd"), r.get("chg"), r.get("nchg"), r.get("chg5"), r.get("nchg5")]
     return ",".join("" if x is None else str(x).replace(",", " ") for x in vals)
@@ -770,9 +1030,18 @@ def csv_text(day=None):
 
 
 def _result(r):
+    t = _result0(r)
+    if r.get("rc"):
+        t += " | closed above the entry again %s" % r["rc"][5:]
+    return t
+
+
+def _result0(r):
     ex = r.get("exit")
     if ex == "OPEN":
         return "open (best target %s, now %s R)" % ("T%d" % r["reached"] if r.get("reached") else "none", ("%+.2f" % r["final_r"]) if r.get("final_r") is not None else "-")
+    if ex == "WARNING":
+        return "exit warning - not a trade"
     if ex == "SL":
         return "stop-loss hit (-1R)"
     return "closed at %s (%+.2f R)" % (ex, r["final_r"] if r.get("final_r") is not None else 0.0)
@@ -823,8 +1092,19 @@ def _nifty_load(ls):
         if df is not None and len(df):
             _NIF["t"] = [(t + pd.Timedelta(minutes=330)).to_pydatetime().replace(tzinfo=None) for t in df.index]
             _NIF["c"] = [float(x) for x in df["close"]]
+            _NIF["at"] = time.time()
     except Exception as e:
         log.warning("swing: NIFTY candles not available (%s): the vs-Nifty column stays empty", e)
+
+
+def _nifty_ensure(ls):
+    """For the early check: NIFTY candles are normally loaded once per scan; load them here when they are missing or older than 10 minutes. True when available."""
+    try:
+        if not _NIF["t"] or time.time() - _NIF.get("at", 0) > 600:
+            _nifty_load(ls)
+        return bool(_NIF["t"])
+    except Exception:
+        return False
 
 
 def _nifty_chg_at(end_dt):
@@ -887,6 +1167,45 @@ def _table(rows, empty):
             + "".join(body) + "</table>")
 
 
+def _same_candle(rows):
+    """Groups of BUY signals (sections A, B, C) of one stock / timeframe / candle with 2 or more DIFFERENT signal names. Newest first."""
+    g = {}
+    for r in rows:
+        if r.get("section") in ("A", "B", "C"):
+            g.setdefault((r["symbol"], r["tf"], r["cs"]), []).append(r)
+    out = [v for v in g.values() if len({x["signal"] for x in v}) >= 2]
+    out.sort(key=lambda v: (v[0]["date"], v[0]["candle"]), reverse=True)
+    return out
+
+
+def _table_same(groups, empty):
+    if not groups:
+        return "<p style='color:#9fb0c0'>%s</p>" % empty
+    body = []
+    for v in groups[:200]:
+        r0 = v[0]
+        tv = "https://www.tradingview.com/chart/?symbol=NSE%%3A%s&interval=%d" % (html.escape(r0["symbol"]), r0["tf"])
+        names = "<br>".join("<span style='color:%s;font-weight:700'>%s</span>" % (COLOURS.get(x["signal"], "#9fb0c0"), html.escape(x["signal"])) for x in v)
+        sls = "<br>".join("<span style='color:#ff7070'>%s</span> <span style='color:#9fb0c0'>(%.1f%%)</span>" % (_f(x["sl"]), x["risk_pct"]) for x in v)
+        res = "<br>".join(html.escape(_result(x)) for x in v)
+        body.append("<tr><td>%s %s</td><td>%dm</td><td><b><a href='%s' target='_blank' rel='noopener'>%s</a></b></td><td><b>%d</b></td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td style='color:#9fb0c0'>%s</td></tr>" % (
+            r0["date"][5:], r0["candle"], r0["tf"], tv, html.escape(_sym_label(r0["symbol"])), len({x["signal"] for x in v}), names, _f(r0["entry"]), sls, _rs_cell(r0), res))
+    return ("<table><tr><th>Candle</th><th>TF</th><th>Stock</th><th>Signals together</th><th>Signals</th><th>Entry</th><th>SL of each (risk)</th><th>vs Nifty</th><th>What happened (each)</th></tr>"
+            + "".join(body) + "</table>")
+
+
+def _table_warn(rows, empty):
+    if not rows:
+        return "<p style='color:#9fb0c0'>%s</p>" % empty
+    body = []
+    for r in rows:
+        tv = "https://www.tradingview.com/chart/?symbol=NSE%%3A%s&interval=%d" % (html.escape(r["symbol"]), r["tf"])
+        body.append("<tr><td>%s %s</td><td>%dm</td><td><b><a href='%s' target='_blank' rel='noopener'>%s</a></b></td><td style='color:#ff7070;font-weight:700'>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>" % (
+            r["date"][5:], r["candle"], r["tf"], tv, html.escape(_sym_label(r["symbol"])), html.escape(r["signal"]), _f(r["entry"]), _f(r["sl"]),
+            ("%sx" % r["spurt_x"]) if r.get("spurt_x") else "-", html.escape(r.get("crossed") or "-"), _rs_cell(r)))
+    return ("<table><tr><th>Candle</th><th>TF</th><th>Stock</th><th>Signal</th><th>Close</th><th>Candle high</th><th>Spurt</th><th>SMAs crossed down</th><th>vs Nifty</th></tr>" + "".join(body) + "</table>")
+
+
 def _stats(rows):
     done = [r for r in rows if r.get("final_r") is not None]
     if not done:
@@ -905,6 +1224,8 @@ def page_html(tf=None):
     rows.sort(key=lambda r: (r["date"], r["candle"]), reverse=True)
     a = [r for r in rows if r["section"] == "A"][:300]
     b = [r for r in rows if r["section"] == "B"][:300]
+    cc = [r for r in rows if r["section"] == "C"][:300]
+    dd = [r for r in rows if r["section"] == "D"][:300]
     days = sorted({r["date"] for r in rows}, reverse=True)
     dl = " &middot; ".join("<a href='/swing_signals.csv?date=%s' target='_blank' rel='noopener'>%s</a>" % (d, d[5:]) for d in days[:30])
     tabs = " ".join("<a href='/swing_signals%s' target='_blank' rel='noopener' style='border:1px solid #8ab4f8;border-radius:6px;padding:4px 12px;%s'>%s</a>" % (
@@ -924,9 +1245,18 @@ def page_html(tf=None):
             "<p style='color:#9fb0c0;margin:0 0 6px'>Green candle, volume 10x the average of the 50 candles before it, close above all three SMAs, and it comes from BELOW (within the last 5 candles the price closed below the highest of the 3 SMAs) - so every 10x candle of the move up qualifies. "
             "Entry = close, SL = low of the candle.</p>%s%s"
             "<h3>B. Indicator BUY signals (SWEEP, OB MITIGATION, VS BUY, SPURT BUY)</h3>"
-            "<p style='color:#9fb0c0;margin:0 0 6px'>The ALL IN ONE PRO BUY rules on 30m / 60m candles, with the SMA 9/21/60 distance rule.</p>%s%s</body></html>"
+            "<p style='color:#9fb0c0;margin:0 0 6px'>The ALL IN ONE PRO BUY rules on 30m / 60m candles, with the SMA 9/21/60 distance rule.</p>%s%s"
+            "<h3>C. RS vs NIFTY cross up + volume spurt (5x or more)</h3>"
+            "<p style='color:#9fb0c0;margin:0 0 6px'>The stock / NIFTY line crossed up through its SMA 21 on this candle or the one before (the green arrow of the RS-NIFTY indicator), on a green candle that closes above the 9, 21 and 60 SMA and crosses them (not all at once: some may have been crossed earlier, but this candle completes the cross), with volume 5x the average of the 50 candles before it. "
+            "Entry = close, SL = low of the candle. Check the room to resistance on the chart before you act.</p>%s%s"
+            "<h3>D. EXIT WARNING - RS vs NIFTY cross down + volume spurt (5x or more)</h3>"
+            "<p style='color:#9fb0c0;margin:0 0 6px'>The opposite of section C, for stocks you HOLD: the stock / NIFTY line crossed DOWN through its SMA 21 on this candle or the one before (the red arrow of the RS-NIFTY indicator), on a red candle that closes below the 9, 21 and 60 SMA and crosses them from above, with volume 5x the average of the 50 candles before it. "
+            "This is a warning, not a trade: no entry, no targets, no follow-up. The 'SL' column is the candle HIGH, for reference.</p>%s"
+            "<h3>E. Several signals on the SAME candle</h3>"
+            "<p style='color:#9fb0c0;margin:0 0 6px'>Stocks that gave 2 or more different BUY signals (sections A, B, C) on the same candle and timeframe, listed together. The signals are also in their own sections above; the stronger the agreement, the more rules the candle met. "
+            "Each signal keeps its own SL and its own follow-up.</p>%s</body></html>"
             ) % (FOLLOW_DAYS, tabs, status, sd.get("universe") or "-", html.escape(UNI_NOTE or "list not built yet"), dl or "-",
-                 _table(a, "No signal yet."), _stats(a), _table(b, "No signal yet."), _stats(b))
+                 _table(a, "No signal yet."), _stats(a), _table(b, "No signal yet."), _stats(b), _table(cc, "No signal yet."), _stats(cc), _table_warn(dd, "No warning yet."), _table_same(_same_candle(rows), "No candle with several signals yet."))
 
 
 # ------------------------------------------------------------------------------------------------------- Flask hook
