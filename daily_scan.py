@@ -42,7 +42,10 @@ NTFY_PRIORITY = "high"
 
 PATH = os.path.join(sw.RESULTS_DIR, "daily_scan.json")
 STATUS = os.path.join(sw.RESULTS_DIR, "daily_scan_status.json")
-GROUPS = (("ALL IN ONE PRO", "#00e5ff"), ("CONSOL BOX", "#69f0ae"), ("GAP RETRACE", "#ffb300"))
+HOLD_PATH = os.path.join(sw.RESULTS_DIR, "daily_hold.json")   # ADDED 21 Nov: section F of the daily scan, {day: [rows]} (last 30 days)
+_hold_new = []                                                 # rows of section F found during the running scan
+_hold_lock = threading.Lock()
+GROUPS = (("ALL IN ONE PRO", "#00e5ff"), ("CONSOL BOX", "#69f0ae"), ("GAP RETRACE", "#ffb300"), ("RS vs NIFTY", "#ce93d8"))
 _lock = threading.RLock()
 _run_lock = threading.Lock()
 _rows = []
@@ -197,6 +200,40 @@ def gap_retrace_buy(o, h, l, c, win):
     return out
 
 
+def rs_cross_buy(d, win):
+    """Section C of the swing page on DAILY candles (ADDED 21 Nov): [(i, entry = high, sl = low, volume multiple, text)].
+    The stock / NIFTY line crossed UP through its SMA 21 on the signal candle or the one before, on a green candle that closes above the 9, 21 and 60 SMA and crosses at least one of them
+    from below, with 5x or more volume against the average of the 50 candles before. Same rule as the swing page (swing_page.rs_cross_signals)."""
+    out = []
+    if not sw.RS_ON or not _NIFD["dates"]:
+        return out
+    n = len(d)
+    c, o, l, h, v = (d[k].to_numpy(dtype=float) for k in ("close", "open", "low", "high", "volume"))
+    nm = dict(zip(_NIFD["dates"], _NIFD["close"]))
+    nc = np.array([nm.get(pd.Timestamp(t).strftime("%Y-%m-%d"), np.nan) for t in d.index], dtype=float)
+    sm = {k: sw._sma(c, k) for k in sw.SMAS}
+    ratio = c / nc
+    sma = pd.Series(ratio).rolling(sw.RS_SMA_LEN).mean().to_numpy()
+    above = ratio > sma
+    ok = ~np.isnan(ratio) & ~np.isnan(sma)
+    for i in range(max(sw.RS_SMA_LEN + 1, sw.VOL_AVG), n):
+        if not win[i]:
+            continue
+        if not (ok[i] and above[i] and c[i] > o[i] and l[i] > 0 and c[i] > l[i]):
+            continue
+        if any(np.isnan(sm[k][i]) or np.isnan(sm[k][i - 1]) for k in sw.SMAS) or not all(c[i] > sm[k][i] for k in sw.SMAS):
+            continue
+        cr = [k for k in sw.SMAS if c[i - 1] <= sm[k][i - 1]]
+        if not cr:
+            continue
+        a = v[i - sw.VOL_AVG:i].mean()
+        if a <= 0 or v[i] / a < sw.RS_SPURT_MULT:
+            continue
+        if any(k >= 1 and ok[k] and ok[k - 1] and above[k] and not above[k - 1] for k in range(i, i - sw.RS_CROSS_WITHIN, -1)):
+            out.append((i, float(h[i]), float(l[i]), float(v[i] / a), "RS up SMA21; crossed SMA " + " ".join(str(k) for k in cr)))
+    return out
+
+
 def strong_buy(d, win):
     """STRONG BUY of CONSOLIDATION_BOX.pine: a confirmed box breakout UP (spurt10_live._box_breakouts, the same Python copy the scanner uses on the 5-minute candles) that also
     closes above SMA 9, 21 and 60. Entry = close, SL = the bottom of the box. Returns [(i, entry, sl, volume x, box candles)]."""
@@ -223,7 +260,7 @@ def _nifty_load(ls):
     try:
         now = _now().replace(tzinfo=None)
         payload = {"securityId": "13", "exchangeSegment": "IDX_I", "instrument": "INDEX", "expiryCode": 0, "oi": False,
-                   "fromDate": (now - timedelta(days=60)).strftime("%Y-%m-%d"), "toDate": (now + timedelta(days=1)).strftime("%Y-%m-%d")}
+                   "fromDate": (now - timedelta(days=400)).strftime("%Y-%m-%d"), "toDate": (now + timedelta(days=1)).strftime("%Y-%m-%d")}
         nd = _fix_dates(ls._parse_historical(ls._dhan_post("charts/historical", payload, "NIFTY (daily scan)").json()))
         dates = [pd.Timestamp(x).strftime("%Y-%m-%d") for x in nd.index]
         closes = [float(x) for x in nd["close"]]
@@ -325,10 +362,24 @@ def scan_stock(sym, d, now_ist):
     except Exception as e:
         log.warning("daily scan: CONSOL BOX failed for %s: %s", sym, e)
     try:
+        for i, entry, sl, mx, txt in rs_cross_buy(d, win):
+            put("RS vs NIFTY", "RS CROSS + SPURT", i, entry, sl, mx, txt)
+    except Exception as e:
+        log.warning("daily scan: RS cross failed for %s: %s", sym, e)
+    try:
         for i, entry, sl in gap_retrace_buy(o, h, l, c, win):
             put("GAP RETRACE", "GAP UP PULLBACK BUY", i, entry, sl)
     except Exception as e:
         log.warning("daily scan: GAP RETRACE failed for %s: %s", sym, e)
+    try:                                                       # section F (21 Nov): volume spurt within the last 10 daily candles, holding near, SMA 9>21>60, crossed all SMAs within 20 candles (same rule as the swing page, daily candles)
+        hr = sw.holding_row(sym, d, "D", [pd.Timestamp(t) for t in d.index])
+        if hr:
+            hr["chg"], hr["chg5"] = round((c[-1] / c[-2] - 1.0) * 100.0, 2), round((c[-1] / c[-6] - 1.0) * 100.0, 2)
+            nn = _nifty_pct(hr["last_at"][:10])
+            hr["nchg"], hr["nchg5"] = nn if nn else (None, None)
+            _hold_new.append(hr)
+    except Exception as e:
+        log.warning("daily scan: section F failed for %s: %s", sym, e)
     return new
 
 
@@ -436,6 +487,29 @@ def _notify(items):
     threading.Thread(target=_send, daemon=True, name="daily-ntfy").start()
 
 
+def _hold_all():
+    try:
+        with open(HOLD_PATH) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _hold_day_save(day, rows):
+    rows = sorted(rows, key=lambda r: (min(r["d_sp"], r["d_sma"]), r["symbol"]))
+    with _hold_lock:
+        a = _hold_all()
+        a[day] = rows
+        for k in sorted(a)[:-30]:
+            a.pop(k, None)
+        try:
+            with open(HOLD_PATH + ".tmp", "w") as f:
+                json.dump(a, f)
+            os.replace(HOLD_PATH + ".tmp", HOLD_PATH)
+        except Exception as e:
+            log.warning("daily scan: section F not saved: %s", e)
+
+
 def run_scan(alerts=True, label=""):
     """Scans the liquid list once, one stock at a time. Returns the number of stocks with a fresh last candle, or None when a scan is already running."""
     if not _run_lock.acquire(blocking=False):
@@ -450,6 +524,7 @@ def run_scan(alerts=True, label=""):
         now = _now()
         new = []
         newest = ""
+        _hold_new.clear()
         for k, (sym, sid) in enumerate(uni):
             try:
                 d = _daily(sym, sid, ls)
@@ -464,6 +539,8 @@ def run_scan(alerts=True, label=""):
             _set(done=k + 1, msg="scanning %d / %d" % (k + 1, len(uni)))
         with _lock:
             _save()
+        if newest:
+            _hold_day_save(newest, [r for r in _hold_new if r["last_at"][:10] == newest])
         items = [r for r in new if r["date"] == newest]
         if alerts and items:
             _notify(items)
@@ -515,17 +592,22 @@ def loop():
 
 
 # ------------------------------------------------------------------------------------------------------- CSV / page
-COLS = ["date", "group", "symbol", "signal", "entry", "sl", "risk_pct", "t1", "t2", "t6", "resistance", "room_r", "volume_x", "note", "found_at", "chg_pct", "nifty_chg_pct", "chg5_pct", "nifty_chg5_pct"]
+COLS = ["date", "group", "symbol", "signal", "entry", "sl", "risk_pct", "t1", "t2", "t6", "resistance", "room_r", "volume_x", "note", "found_at", "chg_pct", "nifty_chg_pct", "chg5_pct", "nifty_chg5_pct", "signals_same_day"]
 
 
 def csv_text(day=None):
     with _lock:
         rows = [r for r in _load() if (day is None or r["date"] == day)]
     rows.sort(key=lambda r: (r["date"], r["group"], r["symbol"]))
+    with _lock:
+        _all = list(_load())
+    _cnt = {}
+    for r in _all:
+        _cnt.setdefault((r["symbol"], r["date"]), set()).add((r["group"], r["signal"]))
     out = [",".join(COLS)]
     for r in rows:
         vals = [r.get("date"), r.get("group"), r.get("symbol"), r.get("signal"), r.get("entry"), r.get("sl"), r.get("risk_pct"), r.get("t1"), r.get("t2"), r.get("t6"),
-                r.get("res"), r.get("room_r"), r.get("spurt_x"), r.get("extra"), r.get("found"), r.get("chg"), r.get("nchg"), r.get("chg5"), r.get("nchg5")]
+                r.get("res"), r.get("room_r"), r.get("spurt_x"), r.get("extra"), r.get("found"), r.get("chg"), r.get("nchg"), r.get("chg5"), r.get("nchg5"), len(_cnt.get((r["symbol"], r["date"]), ()))]
         out.append(",".join("" if x is None else str(x).replace(",", " ") for x in vals))
     return "\n".join(out) + "\n"
 
@@ -547,6 +629,65 @@ def _table(rows):
             + "".join(body) + "</table>")
 
 
+def _same_day(rows):
+    """Section E: stocks with 2 or more DIFFERENT BUY signals on the same daily candle (any group). Most signals first."""
+    g = {}
+    for r in rows:
+        g.setdefault(r["symbol"], []).append(r)
+    out = [v for v in g.values() if len({(x["group"], x["signal"]) for x in v}) >= 2]
+    out.sort(key=lambda v: (-len({(x["group"], x["signal"]) for x in v}), v[0]["symbol"]))
+    return out
+
+
+def _table_same(groups):
+    if not groups:
+        return "<p style='color:#9fb0c0'>No stock with several signals on this day.</p>"
+    body = []
+    for v in groups:
+        r0 = v[0]
+        tv = "https://www.tradingview.com/chart/?symbol=NSE%%3A%s&interval=D" % html.escape(r0["symbol"])
+        names = "<br>".join("<b>%s</b> <span style='color:#9fb0c0'>(%s)</span>" % (html.escape(x["signal"]), html.escape(x["group"])) for x in v)
+        ent = "<br>".join(sw._f(x["entry"]) for x in v)
+        sls = "<br>".join("<span style='color:#ff7070'>%s</span> <span style='color:#9fb0c0'>(%.1f%%)</span>" % (sw._f(x["sl"]), x["risk_pct"]) for x in v)
+        best = max(v, key=lambda x: (x.get("room_r") is not None, x.get("room_r") or 0))
+        blocked = best.get("room_r") is not None and best["room_r"] < 1
+        body.append("<tr><td>%s</td><td><b><a href='%s' target='_blank' rel='noopener'>%s</a></b></td><td><b>%d</b></td><td>%s</td><td>%s</td><td>%s</td>"
+                    "<td style='color:%s'>%s</td><td>%s</td></tr>" % (
+                        r0["date"][5:], tv, html.escape(sw._sym_label(r0["symbol"])), len({(x["group"], x["signal"]) for x in v}), names, ent, sls,
+                        "#ff7070" if blocked else "#ffb300", html.escape((best.get("room") or "-").split(" [")[0]), sw._rs_cell(r0)))
+    return ("<table><tr><th>Day</th><th>Stock</th><th>Signals together</th><th>Signals</th><th>Entry (above high)</th><th>SL (risk)</th><th>Room (best)</th><th>vs Nifty</th></tr>"
+            + "".join(body) + "</table>")
+
+
+def _table_hold_d(rows, day):
+    if not rows:
+        return "<p style='color:#9fb0c0'>No stock in this list%s.</p>" % ("" if day else " (the list is built by the scan of that day)")
+    body = []
+    for r in rows:
+        tv = "https://www.tradingview.com/chart/?symbol=NSE%%3A%s&interval=D" % html.escape(r["symbol"])
+        nc = r.get("nchg")
+        stronger = nc is not None and r.get("chg") is not None and r["chg"] > nc
+        body.append("<tr><td><b><a href='%s' target='_blank' rel='noopener'>%s</a></b></td><td>%s</td><td>%sx</td><td>%s</td><td>%s</td><td>%s%%</td><td>%s%%</td><td style='color:#ffd54f'>%s</td><td>%s</td><td>%d</td>"
+                    "<td style='color:%s'>%s%% vs Nifty %s%%</td></tr>" % (
+                        tv, html.escape(sw._sym_label(r["symbol"])), html.escape(r["spurt_at"][5:10]), r["spurt_x"], sw._f(r["spurt_close"]), sw._f(r["last"]), r["d_sp"], r["d_sma"],
+                        html.escape(r["near"]), html.escape(r["cross_at"][5:10]), r["ago"],
+                        "#7be08a" if stronger else "#ff7070", "-" if r.get("chg") is None else "%+.1f" % r["chg"], "-" if nc is None else "%+.1f" % nc))
+    return ("<table><tr><th>Stock</th><th>Spurt day</th><th>Spurt</th><th>Spurt close</th><th>Last close</th><th>From spurt close</th><th>From SMA 21</th><th>Nearer to</th>"
+            "<th>Crossed all SMAs</th><th>Days since spurt</th><th>Day move</th></tr>" + "".join(body) + "</table>")
+
+
+def hold_csv(day=None):
+    a = _hold_all()
+    days = [day] if day else sorted(a)
+    out = ["date,symbol,spurt_day,spurt_x,spurt_close,last_close,pct_from_spurt_close,pct_from_sma21,nearer_to,crossed_all_sma_day,days_since_spurt,day_chg_pct,nifty_day_chg_pct,chg5_pct,nifty_chg5_pct"]
+    for dd in days:
+        for r in a.get(dd, []):
+            vals = [dd, r["symbol"], r["spurt_at"][:10], r["spurt_x"], r["spurt_close"], r["last"], r["d_sp"], r["d_sma"], r["near"], r["cross_at"][:10], r["ago"],
+                    r.get("chg"), r.get("nchg"), r.get("chg5"), r.get("nchg5")]
+            out.append(",".join("" if x is None else str(x).replace(",", " ") for x in vals))
+    return "\n".join(out) + "\n"
+
+
 def page_html(day=None):
     with _lock:
         rows = list(_load())
@@ -561,11 +702,17 @@ def page_html(day=None):
     for g, col in GROUPS:
         gr = [r for r in rows if r["group"] == g]
         sections.append("<h3 style='color:%s'>%s &nbsp;<span style='color:#9fb0c0;font-weight:400;font-size:14px'>(%d)</span></h3>%s" % (col, g, len(gr), _table(gr)))
+    same = _same_day(rows)
+    sections.append("<h3 style='color:#ff80ab'>E. SEVERAL SIGNALS ON THE SAME DAY &nbsp;<span style='color:#9fb0c0;font-weight:400;font-size:14px'>(%d stocks)</span></h3>"
+                    "<p style='color:#9fb0c0;margin:0 0 6px'>Stocks that gave 2 or more different BUY signals (any group above) on this daily candle. More signals together = more rules met.</p>%s" % (len(same), _table_same(same)))
+    hrows = _hold_all().get(show, []) if show else []
+    sections.append("<h3 style='color:#ffd54f'>F. VOLUME SPURT, HOLDING NEAR &nbsp;<span style='color:#9fb0c0;font-weight:400;font-size:14px'>(%d)</span></h3>"
+                    "<p style='color:#9fb0c0;margin:0 0 6px'>Daily candles: a green volume spurt (5x or more) within the last 10 daily candles; the close is NOT more than 2%% from the spurt candle close or from the SMA 21; SMA 9 above 21 above 60; the price crossed above all three SMAs within the last 20 days. List only, no alert. <a href='/daily_scan_hold.csv?date=%s' target='_blank' rel='noopener'>Download this list (CSV)</a> &middot; <a href='/daily_scan_hold.csv' target='_blank' rel='noopener'>all days</a></p>%s" % (len(hrows), show or "", _table_hold_d(hrows, show)))
     return ("<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Daily scan</title>"
             "<style>body{background:#0f1419;color:#e6edf3;font-family:Arial,sans-serif;margin:18px}table{border-collapse:collapse;width:100%%}th,td{padding:7px 10px;"
             "border-bottom:1px solid #243040;text-align:left;font-size:14px}th{color:#9fb0c0}a{color:#8ab4f8}h3{margin:22px 0 4px}</style></head><body>"
             "<h2>DAILY SCAN - BUY signals on the daily candle of %s</h2>"
-            "<p style='color:#9fb0c0'>One scan after the close (Mon-Fri %02d:%02d IST), every NSE stock except the thin ones (average traded value under Rs 1 crore a day, or price under Rs 50). ALL IN ONE PRO signals + CONSOL BOX (STRONG BUY, PULLBACK BUY) + GAP RETRACE (gap up, pullback buy). "
+            "<p style='color:#9fb0c0'>One scan after the close (Mon-Fri %02d:%02d IST), every NSE stock except the thin ones (average traded value under Rs 1 crore a day, or price under Rs 50). ALL IN ONE PRO signals + CONSOL BOX (STRONG BUY, PULLBACK BUY) + GAP RETRACE (gap up, pullback buy) + RS vs NIFTY (the stock / Nifty line crossed up its SMA 21 with a 5x volume spurt above the 9, 21 and 60 SMA). "
             "T1 / T2 / T6 = 1R / 2R / 6R. Room to resistance = free distance to the nearest resistance in R. vs Nifty = the stock's move on the signal day and over 5 days against Nifty (green = stronger than Nifty). This page places NO order. "
             "<a href='/swing_signals' target='_blank' rel='noopener'>Swing signals (30m / 60m)</a> &nbsp;|&nbsp; <a href='/' target='_blank' rel='noopener'>Home</a></p>"
             "<p>Days: %s &nbsp; <a href='/daily_scan/run' style='border:1px solid #8ab4f8;border-radius:6px;padding:4px 12px'>Scan now (no alert)</a> &nbsp; <span style='color:#9fb0c0'>%s</span><br><span style='color:#6b7c8d;font-size:12px'>%s</span></p>"
@@ -603,4 +750,11 @@ def register(app, admin_check=None):
 
     app.add_url_rule("/daily_scan", "dailyscan_page", _page, methods=["GET"])
     app.add_url_rule("/daily_scan.csv", "dailyscan_csv", _csv, methods=["GET"])
+    def _hcsv():
+        d = request.args.get("date", "")
+        d = d if re.fullmatch(r"\d{4}-\d{2}-\d{2}", d) else None
+        name = "daily_scan_F_%s.csv" % (datetime.strptime(d, "%Y-%m-%d").strftime("%d-%m-%Y") if d else "all_days")
+        return Response(hold_csv(d), mimetype="text/csv", headers={"Content-Disposition": "attachment; filename=" + name})
+
+    app.add_url_rule("/daily_scan_hold.csv", "dailyscan_hold_csv", _hcsv, methods=["GET"])
     app.add_url_rule("/daily_scan/run", "dailyscan_run", _run, methods=["GET"])
