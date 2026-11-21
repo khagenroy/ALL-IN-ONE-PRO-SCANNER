@@ -35,7 +35,7 @@ COLOURS = {"SWEEP": "#ffb300", "OB MITIGATION": "#b388ff", "VS SELL": "#ff5252",
 DAYS_DIR = os.path.join(sp.RESULTS_DIR, "signals_days")
 IST = timezone(timedelta(hours=5, minutes=30))
 CSV_COLS = ["date", "time", "tf", "symbol", "signal", "side", "entry", "sl", "t1", "t2", "t6", "qty", "source", "reached", "exit", "final_r", "same_candle",
-            "t1_time", "t2_time", "t3_time", "t4_time", "t5_time", "t6_time", "exit_time", "last_price", "updated"]
+            "t1_time", "t2_time", "t3_time", "t4_time", "t5_time", "t6_time", "exit_time", "last_price", "updated", "triggered_at", "stop_entry", "close_from_extreme_pct"]
 _lock = threading.RLock()
 _days = {}          # date -> rows (only days touched in this run are kept in memory)
 _mt = {}            # date -> modified time of the day file when it was last read / written by THIS process
@@ -153,14 +153,19 @@ def _mk(symbol, signal, side, price, sl, t1, t2, t6, qty, source, from_ts, tf=""
             "from_ts": from_ts, "tf": tf, "reached": None, "exit": "OPEN", "final_r": None, "same": False, "times": {}, "last": None, "upd": ""}
 
 
-def add(symbol, signal, side, price, sl, t1, t2, t6=None, qty="", key="", source="scanner", from_ts="", tf=""):
+def add(symbol, signal, side, price, sl, t1, t2, t6=None, qty="", key="", source="scanner", from_ts="", tf="", stop=False, cpos=None):
     """Called by the scanner's own scans. from_ts = 'YYYY-MM-DD HH:MM' = open time of the first 5-minute candle to follow. tf = 5 or 15 (minutes). True when NEW.
     CHANGED 17 Nov: the 10-minute Section A rows of spurt_link.py (source 'section A') are no longer listed here - SWEEP / OB MITIGATION now come from signals_scan.py on 5 and 15 minutes."""
     if source == "section A":
         return False
     row = _mk(symbol, signal, side, price, sl, t1, t2, t6, qty, source, from_ts, tf)
+    if cpos is not None:
+        row["cpos"] = cpos
+    if stop:                                    # 21 Nov: ENTRY = a STOP entry at the signal candle's HIGH (BUY) / LOW (SELL): the trade starts only when a later candle reaches it
+        row["stop"] = True
+        row["trig"] = None
     new = _insert(row, key)
-    if new:
+    if new and not stop:                        # a stop-entry row goes to the scanner auto-trade only AFTER the level is broken (update_outcomes -> scanner_trade.schedule_trigger)
         try:                                    # RESTORED 18 Nov: a NEW scanner signal goes to the scanner auto-trade sender (scanner_trade.py: 1 share via the Dhan bridge; fresh signals only)
             import scanner_trade
             scanner_trade.schedule(row)
@@ -198,7 +203,10 @@ def receive(d):
 
 
 # ------------------------------------------------------------------------------------------------------- outcome
-def follow(side, entry, sl, bars, day_over=False, trigger=False):
+TRIGGER_WAIT = 4        # 21 Nov: a stop-entry signal (5 / 15-minute) is cancelled when its entry level is not broken within this many candles after the signal candle
+
+
+def follow(side, entry, sl, bars, day_over=False, trigger=False, max_wait=None):
     """bars = [(time text, open, high, low, close)] AFTER the signal. Returns dict(reached, exit, final_r, same, times, last, trig).
     trigger=True (ADDED 20 Nov): the entry is a STOP entry at the signal candle's HIGH (BUY) / LOW (SELL): the trade starts only when a later candle reaches it. Until then exit stays OPEN with trig = None;
     if the SL level is touched first the signal is closed as "NO TRIGGER" (no trade, 0 R); a day / follow period that ends untriggered is "NOT TRIGGERED" (decided by the caller)."""
@@ -213,6 +221,8 @@ def follow(side, entry, sl, bars, day_over=False, trigger=False):
     if trigger:
         k0 = None
         for k, (t, o, h, l, c) in enumerate(bars):
+            if max_wait and k >= max_wait:                                    # window over, never broken: cancelled
+                break
             if (h >= entry) if buy else (l <= entry):
                 k0 = k
                 break
@@ -220,7 +230,8 @@ def follow(side, entry, sl, bars, day_over=False, trigger=False):
                 out.update(exit="NO TRIGGER", final_r=0.0, last=c, times={"exit": t})
                 return out
         if k0 is None:
-            out.update(final_r=0.0, last=bars[-1][4] if bars else None, exit="NOT TRIGGERED" if day_over else "OPEN")
+            expired = bool(max_wait) and len(bars) >= max_wait
+            out.update(final_r=0.0, last=bars[-1][4] if bars else None, exit="NOT TRIGGERED" if (day_over or expired) else "OPEN")
             return out
         out["trig"] = bars[k0][0]
         bars = bars[k0:]
@@ -261,11 +272,21 @@ def update_outcomes(symbol, bars, day_over=False):
             if None in (r.get("price"), r.get("sl")):
                 continue
             after = [b for b in bars if b[0] >= r["from_ts"]]
-            res = follow(r["side"], r["price"], r["sl"], after, day_over)
+            stop_mode = bool(r.get("stop"))
+            res = follow(r["side"], r["price"], r["sl"], after, day_over, trigger=stop_mode, max_wait=TRIGGER_WAIT)
             if res is None:
                 continue
-            if (res["reached"], res["exit"], res["final_r"], res["last"]) != (r.get("reached"), r.get("exit"), r.get("final_r"), r.get("last")):
+            if (res["reached"], res["exit"], res["final_r"], res["last"], res.get("trig")) != (r.get("reached"), r.get("exit"), r.get("final_r"), r.get("last"), r.get("trig")):
                 changed = True
+            if stop_mode:
+                newly = bool(res.get("trig")) and not r.get("trig")
+                r["trig"] = res.get("trig")
+                if newly and res["exit"] not in ("NO TRIGGER", "NOT TRIGGERED"):
+                    try:                                  # the level was just broken: now the scanner auto-trade may send it (fresh triggers only)
+                        import scanner_trade
+                        scanner_trade.schedule_trigger(r, res["trig"])
+                    except Exception:
+                        pass
             r.update(reached=res["reached"], exit=res["exit"], final_r=res["final_r"], same=res["same"], times=res["times"], last=res["last"], upd=_now().strftime("%H:%M"))
         if changed:
             _save(day)
@@ -283,7 +304,10 @@ def close_old_days():
             ch = False
             for r in rows:
                 if r.get("exit") == "OPEN":
-                    r["exit"] = "DAY END"
+                    if r.get("stop") and not r.get("trig"):
+                        r["exit"], r["final_r"] = "NOT TRIGGERED", 0.0
+                    else:
+                        r["exit"] = "DAY END"
                     ch = True
             if ch:
                 _save(day)
@@ -294,7 +318,7 @@ def _csv_row(day, r):
     t = r.get("times") or {}
     vals = [day, (r.get("ts") or "")[11:16], r.get("tf") or "", r.get("symbol"), r.get("signal"), r.get("side"), r.get("price"), r.get("sl"), r.get("t1"), r.get("t2"), r.get("t6"), r.get("qty"),
             r.get("src"), r.get("reached"), r.get("exit"), r.get("final_r"), "yes" if r.get("same") else "", t.get("t1", ""), t.get("t2", ""), t.get("t3", ""), t.get("t4", ""),
-            t.get("t5", ""), t.get("t6", ""), t.get("exit", ""), r.get("last"), r.get("upd")]
+            t.get("t5", ""), t.get("t6", ""), t.get("exit", ""), r.get("last"), r.get("upd"), r.get("trig") or "", "yes" if r.get("stop") else "", r.get("cpos")]
     return ",".join("" if v is None else str(v).replace(",", " ") for v in vals)
 
 
@@ -317,6 +341,18 @@ def _read_day(day):
 
 
 def _result_text(r):
+    if str(r.get("fwd") or "").startswith("not sent: rejection"):
+        return "<span style='color:#ffb300'>no order &middot; rejection candle (closed %.0f%% from its %s)</span> " % (r.get("cpos") or 0, "high" if r.get("side") == "BUY" else "low") + _result_text_core(r)
+    return _result_text_core(r)
+
+
+def _result_text_core(r):
+    if r.get("exit") == "NO TRIGGER":
+        return "<span style='color:#9fb0c0'>no trade &middot; the SL level was touched before the entry level</span>"
+    if r.get("exit") == "NOT TRIGGERED":
+        return "<span style='color:#9fb0c0'>no trade &middot; the entry level was not broken within %d candles (cancelled)" % TRIGGER_WAIT + "</span>"
+    if r.get("stop") and r.get("exit") == "OPEN" and not r.get("trig"):
+        return "<span style='color:#ffb300'>waiting for the %s of the signal candle to break</span>" % ("high" if r.get("side") == "BUY" else "low")
     if r.get("exit") == "OPEN" and not r.get("reached"):
         return "<span style='color:#9fb0c0'>OPEN</span>"
     reached = r.get("reached") or 0
@@ -333,6 +369,8 @@ def _result_text(r):
 def _stats(rows):
     st = {}
     for r in rows:
+        if r.get("exit") in ("NO TRIGGER", "NOT TRIGGERED") or (r.get("stop") and not r.get("trig")):
+            continue                                                  # no trade was ever started: not counted
         s = st.setdefault(r["signal"], [0, 0, 0, 0, 0.0, 0])      # n, reached>=1, reached>=2, SL first, sumR, closed/with R
         s[0] += 1
         if (r.get("reached") or 0) >= 1:

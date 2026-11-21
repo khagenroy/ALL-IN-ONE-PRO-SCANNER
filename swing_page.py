@@ -62,7 +62,7 @@ RESULTS_DIR = os.path.join(HERE, "results")
 JSON_PATH = os.path.join(RESULTS_DIR, "swing_signals.json")
 UNI_PATH = os.path.join(RESULTS_DIR, "swing_universe.json")
 CSV_COLS = ["date", "candle", "tf", "section", "symbol", "signal", "entry", "sl", "risk_pct", "t1", "t2", "t6", "resistance", "room_r", "spurt_x", "crossed", "reached", "exit", "final_r",
-            "last_price", "alert", "found_at", "updated", "chg_pct", "nifty_chg_pct", "chg5_pct", "nifty_chg5_pct", "strong_stars", "sequence", "triggered_at"]
+            "last_price", "alert", "found_at", "updated", "chg_pct", "nifty_chg_pct", "chg5_pct", "nifty_chg5_pct", "strong_stars", "sequence", "triggered_at", "bridge", "close_below_high_pct"]
 COLOURS = {"VOLUME SPURT + SMA": "#00e5ff", "SWEEP": "#ffb300", "OB MITIGATION": "#b388ff", "VS BUY": "#4caf50", "SPURT BUY": "#69f0ae", "RS CROSS + SPURT": "#f48fb1", "RS CROSS DOWN + SPURT": "#ff7070"}
 
 _lock = threading.RLock()
@@ -849,6 +849,11 @@ def scan_frame(sym, d, tf, alert_ok, now_ist):
         if r:
             if sec in ("A", "B", "C"):
                 _seq_mark(r, rs_first(d, ist, tf, i))
+                try:                                                                     # 21 Nov: where the signal candle closed inside its own range: % away from its HIGH (a BUY wants a small number)
+                    _rg = float(_hi[i]) - float(d["low"].iloc[i])
+                    r["cpos"] = round((float(_hi[i]) - float(d["close"].iloc[i])) / _rg * 100.0, 1) if _rg > 0 else None
+                except Exception:
+                    pass
             try:                                                                         # stock against NIFTY on the signal day (until the signal candle's close)
                 r["chg"], r["nchg"] = _stock_chg_at(d, ist, i), _nifty_chg_at(en(i))
                 r["chg5"], r["nchg5"] = None, None
@@ -872,15 +877,76 @@ def _follow(sym, tf, d, ist_txt):
             continue
         legacy = "trig" not in r                                                      # rows saved before 20 Nov: entry = close, filled at once
         end = (_now().replace(tzinfo=None) - datetime.strptime(r["date"], "%Y-%m-%d")).days > FOLLOW_DAYS
-        res = spg.follow("BUY", r["entry"], r["sl"], bars, end and not legacy, trigger=not legacy)
+        res = spg.follow("BUY", r["entry"], r["sl"], bars, end and not legacy, trigger=not legacy, max_wait=None if legacy else SWING_TRIGGER_WAIT)
         if res is None:
             continue
+        prev_trig = r.get("trig")
         with _lock:
             r.update(reached=res["reached"], exit=res["exit"], final_r=res["final_r"], last=res["last"], upd=_now().strftime("%m-%d %H:%M"))
             if not legacy:
                 r["trig"] = res.get("trig")
+        if not legacy and res.get("trig") and not prev_trig and res["exit"] == "OPEN":
+            _swing_trade(r)                                                            # 21 Nov: the entry level was just broken -> 1 share, real delivery (CNC), through the bridge
+        with _lock:
             if r["exit"] == "OPEN" and end:
                 r["exit"] = "10D END"
+
+
+# ------------------------------------------------------------------------------------------------------- SWING 1-SHARE DELIVERY BUY (ADDED 21 Nov 2026, named by Khagen: collect real data)
+# When a BUY signal of sections A, B or C breaks the HIGH of its signal candle (the stop entry), the scanner sends it ONCE to the bridge (/swing_buy/...), which buys 1 SHARE for DELIVERY (CNC)
+# at market, puts the signal's SL / T2 on the swing tracker and lets its Auto-sell close it at the SL or T2. Only a FRESH break (the breaking candle closed within SWING_TRADE_FRESH_MIN minutes)
+# and only in market hours is sent, so a restart or a late scan never replays old signals. The result is written into the row (column "bridge" of the CSV). Switch: the bridge's scanner auto-trade ON/OFF.
+SWING_TRADE_ON = True
+SWING_TRIGGER_WAIT = 3          # 21 Nov: a swing signal is cancelled when its entry level (above the signal candle high) is not broken within this many candles of its own timeframe
+SWING_TRADE_SECTIONS = ("A", "B", "C")
+SWING_TRADE_FRESH_MIN = 45
+SWING_TRADE_LAST = (15, 15)          # no order after 15:15 IST
+CLOSE_ZONE_PCT = 25.0                # 21 Nov: the signal candle must have CLOSED within the top 25% of its own range (close - low >= 75% of high - low); a long upper wick = rejection = no order
+
+
+def _swing_trade(r):
+    try:
+        if not SWING_TRADE_ON or r.get("section") not in SWING_TRADE_SECTIONS or r.get("fwd") or not r.get("trig") or None in (r.get("entry"), r.get("sl")):
+            return
+        if r.get("cpos") is not None and r["cpos"] > CLOSE_ZONE_PCT:
+            r["fwd"] = "not sent: rejection - the signal candle closed %.0f%% below its high (limit %.0f%%)" % (r["cpos"], CLOSE_ZONE_PCT)
+            return
+        close = datetime.strptime(r["trig"], "%Y-%m-%d %H:%M") + timedelta(minutes=int(r["tf"]))      # the candle that broke the level, when it closed
+        now = _now().replace(tzinfo=None)
+        if (now - close).total_seconds() / 60.0 > SWING_TRADE_FRESH_MIN:
+            r["fwd"] = "old break - not sent"
+            return
+        if now.weekday() >= 5 or (now.hour, now.minute) > SWING_TRADE_LAST or (now.hour, now.minute) < (9, 20):
+            r["fwd"] = "outside market hours - not sent"
+            return
+        r["fwd"] = "sending"
+        payload = {"symbol": r["symbol"], "side": "buy", "price": r["entry"], "sl": r["sl"], "t1": r.get("t1"), "t2": r.get("t2"), "qty": 1, "tf": int(r["tf"]),
+                   "signal": "%s %s" % (r.get("section"), r.get("signal")), "source": "scanner"}
+        payload = {k: v for k, v in payload.items() if v is not None}
+
+        def _go():
+            try:
+                import requests
+                import scanner_trade
+                url = scanner_trade.BRIDGE_URL.replace("/webhook/", "/swing_buy/")
+                last = ""
+                for n in range(3):
+                    try:
+                        x = requests.post(url, json=payload, timeout=20)
+                        last = "HTTP %s %s" % (x.status_code, (x.text or "")[:80])
+                        if x.status_code < 500:
+                            break
+                    except Exception as e:
+                        last = "error: %s" % e
+                    time.sleep(5)
+                r["fwd"] = "sent to bridge: " + last
+                log.info("swing trade %s %s -> %s", r["symbol"], r.get("signal"), last)
+            except Exception as e:
+                log.warning("swing trade send failed: %s", e)
+
+        threading.Thread(target=_go, daemon=True, name="swing-trade").start()
+    except Exception as e:
+        log.warning("swing trade failed: %s", e)
 
 
 # ------------------------------------------------------------------------------------------------------- RE-CROSS ALERT (ADDED 20 Nov 2026)
@@ -1255,7 +1321,7 @@ def _early_swing_send(hits):
 def _csv_row(r):
     vals = [r.get("date"), r.get("candle"), "%dm" % r.get("tf", 0), {"A": "A volume spurt + SMA", "C": "C RS cross + spurt", "D": "D RS cross DOWN exit warning"}.get(r.get("section"), "B indicator"), r.get("symbol"), r.get("signal"), r.get("entry"),
             r.get("sl"), r.get("risk_pct"), r.get("t1"), r.get("t2"), r.get("t6"), r.get("res"), r.get("room_r"), r.get("spurt_x"), r.get("crossed"), r.get("reached"), r.get("exit"), r.get("final_r"),
-            r.get("last"), "yes" if r.get("alert") else "", r.get("found"), r.get("upd"), r.get("chg"), r.get("nchg"), r.get("chg5"), r.get("nchg5"), r.get("strong") or "", r.get("seq") or "", r.get("trig") or ("not yet" if ("trig" in r and r.get("exit") == "OPEN") else "")]
+            r.get("last"), "yes" if r.get("alert") else "", r.get("found"), r.get("upd"), r.get("chg"), r.get("nchg"), r.get("chg5"), r.get("nchg5"), r.get("strong") or "", r.get("seq") or "", r.get("trig") or ("not yet" if ("trig" in r and r.get("exit") == "OPEN") else ""), r.get("fwd") or "", r.get("cpos")]
     return ",".join("" if x is None else str(x).replace(",", " ") for x in vals)
 
 
@@ -1280,7 +1346,7 @@ def _result0(r):
     if ex == "NO TRIGGER":
         return "no trade: the price fell to the SL level before it broke above the entry"
     if ex == "NOT TRIGGERED":
-        return "no trade: the entry was never broken within the follow-up days"
+        return "no trade: the entry was not broken within %d candles after the signal (cancelled)" % SWING_TRIGGER_WAIT
     if ex == "OPEN":
         return "open%s (best target %s, now %s R)" % ((" - broke the entry %s" % r["trig"][5:]) if r.get("trig") else "", "T%d" % r["reached"] if r.get("reached") else "none", ("%+.2f" % r["final_r"]) if r.get("final_r") is not None else "-")
     if ex == "WARNING":
