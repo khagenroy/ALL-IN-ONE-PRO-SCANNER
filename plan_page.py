@@ -3,7 +3,7 @@ INTRADAY PLAN  (pages: /plan  = make the plan,  /plan/today = what is happening,
 
 Evening work: look at the daily scan (BUY and SELL candidates), study each stock, mark the levels on the 15-minute chart, then type them here:
 tick the stock, choose BUY / SELL, type the ENTRY (BUY: above this price, SELL: below this price) and the STOP LOSS. The plan is for the NEXT trading day.
-Next morning the WATCHER follows ONLY the planned stocks on closed 5-minute candles and sends an order to the bridge (1 share, planned flag) only when the plan comes true:
+Next morning the WATCHER follows ONLY the planned stocks on closed 5-minute candles and sends an order to the bridge (planned flag; the bridge sizes it: risk Rs 2000 per position) only when the plan comes true:
 
   * No order in the first 5 minutes: the first candle (09:15-09:20) is judged only after it closes, so the earliest order is 09:20.
   * BUY: a candle reaches the entry price -> checks -> send. SELL: a candle reaches the entry price from above -> checks -> send.
@@ -14,7 +14,7 @@ Next morning the WATCHER follows ONLY the planned stocks on closed 5-minute cand
   * The order goes only while the breaking candle closed 15 minutes ago or less (a late watcher never replays an old break).
   * 14:30 and nothing broke = EXPIRED (not triggered).
 The bridge takes the order with every rule it has (loss lock, 4 symbols a day, cooldown, 14:30 cutoff, one position per stock) - only the 09:30 start rule is relaxed to 09:20 for a PLANNED order.
-Everything is caught and logged. The page places no order by itself; the watcher sends 1 share through the same bridge webhook as the scanner auto-trade (and the bridge's scanner auto-trade switch must be ON).
+Everything is caught and logged. The page places no order by itself; the watcher sends the order through the same bridge webhook as the scanner auto-trade (quantity = Rs 2000 risk / (entry - SL), set by the bridge) (and the bridge's scanner auto-trade switch must be ON).
 """
 import os
 import re
@@ -43,7 +43,7 @@ MAX_ITEMS = 12
 BRIDGE_URL = "https://dhan-bridge-tv.onrender.com/webhook/khagenindrajeetmuktakabitakartiksanjucta"
 PLAN_PATH = os.path.join(sw.RESULTS_DIR, "intraday_plan.json")
 LOG_PATH = os.path.join(sw.RESULTS_DIR, "plan_log.csv")
-LOG_COLS = ["day", "symbol", "side", "entry", "sl", "status", "reason", "break_candle", "sent_price", "signals", "note", "updated"]
+LOG_COLS = ["day", "symbol", "side", "entry", "sl", "qty", "status", "reason", "break_candle", "sent_price", "signals", "note", "updated"]
 _lock = threading.RLock()
 _started = False
 
@@ -93,7 +93,7 @@ def _log_row(day, it):
             w = csv.writer(f)
             if new:
                 w.writerow(LOG_COLS)
-            w.writerow([day, it["symbol"], it["side"], it["entry"], it["sl"], it["status"], it.get("reason", ""), it.get("brk", ""), it.get("sent_price", ""),
+            w.writerow([day, it["symbol"], it["side"], it["entry"], it["sl"], it.get("qty") or "auto", it["status"], it.get("reason", ""), it.get("brk", ""), it.get("sent_price", ""),
                         it.get("signals", ""), it.get("note", ""), it.get("updated", "")])
     except Exception as e:
         log.warning("plan: log failed: %s", e)
@@ -141,7 +141,9 @@ def evaluate(it, bars, now):
 def _send(it):
     """1 share to the bridge, source scanner, planned flag. Returns the answer text."""
     pay = {"type": "SPURT_CHOCH_BUY" if it["side"] == "BUY" else "SPURT_CHOCH_SELL", "symbol": it["symbol"], "side": it["side"].lower(), "price": it["sent_price"], "sl": float(it["sl"]),
-           "qty": 1, "fixed_lot": "true", "source": "scanner", "tf": 5, "planned": "true"}
+           "qty": 1, "fixed_lot": "false", "source": "scanner", "tf": 5, "planned": "true"}   # no quantity typed: the bridge sizes a planned trade by risk, Rs 2000 / (entry - SL)
+    if it.get("qty"):                                                                 # quantity typed on the plan page: sent exactly as saved
+        pay["qty"], pay["fixed_lot"] = int(it["qty"]), "true"
     last = ""
     for n in range(3):
         try:
@@ -272,9 +274,9 @@ def plan_html(msg=""):
         symcell = ("<b><a href='%s' target='_blank' rel='noopener'>%s</a></b><input type='hidden' name='sym_%d' value='%s'>" % (tv, html.escape(sw._sym_label(sym)), k, html.escape(sym))) if sym else \
                   "<input class='sym' type='text' name='sym_%d' placeholder='SYMBOL'>" % k
         body.append("<tr><td><input type='checkbox' name='tick_%d' value='1'%s></td><td>%s</td><td>%s</td><td><select name='side_%d'><option%s>BUY</option><option%s>SELL</option></select></td>"
-                    "<td><input type='text' name='en_%d' value='%s' inputmode='decimal'></td><td><input type='text' name='sl_%d' value='%s' inputmode='decimal'></td><td><input class='note' type='text' name='note_%d' value='%s'></td></tr>" % (
+                    "<td><input type='text' name='en_%d' value='%s' inputmode='decimal'></td><td><input type='text' name='sl_%d' value='%s' inputmode='decimal'></td><td><input type='text' name='qty_%d' value='%s' inputmode='numeric' placeholder='auto'></td><td><input class='note' type='text' name='note_%d' value='%s'></td></tr>" % (
                         k, " checked" if it else "", symcell, sigs, k, " selected" if side0 == "BUY" else "", " selected" if side0 == "SELL" else "",
-                        k, sw._f(it["entry"]) if it else "", k, sw._f(it["sl"]) if it else "", k, html.escape(it.get("note", "")) if it else ""))
+                        k, sw._f(it["entry"]) if it else "", k, sw._f(it["sl"]) if it else "", k, str(it.get("qty") or "") if it else "", k, html.escape(it.get("note", "")) if it else ""))
         k += 1
 
     for s in syms:
@@ -291,9 +293,9 @@ def plan_html(msg=""):
             "<h2>INTRADAY PLAN for %s</h2>%s<p style='color:#9fb0c0'>Candidates = the daily scan of %s (BUY and SELL, SELL = intraday only). Analyse the stock, mark the levels on the 15-minute chart, then tick it and type "
             "<b>ENTRY</b> (BUY: order only after price goes ABOVE it - SELL: only after price goes BELOW it) and <b>STOP LOSS</b>. Max %d stocks. Saving replaces the whole plan of that day. "
             "Tomorrow the watcher follows only these stocks on closed 5-minute candles; earliest order 09:20; a gap through the entry (more than %.2f R beyond) is skipped; SL touched before the entry = dead; "
-            "a candle that closes more than %d%% away from its high / low (rejection) is skipped. 1 share. <a href='/plan/today'>What is happening today</a> &middot; <a href='/daily_scan'>Daily scan</a> &middot; "
+            "a candle that closes more than %d%% away from its high / low (rejection) is skipped. Qty: type the quantity you want and it is sent exactly as saved; leave it empty and the bridge uses Rs 2000 risk / (entry - SL), rounded down. <a href='/plan/today'>What is happening today</a> &middot; <a href='/daily_scan'>Daily scan</a> &middot; "
             "<a href='/plan/log.csv' target='_blank' rel='noopener'>History (CSV)</a></p>"
-            "<form method='post' action='/plan/save'><table><tr><th>Tick</th><th>Stock</th><th>Daily scan signals</th><th>Side</th><th>Entry</th><th>SL</th><th>Note (your reason)</th></tr>%s</table>"
+            "<form method='post' action='/plan/save'><table><tr><th>Tick</th><th>Stock</th><th>Daily scan signals</th><th>Side</th><th>Entry</th><th>SL</th><th>Qty</th><th>Note (your reason)</th></tr>%s</table>"
             "<p><button class='btn' type='submit'>Save plan</button></p></form></body></html>") % (target, note, day or "-", MAX_ITEMS, GAP_TOL_R, int(CLOSE_ZONE_PCT), "".join(body))
 
 
@@ -305,13 +307,13 @@ def today_html():
     body = []
     for it in items:
         tv = "https://www.tradingview.com/chart/?symbol=NSE%%3A%s&interval=5" % html.escape(it["symbol"])
-        body.append("<tr><td><b><a href='%s' target='_blank' rel='noopener'>%s</a></b></td><td class='%s'>%s</td><td>%s</td><td>%s</td><td style='color:%s;font-weight:700'>%s</td><td>%s</td><td style='color:#9fb0c0'>%s</td></tr>" % (
-            tv, html.escape(sw._sym_label(it["symbol"])), "sell" if it["side"] == "SELL" else "buy", it["side"], sw._f(it["entry"]), sw._f(it["sl"]), col.get(it["status"], "#fff"), it["status"],
+        body.append("<tr><td><b><a href='%s' target='_blank' rel='noopener'>%s</a></b></td><td class='%s'>%s</td><td>%s</td><td>%s</td><td>%s</td><td style='color:%s;font-weight:700'>%s</td><td>%s</td><td style='color:#9fb0c0'>%s</td></tr>" % (
+            tv, html.escape(sw._sym_label(it["symbol"])), "sell" if it["side"] == "SELL" else "buy", it["side"], sw._f(it["entry"]), sw._f(it["sl"]), it.get("qty") or "auto (Rs 2000 risk)", col.get(it["status"], "#fff"), it["status"],
             html.escape(it.get("reason", "")), html.escape(it.get("note", ""))))
     return ("<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><meta http-equiv='refresh' content='30'><title>Plan today</title>" + _CSS.replace("%", "%%") + "</head><body>"
             "<h2>PLAN OF TODAY (%s)</h2><p style='color:#9fb0c0'>Refreshes every 30 seconds. Now %s IST. <a href='/plan'>Edit / make the plan</a> &middot; <a href='/plan/log.csv' target='_blank' rel='noopener'>History (CSV)</a></p>"
             "%s</body></html>") % (now.strftime("%d %b %Y"), now.strftime("%H:%M:%S"),
-                                   ("<table><tr><th>Stock</th><th>Side</th><th>Entry</th><th>SL</th><th>Status</th><th>What happened</th><th>Note</th></tr>" + "".join(body) + "</table>") if body else "<p>No plan for today.</p>")
+                                   ("<table><tr><th>Stock</th><th>Side</th><th>Entry</th><th>SL</th><th>Qty</th><th>Status</th><th>What happened</th><th>Note</th></tr>" + "".join(body) + "</table>") if body else "<p>No plan for today.</p>")
 
 
 def save_form(form, now=None):
@@ -340,6 +342,16 @@ def save_form(form, now=None):
         if side not in ("BUY", "SELL") or en <= 0 or sl <= 0 or (side == "BUY" and sl >= en) or (side == "SELL" and sl <= en):
             errs.append("%s: for a %s the SL must be %s the entry" % (sym, side, "below" if side == "BUY" else "above"))
             continue
+        qraw = str(form.get("qty_%d" % k, "")).strip().replace(",", "")
+        qty = 0
+        if qraw:
+            try:
+                qty = int(float(qraw))
+            except ValueError:
+                qty = -1
+            if qty < 1 or qty > 100000:
+                errs.append("%s: quantity must be a whole number of 1 or more (or empty = Rs 2000 risk)" % sym)
+                continue
         if sym not in uni:
             errs.append("%s: not in the scanner's stock list" % sym)
             continue
@@ -347,7 +359,7 @@ def save_form(form, now=None):
             errs.append("%s: listed twice" % sym)
             continue
         sig = "; ".join("%s %s" % (x.get("side", "BUY"), x["signal"]) for x in g.get(sym, []))
-        items.append({"id": "%s-%d" % (sym, k), "symbol": sym, "sid": uni[sym], "side": side, "entry": round(en, 2), "sl": round(sl, 2), "note": (form.get("note_%d" % k) or "").strip()[:80],
+        items.append({"id": "%s-%d" % (sym, k), "symbol": sym, "sid": uni[sym], "side": side, "entry": round(en, 2), "sl": round(sl, 2), "qty": qty or None, "note": (form.get("note_%d" % k) or "").strip()[:80],
                       "signals": sig, "status": "WAITING", "reason": "", "brk": "", "updated": ""})
     if len(items) > MAX_ITEMS:
         errs.append("more than %d stocks - plan not saved" % MAX_ITEMS)
