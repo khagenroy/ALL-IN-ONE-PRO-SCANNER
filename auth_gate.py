@@ -577,7 +577,7 @@ def add_menu(app):
         ("Spurt scanners", ["/spurt10", "/spurt10_history", "/zone_touch", "/spurt_daily", "/spurt_daily_follow", "/daily_rej", "/daily_zone", "/daily_weak", "/spurt_flush", "/spurt_red", "/spurt_buy", "/spurt_sweep", "/spurt_sell", "/spurt_paper", "/spurtpb", "/volspurt", "/spz"]),
         ("Spurt10 sections", ["/spurt10_main", "/spurt10_all_in_one_pro_signals", "/spurt10_all_in_one_pro_signals_daily", "/spurt10_early", "/spurt10_ob", "/spurt10_wick", "/spurt10_rejres", "/spurt10_rejsup", "/spurt10_engbull", "/spurt10_engbear", "/spurt10_room", "/spurt10_roomdown", "/spurt10_zsell", "/spurt10_upper", "/spurt10_gap", "/spurt10_orb", "/spurt10_watch", "/spurt10_news", "/spurt10_thin", "/depth"]),
         ("SMA / Trend", ["/sma200", "/sma200now", "/trendnow"]),
-        ("Investing", ["/invest", "/swing_signals", "/swing_signals/run", "/daily_scan", "/daily_scan/run"]),
+        ("Daily scan / Swing / Plan", ["/daily_scan", "/daily_scan/run", "/plan", "/plan/today", "/swing_signals", "/swing_signals/run", "/daily_strong", "/daily_zone/run", "/invest"]),          # 21 Nov: the swing / investing pages together (Investing had only one button)
         ("Practice trading", ["/paper", "/paper/history", "/paper/leaderboard", "/paper/help"]),
         ("OI zones / ORB", ["/oizones", "/oizones_signals", "/orb"]),
         ("Best setups", ["/best", "/bestnow"]),
@@ -629,10 +629,14 @@ def add_menu(app):
             return out
 
         cards = ""
+        bot_card = ""
         for title, plist in groups:
             rows = "".join(f"<div class=r><a class=pg href='{escape(p)}' target=_blank rel=noopener>{escape(p[1:])}</a>{chips(p)}</div>" for p in plist if ok(p))
             if rows:
-                if title in ("Spurt10 sections", "Spurt scanners"):              # wide tile: the long button list is split into 2 columns, so the row is not so tall and the small tiles can sit below
+                if title == "Bot / Deals":                                       # 21 Nov: shown last, in the empty place at the bottom right (so the tall "Other" tile can be wide)
+                    bot_card = f"<section><h3>{escape(title)}</h3>{rows}</section>"
+                    continue
+                if title in ("Spurt10 sections", "Spurt scanners", "Other"):      # 21 Nov: "Other" is a wide tile too (2 columns), so the home page is not so tall              # wide tile: the long button list is split into 2 columns, so the row is not so tall and the small tiles can sit below
                     cards += f"<section class=w2><h3>{escape(title)}</h3><div class=cols>{rows}</div></section>"
                 else:
                     cards += f"<section><h3>{escape(title)}</h3>{rows}</section>"
@@ -645,6 +649,7 @@ def add_menu(app):
         oc = [c for c in orphan if ok(c)]
         if oc:
             cards += "<section><h3>OI zones / MCX / ORB / news CSVs</h3><div class=r>" + "".join(f"<a class=ch href='{escape(c)}' target=_blank rel=noopener>{escape(c[1:-4])}</a>" for c in oc) + "</div></section>"
+        cards += bot_card
         _recent = [r for r in _feed_read(40) if "read before you trade" not in r.get("title", "")][:3]
         if _recent:
             _first = escape(str(_recent[0].get("title", "")))
