@@ -196,7 +196,7 @@ class _RateLimiter:
     #   0 = the Spurt10 alerts (EARLY volume spurt + Volume spurt >= Nx)   1 = the swing signals scan (swing_page / daily_scan)   2 = everything else.
     # The priority is read from the call stack (which module is asking), so no other file needs a change. PRIORITY_ON = False -> first come, first served (the old way).
     PRIORITY_ON = True
-    _PRIO_FILES = (("spurt10_live", 0), ("swing_page", 1), ("daily_scan", 1))
+    _PRIO_FILES = (("spurt10_live", 0), ("plan_page", 0), ("swing_page", 1), ("daily_scan", 1))
 
     @classmethod
     def _priority(cls):
@@ -204,7 +204,7 @@ class _RateLimiter:
             f = sys._getframe(2)
             best = 2
             while f is not None:
-                if f.f_code.co_name == "_hold5_pass":                   # ADDED 20 Nov: the 5m list pass of the swing page is ALWAYS the last in the queue
+                if f.f_code.co_name in ("_hold5_pass", "_zc_fetch"):                   # ADDED 20 Nov: the 5m list pass of the swing page is ALWAYS the last in the queue
                     return 2
                 nm = f.f_globals.get("__name__", "")
                 for key, pr in cls._PRIO_FILES:

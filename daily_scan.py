@@ -25,6 +25,7 @@ import numpy as np
 import pandas as pd
 
 import swing_page as sw
+import daily_sell as ds
 
 log = logging.getLogger("daily_scan")
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -45,7 +46,8 @@ STATUS = os.path.join(sw.RESULTS_DIR, "daily_scan_status.json")
 HOLD_PATH = os.path.join(sw.RESULTS_DIR, "daily_hold.json")   # ADDED 21 Nov: section F of the daily scan, {day: [rows]} (last 30 days)
 _hold_new = []                                                 # rows of section F found during the running scan
 _hold_lock = threading.Lock()
-GROUPS = (("ALL IN ONE PRO", "#00e5ff"), ("CONSOL BOX", "#69f0ae"), ("GAP RETRACE", "#ffb300"), ("RS vs NIFTY", "#ce93d8"))
+SELL_GROUP = "SELL (intraday only)"                          # ADDED 21 Nov: mirror SELL signals of the daily candle - candidates for the next day's intraday SELL plan, never delivery
+GROUPS = (("ALL IN ONE PRO", "#00e5ff"), ("CONSOL BOX", "#69f0ae"), ("GAP RETRACE", "#ffb300"), ("RS vs NIFTY", "#ce93d8"), (SELL_GROUP, "#ff5252"))
 _lock = threading.RLock()
 _run_lock = threading.Lock()
 _rows = []
@@ -107,18 +109,19 @@ def _save():
         log.warning("daily scan: could not save: %s", e)
 
 
-def _add(group, sym, name, day, entry, sl, mult, extra, res):
-    if not (entry > sl > 0):
+def _add(group, sym, name, day, entry, sl, mult, extra, res, side="BUY"):
+    sell = side == "SELL"
+    if not ((sl > entry > 0) if sell else (entry > sl > 0)):
         return None
     key = "%s|%s|%s|%s" % (sym, group, name, day)
     with _lock:
         rows = _load()
         if any(r.get("key") == key for r in rows):
             return None
-        t1, t2, t6 = sw._levels(entry, sl)
-        room_r, room = sw._room_text(entry, sl, res)
-        row = {"key": key, "date": day, "group": group, "symbol": sym, "signal": name, "entry": round(entry, 2), "sl": round(sl, 2),
-               "risk_pct": round((entry - sl) / entry * 100.0, 2), "t1": round(t1, 2), "t2": round(t2, 2), "t6": round(t6, 2),
+        t1, t2, t6 = ds.sell_levels(entry, sl) if sell else sw._levels(entry, sl)
+        room_r, room = ds.room_text(entry, sl, res) if sell else sw._room_text(entry, sl, res)
+        row = {"key": key, "side": side, "date": day, "group": group, "symbol": sym, "signal": name, "entry": round(entry, 2), "sl": round(sl, 2),
+               "risk_pct": round(abs(entry - sl) / entry * 100.0, 2), "t1": round(t1, 2), "t2": round(t2, 2), "t6": round(t6, 2),
                "spurt_x": round(mult, 1) if mult else None, "extra": extra, "res": round(res, 2) if res else None, "room_r": room_r, "room": room,
                "found": _now().strftime("%Y-%m-%d %H:%M")}
         rows.append(row)
@@ -291,6 +294,51 @@ def _nifty_pct(day_txt):
 
 
 
+HTF_TOL_PCT = 0.3                                              # the candle high counts as AT a zone when it is inside it or within this % of it
+_SID = {}
+
+
+def htf_resistance(sym, d, i):
+    """Higher-timeframe test of a daily SELL (22 Nov). Returns a note text when the HIGH of daily candle i reached an unbroken RESISTANCE zone (bearish order block, within 0.3%) of the WEEKLY chart
+    (built from the daily candles, completed weeks before the signal week only). When the weekly chart cannot be built (fewer than 40 completed weeks) the fallback is the three timeframes
+    Daily, 1h AND 3h: the high must have reached a resistance zone on ALL THREE. None = not at such a zone (or data not readable): the SELL is dropped. Never raises."""
+    try:
+        import spurt_zones
+        tol = HTF_TOL_PCT / 100.0
+        hi = float(d["high"].iloc[i])
+
+        def hit(df):
+            for z in (spurt_zones.live_zones(df) or []):
+                if z.get("type") == "RESISTANCE" and z["lo"] * (1 - tol) <= hi <= z["hi"] * (1 + tol):
+                    return True
+            return False
+        sub = d.iloc[:i + 1]
+        wk = sub.resample("W-FRI").agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}).dropna()
+        sig_week = pd.Timestamp(d.index[i]).to_period("W-FRI")
+        wk = wk[[p.to_period("W-FRI") < sig_week for p in wk.index]]               # completed weeks before the signal week
+        if len(wk) >= 40:
+            return "at WEEKLY resistance zone" if hit(wk) else None
+        import live_scanner as ls
+        if not hit(sub):
+            return None
+        if not _SID:
+            _SID.update({s: sid for s, sid in sw._universe()})
+        sid = _SID.get(sym)
+        if not sid:
+            return None
+        h60 = ls.fetch_intraday_history(sid, "NSE_EQ", 60, 40)
+        if h60 is None or not len(h60):
+            return None
+        day_end = pd.Timestamp(d.index[i]).normalize() + pd.Timedelta(days=1)
+        h60 = h60[(h60.index + pd.Timedelta(hours=5, minutes=30)) < day_end]
+        if len(h60) >= 40 and hit(h60) and hit(ls.build_merged_bars(h60, 3)):
+            return "at resistance zone on Daily, 1h and 3h (weekly chart too short)"
+        return None
+    except Exception as e:
+        log.warning("daily scan: higher-timeframe zones failed for %s: %s", sym, e)
+        return None
+
+
 def scan_stock(sym, d, now_ist):
     """New rows of one stock. d = daily candles (index = date), the last row = the last closed day."""
     new = []
@@ -309,15 +357,21 @@ def scan_stock(sym, d, now_ist):
     def day(i):
         return pd.Timestamp(d.index[i]).strftime("%Y-%m-%d")
 
-    def put(group, name, i, entry, sl, mult=None, extra=""):
-        entry = float(h[i])                                          # 20 Nov: ENTRY = ABOVE the HIGH of the signal candle (a stop entry); SL unchanged
+    def put(group, name, i, entry, sl, mult=None, extra="", side="BUY"):
+        sell = side == "SELL"
+        if sell:                                                     # 22 Nov: every daily SELL must be at a higher-timeframe resistance (weekly, else Daily + 1h + 3h)
+            htf_note = htf_resistance(sym, d, i)
+            if not htf_note:
+                return
+            extra = (extra + " | " if extra else "") + htf_note
+        entry = float(l[i]) if sell else float(h[i])                 # 20 Nov: ENTRY = ABOVE the HIGH of the signal candle (a stop entry); SELL (21 Nov): BELOW the LOW; SL unchanged
         if not mult and not extra and i >= 50:                       # PULLBACK BUY / GAP RETRACE have no spurt: show the volume of the signal candle against the average of the 50 candles before it
             av = float(np.mean(v[i - 50:i]))
             if av > 0:
                 extra = "volume %.1fx of the 50-candle average" % (v[i] / av)
-        lv = sw._res_levels(d, i, entry)
+        lv = ds.sup_levels(d, i, entry) if sell else sw._res_levels(d, i, entry)
         res0 = lv[0][0] if lv else None
-        r = _add(group, sym, name, day(i), entry, sl, mult, extra, res0)
+        r = _add(group, sym, name, day(i), entry, sl, mult, extra, res0, side)
         fresh = r is not None
         if r is None:                                         # already saved: refresh its room (the room rules were improved after it was saved)
             key = "%s|%s|%s|%s" % (sym, group, name, day(i))
@@ -325,18 +379,22 @@ def scan_stock(sym, d, now_ist):
                 r = next((x for x in _load() if x.get("key") == key), None)
             if r is None:
                 return
-            if entry > sl > 0:                                # the numbers too (the day's close can change: built from the 15m candles first, then Dhan's own daily candle)
-                t1_, t2_, t6_ = sw._levels(entry, sl)
-                r.update(entry=round(entry, 2), sl=round(sl, 2), risk_pct=round((entry - sl) / entry * 100.0, 2), t1=round(t1_, 2), t2=round(t2_, 2), t6=round(t6_, 2))
+            if (sl > entry > 0) if sell else (entry > sl > 0):   # the numbers too (the day's close can change: built from the 15m candles first, then Dhan's own daily candle)
+                t1_, t2_, t6_ = ds.sell_levels(entry, sl) if sell else sw._levels(entry, sl)
+                r.update(entry=round(entry, 2), sl=round(sl, 2), risk_pct=round(abs(entry - sl) / entry * 100.0, 2), t1=round(t1_, 2), t2=round(t2_, 2), t6=round(t6_, 2))
             if extra and not r.get("extra"):                  # rows saved before the note existed get it now
                 r["extra"] = extra
-            r["room_r"], r["room"] = sw._room_text(entry, sl, res0)
+            r["room_r"], r["room"] = ds.room_text(entry, sl, res0) if sell else sw._room_text(entry, sl, res0)
             r["res"] = round(res0, 2) if res0 else None
-        r["room"] = r["room"] + sw._levels_text(lv)          # which levels were found (diagnostic: kind + price of the nearest four)
+        r["room"] = r["room"] + (ds.levels_text(lv) if sell else sw._levels_text(lv))          # which levels were found (diagnostic: kind + price of the nearest four)
         try:                                                   # diagnostic: the highest high of the last 20 candles in OUR data (to compare with the chart)
             j0 = max(0, i - 19)
-            jm = j0 + int(np.argmax(h[j0:i + 1]))
-            r["room"] += "  (data: highest high of last 20 = %.2f on %s)" % (h[jm], day(jm))
+            if sell:
+                jm = j0 + int(np.argmin(l[j0:i + 1]))
+                r["room"] += "  (data: lowest low of last 20 = %.2f on %s)" % (l[jm], day(jm))
+            else:
+                jm = j0 + int(np.argmax(h[j0:i + 1]))
+                r["room"] += "  (data: highest high of last 20 = %.2f on %s)" % (h[jm], day(jm))
         except Exception:
             pass
         try:                                                   # stock against NIFTY: the signal day's move and the 5-day move (green = stronger than Nifty)
@@ -371,6 +429,17 @@ def scan_stock(sym, d, now_ist):
             put("GAP RETRACE", "GAP UP PULLBACK BUY", i, entry, sl)
     except Exception as e:
         log.warning("daily scan: GAP RETRACE failed for %s: %s", sym, e)
+    try:                                                       # SELL side (21 Nov): intraday-only candidates
+        for i, nm, entry, sl, mx, note in ds.spurt_and_sweep_sell(d, win):
+            put(SELL_GROUP, nm, i, entry, sl, mx, note, "SELL")
+        for i, entry, sl, vx, bn in ds.box_breakdown_sell(d, win):
+            put(SELL_GROUP, "BOX BREAKDOWN SELL", i, entry, sl, vx, "box of %s candles" % bn, "SELL")
+        for i, entry, sl in ds.gap_down_retrace_sell(o, h, l, c, win):
+            put(SELL_GROUP, "GAP DOWN RETRACE SELL", i, entry, sl, None, "", "SELL")
+        for i, entry, sl, mx, txt in ds.rs_cross_down_sell(d, win, _NIFD):
+            put(SELL_GROUP, "RS CROSS DOWN + SPURT", i, entry, sl, mx, txt, "SELL")
+    except Exception as e:
+        log.warning("daily scan: SELL side failed for %s: %s", sym, e)
     try:                                                       # section F (21 Nov): volume spurt within the last 10 daily candles, holding near, SMA 9>21>60, crossed all SMAs within 20 candles (same rule as the swing page, daily candles)
         hr = sw.holding_row(sym, d, "D", [pd.Timestamp(t) for t in d.index])
         if hr:
@@ -464,12 +533,14 @@ def _notify(items):
         by[r["signal"]] = by.get(r["signal"], 0) + 1
     head = " | ".join("%s %d" % (k, v) for k, v in sorted(by.items()))
     lines = ["DAILY SCAN ALERT - %s (%s)" % (items[0]["date"], head)]
+    items = sorted(items, key=lambda r: r.get("side", "BUY") == "SELL")
     for r in items[:ALERT_MAX]:
-        lines.append("%s - %s | Entry %s SL %s (%.1f%%) | %s" % (r["signal"], r["symbol"], sw._f(r["entry"]), sw._f(r["sl"]), r["risk_pct"], r.get("room") or "n/a"))
+        lines.append("%s%s - %s | Entry %s SL %s (%.1f%%) | %s" % ("[INTRADAY] " if r.get("side") == "SELL" else "", r["signal"], r["symbol"], sw._f(r["entry"]), sw._f(r["sl"]), r["risk_pct"], r.get("room") or "n/a"))
     if len(items) > ALERT_MAX:
         lines.append("+%d more on the daily scan page" % (len(items) - ALERT_MAX))
     body = "\n".join(lines).encode("utf-8")
-    title = "DAILY SCAN ALERT - BUY (%d signals)" % len(items)
+    nsell = sum(1 for r in items if r.get("side") == "SELL")
+    title = "DAILY SCAN ALERT - BUY %d / SELL %d (intraday)" % (len(items) - nsell, nsell)
 
     def _send():
         try:
@@ -592,7 +663,7 @@ def loop():
 
 
 # ------------------------------------------------------------------------------------------------------- CSV / page
-COLS = ["date", "group", "symbol", "signal", "entry", "sl", "risk_pct", "t1", "t2", "t6", "resistance", "room_r", "volume_x", "note", "found_at", "chg_pct", "nifty_chg_pct", "chg5_pct", "nifty_chg5_pct", "signals_same_day"]
+COLS = ["date", "side", "group", "symbol", "signal", "entry", "sl", "risk_pct", "t1", "t2", "t6", "resistance", "room_r", "volume_x", "note", "found_at", "chg_pct", "nifty_chg_pct", "chg5_pct", "nifty_chg5_pct", "signals_same_day"]
 
 
 def csv_text(day=None):
@@ -606,7 +677,7 @@ def csv_text(day=None):
         _cnt.setdefault((r["symbol"], r["date"]), set()).add((r["group"], r["signal"]))
     out = [",".join(COLS)]
     for r in rows:
-        vals = [r.get("date"), r.get("group"), r.get("symbol"), r.get("signal"), r.get("entry"), r.get("sl"), r.get("risk_pct"), r.get("t1"), r.get("t2"), r.get("t6"),
+        vals = [r.get("date"), r.get("side", "BUY"), r.get("group"), r.get("symbol"), r.get("signal"), r.get("entry"), r.get("sl"), r.get("risk_pct"), r.get("t1"), r.get("t2"), r.get("t6"),
                 r.get("res"), r.get("room_r"), r.get("spurt_x"), r.get("extra"), r.get("found"), r.get("chg"), r.get("nchg"), r.get("chg5"), r.get("nchg5"), len(_cnt.get((r["symbol"], r["date"]), ()))]
         out.append(",".join("" if x is None else str(x).replace(",", " ") for x in vals))
     return "\n".join(out) + "\n"
@@ -625,7 +696,7 @@ def _table(rows):
                         r["date"][5:], tv, html.escape(sw._sym_label(r["symbol"])), html.escape(r["signal"]), sw._f(r["entry"]), sw._f(r["sl"]), r["risk_pct"], sw._f(r["t1"]), sw._f(r["t2"]),
                         "#ff7070" if blocked else "#ffb300", html.escape(r.get("room") or "-"), sw._rs_cell(r),
                         html.escape(("%sx " % r["spurt_x"] if r.get("spurt_x") else "") + (r.get("extra") or ""))))
-    return ("<table><tr><th>Day</th><th>Stock</th><th>Signal</th><th>Entry</th><th>SL (risk)</th><th>T1</th><th>T2</th><th>Room to resistance</th><th>vs Nifty</th><th>Volume / note</th></tr>"
+    return ("<table><tr><th>Day</th><th>Stock</th><th>Signal</th><th>Entry</th><th>SL (risk)</th><th>T1</th><th>T2</th><th>Room (to resistance / support)</th><th>vs Nifty</th><th>Volume / note</th></tr>"
             + "".join(body) + "</table>")
 
 
@@ -633,6 +704,8 @@ def _same_day(rows):
     """Section E: stocks with 2 or more DIFFERENT BUY signals on the same daily candle (any group). Most signals first."""
     g = {}
     for r in rows:
+        if r.get("side", "BUY") != "BUY":
+            continue
         g.setdefault(r["symbol"], []).append(r)
     out = [v for v in g.values() if len({(x["group"], x["signal"]) for x in v}) >= 2]
     out.sort(key=lambda v: (-len({(x["group"], x["signal"]) for x in v}), v[0]["symbol"]))
@@ -701,7 +774,7 @@ def page_html(day=None):
     sections = []
     for g, col in GROUPS:
         gr = [r for r in rows if r["group"] == g]
-        sections.append("<h3 style='color:%s'>%s &nbsp;<span style='color:#9fb0c0;font-weight:400;font-size:14px'>(%d)</span></h3>%s" % (col, g, len(gr), _table(gr)))
+        sections.append("<h3 style='color:%s'>%s &nbsp;<span style='color:#9fb0c0;font-weight:400;font-size:14px'>(%d)</span></h3>%s" % (col, g, len(gr), ("<p style='color:#9fb0c0;margin:0 0 6px'>INTRADAY ONLY (no delivery short selling). Entry = BELOW the low of the signal candle, SL above, T1 / T2 / T6 below. Room = free distance down to the nearest support. In the vs Nifty column a stock that is WEAKER than Nifty is the better SELL.</p>" if g == SELL_GROUP else "") + _table(gr)))
     same = _same_day(rows)
     sections.append("<h3 style='color:#ff80ab'>E. SEVERAL SIGNALS ON THE SAME DAY &nbsp;<span style='color:#9fb0c0;font-weight:400;font-size:14px'>(%d stocks)</span></h3>"
                     "<p style='color:#9fb0c0;margin:0 0 6px'>Stocks that gave 2 or more different BUY signals (any group above) on this daily candle. More signals together = more rules met.</p>%s" % (len(same), _table_same(same)))
@@ -711,10 +784,10 @@ def page_html(day=None):
     return ("<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Daily scan</title>"
             "<style>body{background:#0f1419;color:#e6edf3;font-family:Arial,sans-serif;margin:18px}table{border-collapse:collapse;width:100%%}th,td{padding:7px 10px;"
             "border-bottom:1px solid #243040;text-align:left;font-size:14px}th{color:#9fb0c0}a{color:#8ab4f8}h3{margin:22px 0 4px}</style></head><body>"
-            "<h2>DAILY SCAN - BUY signals on the daily candle of %s</h2>"
+            "<h2>DAILY SCAN - BUY and SELL signals on the daily candle of %s</h2>"
             "<p style='color:#9fb0c0'>One scan after the close (Mon-Fri %02d:%02d IST), every NSE stock except the thin ones (average traded value under Rs 1 crore a day, or price under Rs 50). ALL IN ONE PRO signals + CONSOL BOX (STRONG BUY, PULLBACK BUY) + GAP RETRACE (gap up, pullback buy) + RS vs NIFTY (the stock / Nifty line crossed up its SMA 21 with a 5x volume spurt above the 9, 21 and 60 SMA). "
             "T1 / T2 / T6 = 1R / 2R / 6R. Room to resistance = free distance to the nearest resistance in R. vs Nifty = the stock's move on the signal day and over 5 days against Nifty (green = stronger than Nifty). This page places NO order. "
-            "<a href='/swing_signals' target='_blank' rel='noopener'>Swing signals (30m / 60m)</a> &nbsp;|&nbsp; <a href='/' target='_blank' rel='noopener'>Home</a></p>"
+            "<a href='/plan' style='border:1px solid #7be08a;border-radius:6px;padding:3px 10px'>Make the INTRADAY PLAN</a> &nbsp;|&nbsp; <a href='/plan/today'>Plan of today</a> &nbsp;|&nbsp; <a href='/swing_signals' target='_blank' rel='noopener'>Swing signals (30m / 60m)</a> &nbsp;|&nbsp; <a href='/' target='_blank' rel='noopener'>Home</a></p>"
             "<p>Days: %s &nbsp; <a href='/daily_scan/run' style='border:1px solid #8ab4f8;border-radius:6px;padding:4px 12px'>Scan now (no alert)</a> &nbsp; <span style='color:#9fb0c0'>%s</span><br><span style='color:#6b7c8d;font-size:12px'>%s</span></p>"
             "<p style='color:#9fb0c0'>Download CSV: <a href='/daily_scan.csv' target='_blank' rel='noopener'><b>all days</b></a> &middot; %s</p>%s</body></html>"
             ) % (show or "-", RUN_AT[0], RUN_AT[1], nav, html.escape(sd.get("msg") or "waiting for 15:50"), html.escape(sw.UNI_NOTE or "list not built yet"), dl or "-", "".join(sections))
@@ -756,5 +829,18 @@ def register(app, admin_check=None):
         name = "daily_scan_F_%s.csv" % (datetime.strptime(d, "%Y-%m-%d").strftime("%d-%m-%Y") if d else "all_days")
         return Response(hold_csv(d), mimetype="text/csv", headers={"Content-Disposition": "attachment; filename=" + name})
 
+    def _zcsv():
+        import zone_confluence
+        d = request.args.get("date", "")
+        d = d if re.fullmatch(r"\d{4}-\d{2}-\d{2}", d) else None
+        name = "zone_alerts_%s.csv" % (datetime.strptime(d, "%Y-%m-%d").strftime("%d-%m-%Y") if d else "all_days")
+        return Response(zone_confluence.csv_text(d), mimetype="text/csv", headers={"Content-Disposition": "attachment; filename=" + name})
+
+    app.add_url_rule("/zone_alerts.csv", "zone_alerts_csv", _zcsv, methods=["GET"])
     app.add_url_rule("/daily_scan_hold.csv", "dailyscan_hold_csv", _hcsv, methods=["GET"])
     app.add_url_rule("/daily_scan/run", "dailyscan_run", _run, methods=["GET"])
+    try:                                                     # 21 Nov: the intraday plan page + watcher (plan_page.py)
+        import plan_page
+        plan_page.register(app, admin_check)
+    except Exception:
+        log.exception("plan page could not be started")
